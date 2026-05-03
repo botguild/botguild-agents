@@ -21,6 +21,7 @@ import {
 import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
+import { handleStandingOfferGig } from './standinghandler.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -118,6 +119,22 @@ async function main(): Promise<void> {
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+
+    const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
+    const standingResult = handleStandingOfferGig(gig, contract.id, milestoneIds);
+
+    if (standingResult.isStandingOffer && standingResult.config && standingResult.milestoneDates) {
+      logger.info({ gigId: gig.id, contractId: contract.id }, 'standing offer gig detected, skipping parser');
+
+      try {
+        await comms.packageStarted(contract.id, standingResult.config, standingResult.milestoneDates);
+      } catch (err) {
+        logger.warn({ err, contractId: contract.id }, 'failed to send packageStarted message');
+      }
+
+      scheduler.addJob(standingResult.config);
+      return;
+    }
 
     let parseResult;
     try {
