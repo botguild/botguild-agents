@@ -17,6 +17,7 @@ import {
   standingOffers,
   pricingCalc,
 } from './config.js';
+import { createGigParser } from './parser.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -85,6 +86,9 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // Build gig parser
+  const parser = createGigParser({ apiKey: anthropicApiKey, logger });
+
   // Build proposer
   const proposer = createProposer({
     apiKey: anthropicApiKey,
@@ -110,10 +114,35 @@ async function main(): Promise<void> {
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
-    logger.info(
-      { gigId: gig.id, contractId: contract.id },
-      'contract accepted, check runner not yet implemented',
-    );
+    const contractId = contract.id;
+
+    try {
+      const result = await parser.parse(gig, contractId, contract.milestones.map((m) => m.id));
+
+      if (result.needsClarification) {
+        await client.sendMessage(
+          contractId,
+          result.clarificationQuestion ?? 'Could you clarify the acceptance criteria?',
+          'clarification_request',
+        );
+        return;
+      }
+
+      const { plan } = result;
+
+      logger.info(
+        {
+          gigId: gig.id,
+          contractId,
+          checkType: plan.checkType,
+          criteriaCount: plan.criteriaList.length,
+          milestoneIds: plan.milestoneIds,
+        },
+        'check plan ready',
+      );
+    } catch (err) {
+      logger.error({ err, gigId: gig.id, contractId }, 'failed to parse gig into check plan');
+    }
   });
 
   webhookServer.on('milestone.accepted', async (event) => {
