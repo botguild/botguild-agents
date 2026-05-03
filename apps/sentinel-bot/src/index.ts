@@ -4,10 +4,13 @@ import {
   createGigPoller,
   createWebhookServer,
   createProposer,
+  createMessenger,
   registerBot,
   syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
+  type Gig,
+  type Contract,
 } from '@botguild/agent-core';
 import {
   botProfile,
@@ -15,6 +18,9 @@ import {
   standingOffers,
   pricingCalc,
 } from './config.js';
+import { createGigParser } from './parser.js';
+import { createScheduler } from './scheduler.js';
+import { createComms } from './comms.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -71,7 +77,7 @@ async function main(): Promise<void> {
     client,
     webhookBaseUrl,
     webhookSecret,
-    events: ['gig.created', 'gig.updated', 'contract.created', 'contract.updated', 'message.created'],
+    events: ['gig.created', 'gig.updated', 'contract.created', 'contract.updated', 'message.created', 'proposal.accepted', 'milestone.accepted', 'message.clarification_request', 'contract.status.changed'],
     logger,
   });
 
@@ -89,12 +95,80 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // Build gig parser
+  const parser = createGigParser({ apiKey: anthropicApiKey, logger });
+
+  // Build messenger
+  const messenger = createMessenger({ client, botId: effectiveBotId });
+
+  // Build comms
+  const comms = createComms(messenger);
+
+  // Build scheduler
+  const scheduler = createScheduler({ client, apiKey: anthropicApiKey, logger });
+
   // Build webhook server
   const webhookServer = createWebhookServer({
     port,
     secret: webhookSecret,
     botId: effectiveBotId,
     logger,
+  });
+
+  // Register webhook event handlers
+  webhookServer.on('proposal.accepted', async (event) => {
+    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+
+    let parseResult;
+    try {
+      parseResult = await parser.parse(gig, contract.id);
+    } catch (err) {
+      logger.error({ err, gigId: gig.id, contractId: contract.id }, 'failed to parse gig on proposal.accepted');
+      return;
+    }
+
+    const { config, needsClarification, clarificationQuestion } = parseResult;
+
+    if (needsClarification) {
+      const question = clarificationQuestion ?? 'Could you provide more details about what you would like monitored?';
+      try {
+        await messenger.send(contract.id, question, 'clarification_request');
+      } catch (err) {
+        logger.error({ err, contractId: contract.id }, 'failed to send clarification request');
+      }
+      return;
+    }
+
+    try {
+      await comms.setupConfirmed(contract.id, config);
+    } catch (err) {
+      logger.warn({ err, contractId: contract.id }, 'failed to send setupConfirmed message');
+    }
+
+    scheduler.addJob(config);
+
+    try {
+      const summary = await scheduler.runOnce(config);
+      await comms.firstCheckComplete(contract.id, config, summary);
+    } catch (err) {
+      logger.warn({ err, contractId: contract.id }, 'immediate first check failed');
+    }
+  });
+
+  webhookServer.on('milestone.accepted', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone accepted');
+  });
+
+  webhookServer.on('message.clarification_request', async (event) => {
+    logger.info({ payload: event.payload }, 'clarification request received, awaiting human response');
+  });
+
+  webhookServer.on('contract.status.changed', async (event) => {
+    const { contract } = event.payload as { contract: Contract };
+    if (contract.status === 'cancelled' || contract.status === 'completed') {
+      scheduler.removeJob(contract.id);
+      logger.info({ contractId: contract.id, status: contract.status }, 'job removed due to contract status change');
+    }
   });
 
   // Build gig poller
