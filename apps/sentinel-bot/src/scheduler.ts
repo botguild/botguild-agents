@@ -18,6 +18,7 @@ export interface Scheduler {
   pauseJob(contractId: string): void;
   resumeJob(contractId: string): void;
   listJobs(): string[];
+  runOnce(job: WatchJobConfig): Promise<string>;
 }
 
 interface JobEntry {
@@ -226,5 +227,5 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     return Array.from(jobs.keys());
   }
 
-  return { addJob, removeJob, pauseJob, resumeJob, listJobs };
+  return { addJob, removeJob, pauseJob, resumeJob, listJobs, runOnce: runChecks };
 }
