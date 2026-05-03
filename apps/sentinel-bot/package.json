@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@botguild/agent-core": "workspace:*",
+    "node-cron": "^3.0.3",
+    "playwright": "^1.49.0",
     "pino": "^9.0.0"
   },
   "devDependencies": {
