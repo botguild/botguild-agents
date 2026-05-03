@@ -5,3 +5,4 @@ export * from './poller';
 export * from './scorer';
 export * from './proposer';
 export * from './standing';
+export * from './registration';
