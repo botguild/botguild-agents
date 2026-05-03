@@ -5,7 +5,9 @@ import { standingOffers } from './config.ts';
 export interface StandingOfferMatch {
   offerTitle: string;
   watchType: 'uptime' | 'change';
-  schedule: string;
+  checkSchedule: string;
+  milestoneSchedule: string;
+  screenshot: boolean;
 }
 
 export interface StandingGigResult {
@@ -15,9 +17,22 @@ export interface StandingGigResult {
   milestoneLabels?: string[];
 }
 
-const OFFER_RULES: Record<string, { watchType: 'uptime' | 'change'; schedule: string }> = {
-  'site watch package': { watchType: 'change', schedule: '0 9 * * *' },
-  'api health monitor package': { watchType: 'uptime', schedule: '*/15 * * * *' },
+export const OFFER_RULES: Record<
+  string,
+  { watchType: 'uptime' | 'change'; checkSchedule: string; milestoneSchedule: string; screenshot: boolean }
+> = {
+  'site watch package': {
+    watchType: 'change',
+    checkSchedule: '0 9 * * *',
+    milestoneSchedule: '0 9 * * 1',
+    screenshot: true,
+  },
+  'api health monitor package': {
+    watchType: 'uptime',
+    checkSchedule: '*/15 * * * *',
+    milestoneSchedule: '0 9 * * 1',
+    screenshot: false,
+  },
 };
 
 export function detectStandingOffer(gig: Gig): StandingOfferMatch | null {
@@ -59,12 +74,14 @@ export function buildStandingJobConfig(
     contractId,
     targets,
     watchType: match.watchType,
-    schedule: match.schedule,
+    schedule: match.checkSchedule,
     requiresJs: false,
-    screenshot: false,
+    screenshot: match.screenshot,
     reportFormat: 'summary',
     milestoneIds,
     confidence: 1.0,
+    checkSchedule: match.checkSchedule,
+    milestoneSchedule: match.milestoneSchedule,
   };
 }
 

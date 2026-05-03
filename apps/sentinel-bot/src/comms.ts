@@ -22,6 +22,11 @@ export function createComms(messenger: Messenger) {
       const text = `Package started. Watching: ${job.targets.join(', ')}. Schedule: ${job.schedule}. Milestone delivery dates: ${milestoneDates.join(', ')}.`;
       return messenger.send(contractId, text, 'progress_update');
     },
+
+    weeklyMilestoneReady(contractId: string, summary: string): Promise<void> {
+      const text = `Weekly report ready: ${summary}`;
+      return messenger.send(contractId, text, 'progress_update');
+    },
   };
 }
 

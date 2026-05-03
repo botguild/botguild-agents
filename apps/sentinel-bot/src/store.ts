@@ -1,6 +1,13 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+export interface CheckRecord {
+  timestamp: string;
+  status: 'up' | 'down' | 'changed' | 'unchanged';
+  detail?: string;
+  screenshotBase64?: string;
+}
+
 export interface JobState {
   gigId: string;
   contractId: string;
@@ -11,6 +18,9 @@ export interface JobState {
   lastError?: string;
   snapshotHash?: string;
   snapshotExcerpt?: string;
+  accumulatedResults?: CheckRecord[];
+  milestoneSchedule?: string;
+  checkSchedule?: string;
 }
 
 const DATA_DIR = join(process.cwd(), 'data');
