@@ -18,6 +18,14 @@ import {
   pricingCalc,
 } from './config.js';
 import { createGigParser } from './parser.js';
+import { runHttpCheck } from './runners/http.js';
+import { runDomChecks } from './runners/dom.js';
+import { runDataQualityChecks } from './runners/data.js';
+import { runAcceptanceAudit } from './runners/audit.js';
+import { generateAndDeliverReport } from './report.js';
+import { loadStore, setJob, getJob } from './store.js';
+import type { CheckResult } from './runners/http.js';
+import type { AuditVerdict } from './runners/audit.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -52,6 +60,8 @@ const port = parseInt(process.env['PORT'] ?? '3002', 10);
 
 async function main(): Promise<void> {
   logger.info('VerifierBot starting up');
+
+  loadStore();
 
   // Register / patch bot profile; resolves the live botId
   const resolvedBotId = await registerBot({
@@ -140,8 +150,141 @@ async function main(): Promise<void> {
         },
         'check plan ready',
       );
+
+      await client.sendMessage(
+        contractId,
+        `Check plan ready. Running ${plan.checkType} checks (${plan.criteriaList.length} criteria).`,
+        'progress_update',
+      );
+
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        checkType: plan.checkType,
+        status: 'running',
+        checkResults: [],
+        updatedAt: new Date().toISOString(),
+      });
+
+      const milestone1Id = plan.milestoneIds[0];
+      if (milestone1Id) {
+        await client.deliverMilestone(contractId, milestone1Id, {
+          note: `Run Checks: starting ${plan.checkType} checks for ${plan.criteriaList.length} criteria.`,
+        });
+      }
+
+      const allCheckResults: CheckResult[] = [];
+      const allAuditVerdicts: AuditVerdict[] = [];
+      const screenshotBase64s: string[] = [];
+
+      const httpCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'http');
+      const domCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'dom');
+      const dataCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'data');
+      const claudeCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'claude');
+
+      for (const criterion of httpCriteria) {
+        const target = plan.targets[0] ?? '';
+        const checkResult = await runHttpCheck(target, criterion.id, criterion.description, {
+          logger,
+        });
+        allCheckResults.push(checkResult);
+      }
+
+      for (const target of plan.targets) {
+        if (domCriteria.length === 0) break;
+        const domChecks = domCriteria.map((c) => ({
+          criterionId: c.id,
+          description: c.description,
+          checkType: 'element-present' as const,
+          selector: c.expected,
+        }));
+        const domResult = await runDomChecks(target, domChecks, {
+          screenshotEnabled: plan.evidenceRequired.screenshot,
+          logger,
+        });
+        allCheckResults.push(...domResult.results);
+        if (domResult.screenshotBase64) {
+          screenshotBase64s.push(domResult.screenshotBase64);
+        }
+      }
+
+      if (dataCriteria.length > 0) {
+        const dataSource = plan.targets[0] ?? '';
+        const dataQualityCriteria = dataCriteria.map((c) => ({
+          criterionId: c.id,
+          description: c.description,
+          field: c.id,
+          check: 'null-rate' as const,
+        }));
+        const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, { logger });
+        allCheckResults.push(...dataResult.checkResults);
+      }
+
+      if (claudeCriteria.length > 0) {
+        const deliverableContent = plan.targets[0] ?? '';
+        const auditCriteria = claudeCriteria.map((c) => ({
+          criterionId: c.id,
+          description: c.description,
+          expected: c.expected,
+        }));
+        const auditResult = await runAcceptanceAudit(deliverableContent, auditCriteria, {
+          apiKey: anthropicApiKey,
+          logger,
+        });
+        allCheckResults.push(...auditResult.checkResults);
+        allAuditVerdicts.push(...auditResult.auditVerdicts);
+      }
+
+      const passCount = allCheckResults.filter((r) => r.verdict === 'pass').length;
+      const failCount = allCheckResults.filter((r) => r.verdict === 'fail').length;
+
+      await client.sendMessage(
+        contractId,
+        `Checks complete. ${passCount} passed, ${failCount} failed. Generating report.`,
+        'progress_update',
+      );
+
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        checkType: plan.checkType,
+        status: 'delivering',
+        checkResults: allCheckResults,
+        updatedAt: new Date().toISOString(),
+      });
+
+      const milestone2Id = plan.milestoneIds[1] ?? plan.milestoneIds[0] ?? '';
+      await generateAndDeliverReport(
+        contractId,
+        milestone2Id,
+        allCheckResults,
+        allAuditVerdicts,
+        screenshotBase64s,
+        { client, apiKey: anthropicApiKey, logger },
+      );
+
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        checkType: plan.checkType,
+        status: 'complete',
+        checkResults: allCheckResults,
+        updatedAt: new Date().toISOString(),
+      });
+
+      logger.info({ contractId, passCount, failCount }, 'verification pipeline complete');
     } catch (err) {
-      logger.error({ err, gigId: gig.id, contractId }, 'failed to parse gig into check plan');
+      logger.error({ err, gigId: gig.id, contractId }, 'verification pipeline failed');
+
+      const existing = getJob(contractId);
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        checkType: existing?.checkType ?? 'unknown',
+        status: 'error',
+        checkResults: existing?.checkResults ?? [],
+        updatedAt: new Date().toISOString(),
+      });
     }
   });
 
