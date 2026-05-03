@@ -18,6 +18,12 @@ import {
   pricingCalc,
 } from './config.js';
 import { createGigParser } from './parser.js';
+import { extractCsv } from './extractors/csv.js';
+import { extractPdf } from './extractors/pdf.js';
+import { extractApi } from './extractors/api.js';
+import { normalizeRows } from './normalizer.js';
+import { deliverOutput } from './delivery.js';
+import { loadStore, setJob, getJob } from './store.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -52,6 +58,8 @@ const port = parseInt(process.env['PORT'] ?? '3001', 10);
 
 async function main(): Promise<void> {
   logger.info('FlowBot starting up');
+
+  loadStore();
 
   // Register / patch bot profile; resolves the live botId
   const resolvedBotId = await registerBot({
@@ -114,18 +122,150 @@ async function main(): Promise<void> {
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+    const contractId = contract.id;
+    const [m1Id, m2Id, m3Id] = contract.milestones.map((m) => m.id);
+
     try {
-      const result = await parser.parse(gig, contract.id, contract.milestones.map((m) => m.id));
+      const result = await parser.parse(gig, contractId, contract.milestones.map((m) => m.id));
+
       if (result.needsClarification) {
-        await client.sendMessage(contract.id, result.clarificationQuestion ?? 'Could you clarify the job requirements?', 'clarification_request');
-      } else {
-        logger.info(
-          { gigId: gig.id, contractId: contract.id, inputType: result.config.inputType, milestoneIds: result.config.milestoneIds },
-          'job configured',
+        await client.sendMessage(
+          contractId,
+          result.clarificationQuestion ?? 'Could you clarify the job requirements?',
+          'clarification_request',
         );
+        return;
       }
+
+      const config = result.config;
+
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        inputType: config.inputType,
+        status: 'fetching',
+        currentMilestoneIndex: 0,
+        updatedAt: new Date().toISOString(),
+      });
+
+      logger.info(
+        { gigId: gig.id, contractId, inputType: config.inputType, milestoneIds: config.milestoneIds },
+        'job configured',
+      );
+
+      await client.sendMessage(
+        contractId,
+        'Job configured. Starting fetch & validation (Milestone 1).',
+        'progress_update',
+      );
+
+      // --- Extract ---
+      let extractedRows: Record<string, unknown>[];
+      let extractSummary: string;
+
+      if (config.inputType === 'csv' || config.inputType === 'sheet') {
+        const csvResult = await extractCsv(config.inputSource, { logger });
+        extractedRows = csvResult.rows;
+        extractSummary = csvResult.summary;
+      } else if (config.inputType === 'pdf') {
+        const pdfResult = await extractPdf(config.inputSource, config.targetSchema, {
+          apiKey: anthropicApiKey,
+          logger,
+        });
+        extractedRows = pdfResult.rows;
+        extractSummary = pdfResult.summary;
+      } else {
+        const apiResult = await extractApi({
+          url: config.inputSource,
+          paginationStyle: 'offset',
+          logger,
+        });
+        extractedRows = apiResult.records;
+        extractSummary = apiResult.summary;
+      }
+
+      await client.sendMessage(
+        contractId,
+        `Fetch complete. ${extractSummary} Starting transform (Milestone 2).`,
+        'progress_update',
+      );
+
+      // Deliver Milestone 1 — fetch + validate
+      if (m1Id) {
+        await client.deliverMilestone(contractId, m1Id, { note: extractSummary });
+      }
+
+      setJob(contractId, {
+        ...getJob(contractId)!,
+        status: 'transforming',
+        currentMilestoneIndex: 1,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // --- Normalize ---
+      const normalizeStats = normalizeRows(extractedRows, config.transformRules);
+
+      await client.sendMessage(
+        contractId,
+        `Transform complete. ${normalizeStats.summary} Preparing delivery (Milestone 3).`,
+        'progress_update',
+      );
+
+      // Deliver Milestone 2 — transform
+      if (m2Id) {
+        await client.deliverMilestone(contractId, m2Id, { note: normalizeStats.summary });
+      }
+
+      setJob(contractId, {
+        ...getJob(contractId)!,
+        status: 'delivering',
+        currentMilestoneIndex: 2,
+        updatedAt: new Date().toISOString(),
+      });
+
+      // --- Deliver output (Milestone 3) ---
+      const deliveryResult = await deliverOutput(
+        contractId,
+        m3Id ?? '',
+        normalizeStats.rows,
+        config,
+        normalizeStats,
+        { client, apiKey: anthropicApiKey, logger },
+      );
+
+      if (!deliveryResult.delivered) {
+        await client.sendMessage(
+          contractId,
+          'The transform produced zero output rows. Could you clarify the expected data or check the source? I can re-run once the issue is identified.',
+          'clarification_request',
+        );
+
+        setJob(contractId, {
+          ...getJob(contractId)!,
+          status: 'error',
+          updatedAt: new Date().toISOString(),
+        });
+        return;
+      }
+
+      setJob(contractId, {
+        ...getJob(contractId)!,
+        status: 'complete',
+        updatedAt: new Date().toISOString(),
+      });
+
+      logger.info({ contractId, gigId: gig.id }, 'ETL pipeline complete');
     } catch (err) {
-      logger.error({ err, gigId: gig.id, contractId: contract.id }, 'failed to parse gig into job config');
+      logger.error({ err, gigId: gig.id, contractId }, 'ETL pipeline failed');
+
+      const existing = getJob(contractId);
+      if (existing) {
+        setJob(contractId, {
+          ...existing,
+          status: 'error',
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
   });
 
@@ -137,7 +277,7 @@ async function main(): Promise<void> {
     const { contract } = event.payload as { contract: Contract };
     logger.info(
       { contractId: contract.id, status: contract.status },
-      'contract status changed'
+      'contract status changed',
     );
   });
 
