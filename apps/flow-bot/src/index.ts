@@ -17,6 +17,7 @@ import {
   standingOffers,
   pricingCalc,
 } from './config.js';
+import { createGigParser } from './parser.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -85,6 +86,9 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // Build gig parser
+  const parser = createGigParser({ apiKey: anthropicApiKey, logger });
+
   // Build proposer
   const proposer = createProposer({
     apiKey: anthropicApiKey,
@@ -110,10 +114,19 @@ async function main(): Promise<void> {
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
-    logger.info(
-      { gigId: gig.id, contractId: contract.id },
-      'contract accepted, parser not yet implemented'
-    );
+    try {
+      const result = await parser.parse(gig, contract.id, contract.milestones.map((m) => m.id));
+      if (result.needsClarification) {
+        await client.sendMessage(contract.id, result.clarificationQuestion ?? 'Could you clarify the job requirements?', 'clarification_request');
+      } else {
+        logger.info(
+          { gigId: gig.id, contractId: contract.id, inputType: result.config.inputType, milestoneIds: result.config.milestoneIds },
+          'job configured',
+        );
+      }
+    } catch (err) {
+      logger.error({ err, gigId: gig.id, contractId: contract.id }, 'failed to parse gig into job config');
+    }
   });
 
   webhookServer.on('milestone.accepted', async (event) => {
