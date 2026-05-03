@@ -4,6 +4,8 @@ import type { AgentClient } from '@botguild/agent-core';
 import type { WatchJobConfig } from './parser.ts';
 import { checkUptime } from './runners/uptime.ts';
 import { checkDiff } from './runners/diff.ts';
+import { getJob, setJob } from './store.ts';
+import type { CheckRecord } from './store.ts';
 import type { Logger } from 'pino';
 
 export interface SchedulerConfig {
@@ -23,6 +25,7 @@ export interface Scheduler {
 
 interface JobEntry {
   task: cron.ScheduledTask;
+  milestoneTask?: cron.ScheduledTask;
   job: WatchJobConfig;
   milestoneIndex: number;
 }
@@ -96,12 +99,178 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     return textBlock?.text ?? checkSummary;
   }
 
+  async function generateWeeklySummary(
+    job: WatchJobConfig,
+    records: CheckRecord[],
+  ): Promise<string> {
+    const weekOf = new Date().toISOString().slice(0, 10);
+    const checkCount = records.length;
+
+    if (job.watchType === 'uptime') {
+      const upCount = records.filter((r) => r.status === 'up').length;
+      const incidentCount = records.filter((r) => r.status === 'down').length;
+      const uptimePercent =
+        checkCount > 0 ? ((upCount / checkCount) * 100).toFixed(1) : '0.0';
+      return `Week of ${weekOf}: ${uptimePercent}% uptime. ${incidentCount} incidents. Total checks: ${checkCount}.`;
+    }
+
+    const changeCount = records.filter((r) => r.status === 'changed').length;
+    const diffSummaries = records
+      .filter((r) => r.status === 'changed' && r.detail)
+      .map((r) => r.detail as string);
+
+    const changesText =
+      diffSummaries.length > 0 ? diffSummaries.join(' | ') : 'No changes detected.';
+
+    return `Week of ${weekOf}: ${changeCount} changes detected across ${checkCount} checks. ${changesText}`;
+  }
+
   async function attemptDelivery(
     contractId: string,
     milestoneId: string,
     reportSummary: string,
   ): Promise<void> {
     await client.deliverMilestone(contractId, milestoneId, { note: reportSummary });
+  }
+
+  function buildAccumulatingCheckHandler(contractId: string): () => Promise<void> {
+    return async () => {
+      const entry = jobs.get(contractId);
+      if (!entry) return;
+
+      const { job } = entry;
+
+      let checkSummary: string;
+      try {
+        checkSummary = await runChecks(job);
+      } catch (err) {
+        logger.error({ err, contractId }, 'check failed during scheduled run');
+
+        const state = getJob(contractId);
+        if (state) {
+          const record: CheckRecord = {
+            timestamp: new Date().toISOString(),
+            status: 'down',
+            detail: String(err),
+          };
+          setJob(contractId, {
+            ...state,
+            accumulatedResults: [...(state.accumulatedResults ?? []), record],
+          });
+        }
+        return;
+      }
+
+      const isUptime = job.watchType === 'uptime';
+      const isDown = checkSummary.includes(': down');
+      const isChanged = checkSummary.includes(': changed');
+
+      const record: CheckRecord = {
+        timestamp: new Date().toISOString(),
+        status: isUptime
+          ? isDown
+            ? 'down'
+            : 'up'
+          : isChanged
+            ? 'changed'
+            : 'unchanged',
+        detail: checkSummary,
+      };
+
+      const state = getJob(contractId);
+      if (state) {
+        setJob(contractId, {
+          ...state,
+          accumulatedResults: [...(state.accumulatedResults ?? []), record],
+        });
+      }
+
+      if (isChanged || isDown) {
+        try {
+          await client.sendMessage(contractId, checkSummary);
+        } catch (err) {
+          logger.warn({ err, contractId }, 'alert thread message failed');
+        }
+      }
+
+      logger.info({ contractId, status: record.status }, 'check recorded');
+    };
+  }
+
+  function buildMilestoneDeliveryHandler(contractId: string): () => Promise<void> {
+    return async () => {
+      const entry = jobs.get(contractId);
+      if (!entry) return;
+
+      const { job } = entry;
+
+      if (entry.milestoneIndex >= job.milestoneIds.length) {
+        entry.milestoneTask?.stop();
+        entry.task.stop();
+        logger.info({ contractId }, 'all milestones delivered, cron jobs stopped');
+        return;
+      }
+
+      const state = getJob(contractId);
+      const records = state?.accumulatedResults ?? [];
+
+      const weeklySummary = await generateWeeklySummary(job, records);
+
+      let reportSummary: string;
+      try {
+        reportSummary = await generateReport(weeklySummary);
+      } catch (err) {
+        logger.error({ err, contractId }, 'weekly report generation failed');
+        reportSummary = weeklySummary;
+      }
+
+      try {
+        await client.sendMessage(contractId, `Weekly report ready: ${reportSummary}`);
+      } catch (err) {
+        logger.warn({ err, contractId }, 'weekly milestone message failed');
+      }
+
+      const milestoneId = job.milestoneIds[entry.milestoneIndex];
+
+      try {
+        await attemptDelivery(contractId, milestoneId, reportSummary);
+        entry.milestoneIndex++;
+        logger.info({ contractId, milestoneId, nextIndex: entry.milestoneIndex }, 'weekly milestone delivered');
+
+        if (state) {
+          setJob(contractId, { ...state, accumulatedResults: [] });
+        }
+
+        if (entry.milestoneIndex >= job.milestoneIds.length) {
+          entry.milestoneTask?.stop();
+          entry.task.stop();
+          logger.info({ contractId }, 'all milestones delivered, cron jobs stopped');
+        }
+      } catch (firstErr) {
+        logger.warn({ err: firstErr, contractId, milestoneId }, 'weekly milestone delivery failed, retrying in 60s');
+
+        await sleep(60_000);
+
+        try {
+          await attemptDelivery(contractId, milestoneId, reportSummary);
+          entry.milestoneIndex++;
+          logger.info({ contractId, milestoneId }, 'weekly milestone delivered on retry');
+
+          if (state) {
+            setJob(contractId, { ...state, accumulatedResults: [] });
+          }
+
+          if (entry.milestoneIndex >= job.milestoneIds.length) {
+            entry.milestoneTask?.stop();
+            entry.task.stop();
+            logger.info({ contractId }, 'all milestones delivered, cron jobs stopped');
+          }
+        } catch (secondErr) {
+          logger.fatal({ err: secondErr, contractId, milestoneId }, 'weekly milestone delivery failed after retry, pausing job');
+          pauseJob(contractId);
+        }
+      }
+    };
   }
 
   function buildHandler(contractId: string): () => Promise<void> {
@@ -173,27 +342,49 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
   }
 
   function addJob(job: WatchJobConfig): void {
-    if (!cron.validate(job.schedule)) {
-      logger.error({ contractId: job.contractId, schedule: job.schedule }, 'invalid cron expression, skipping job');
+    const isDualSchedule = !!(job.checkSchedule && job.milestoneSchedule);
+
+    const checkExpr = isDualSchedule ? job.checkSchedule! : job.schedule;
+    const milestoneExpr = isDualSchedule ? job.milestoneSchedule! : undefined;
+
+    if (!cron.validate(checkExpr)) {
+      logger.error({ contractId: job.contractId, schedule: checkExpr }, 'invalid cron expression, skipping job');
+      return;
+    }
+
+    if (milestoneExpr && !cron.validate(milestoneExpr)) {
+      logger.error({ contractId: job.contractId, milestoneSchedule: milestoneExpr }, 'invalid milestone cron expression, skipping job');
       return;
     }
 
     if (jobs.has(job.contractId)) {
       const existing = jobs.get(job.contractId)!;
       existing.task.stop();
+      existing.milestoneTask?.stop();
     }
 
     const milestoneIndex = jobs.get(job.contractId)?.milestoneIndex ?? 0;
-    const task = cron.schedule(job.schedule, buildHandler(job.contractId));
 
-    jobs.set(job.contractId, { task, job, milestoneIndex });
-    logger.info({ contractId: job.contractId, schedule: job.schedule }, 'job scheduled');
+    if (isDualSchedule) {
+      const task = cron.schedule(checkExpr, buildAccumulatingCheckHandler(job.contractId));
+      const milestoneTask = cron.schedule(milestoneExpr!, buildMilestoneDeliveryHandler(job.contractId));
+      jobs.set(job.contractId, { task, milestoneTask, job, milestoneIndex });
+      logger.info(
+        { contractId: job.contractId, checkSchedule: checkExpr, milestoneSchedule: milestoneExpr },
+        'dual-schedule job registered',
+      );
+    } else {
+      const task = cron.schedule(checkExpr, buildHandler(job.contractId));
+      jobs.set(job.contractId, { task, job, milestoneIndex });
+      logger.info({ contractId: job.contractId, schedule: checkExpr }, 'job scheduled');
+    }
   }
 
   function removeJob(contractId: string): void {
     const entry = jobs.get(contractId);
     if (!entry) return;
     entry.task.stop();
+    entry.milestoneTask?.stop();
     jobs.delete(contractId);
     logger.info({ contractId }, 'job removed');
   }
@@ -202,6 +393,7 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     const entry = jobs.get(contractId);
     if (!entry) return;
     entry.task.stop();
+    entry.milestoneTask?.stop();
     logger.info({ contractId }, 'job paused');
   }
 
@@ -210,15 +402,27 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     if (!entry) return;
 
     const { job } = entry;
+    const isDualSchedule = !!(job.checkSchedule && job.milestoneSchedule);
+    const checkExpr = isDualSchedule ? job.checkSchedule! : job.schedule;
+    const milestoneExpr = isDualSchedule ? job.milestoneSchedule! : undefined;
 
-    if (!cron.validate(job.schedule)) {
-      logger.error({ contractId, schedule: job.schedule }, 'invalid cron expression on resume, skipping');
+    if (!cron.validate(checkExpr)) {
+      logger.error({ contractId, schedule: checkExpr }, 'invalid cron expression on resume, skipping');
       return;
     }
 
     entry.task.stop();
-    const task = cron.schedule(job.schedule, buildHandler(contractId));
-    entry.task = task;
+    entry.milestoneTask?.stop();
+
+    if (isDualSchedule) {
+      const task = cron.schedule(checkExpr, buildAccumulatingCheckHandler(contractId));
+      const milestoneTask = cron.schedule(milestoneExpr!, buildMilestoneDeliveryHandler(contractId));
+      entry.task = task;
+      entry.milestoneTask = milestoneTask;
+    } else {
+      const task = cron.schedule(checkExpr, buildHandler(contractId));
+      entry.task = task;
+    }
 
     logger.info({ contractId }, 'job resumed');
   }

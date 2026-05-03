@@ -18,6 +18,8 @@ export interface WatchJobConfig {
   reportFormat: ReportFormat;
   milestoneIds: string[];
   confidence: number;
+  checkSchedule?: string;
+  milestoneSchedule?: string;
 }
 
 export interface ParseResult {
