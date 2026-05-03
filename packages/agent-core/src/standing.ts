@@ -34,12 +34,16 @@ export async function syncStandingOffers(config: StandingSyncConfig): Promise<Sy
     } else if (
       local.price !== remote.price ||
       local.description !== remote.description ||
-      local.slaTerms !== remote.slaTerms
+      local.slaTerms !== remote.slaTerms ||
+      local.pricingModel !== remote.pricingModel ||
+      local.milestoneCount !== remote.milestoneCount
     ) {
       await client.updateStandingOffer(remote.id!, {
         price: local.price,
         description: local.description,
         slaTerms: local.slaTerms,
+        pricingModel: local.pricingModel,
+        milestoneCount: local.milestoneCount,
       });
       updated++;
     } else {

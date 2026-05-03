@@ -48,7 +48,8 @@ export interface StandingOffer {
   title: string;
   description: string;
   price: number;
-  pricingModel: 'flat-monthly' | 'per-use';
+  pricingModel: 'fixed' | 'milestone';
+  milestoneCount?: number;
   slaTerms?: string;
 }
 
