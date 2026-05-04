@@ -1,4 +1,3 @@
-import pino from 'pino';
 import {
   AgentClient,
   createGigPoller,
@@ -9,6 +8,8 @@ import {
   syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
+  createLogger,
+  withContext,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -27,7 +28,7 @@ import { handleStandingOfferGig } from './standinghandler.js';
 // Logger
 // ---------------------------------------------------------------------------
 
-const logger = pino({ name: 'sentinel-bot' });
+let logger = createLogger({ service: 'sentinel-bot' });
 
 // ---------------------------------------------------------------------------
 // Env vars
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   });
 
   const effectiveBotId = botId || resolvedBotId;
+  logger = createLogger({ service: 'sentinel-bot', botId: effectiveBotId });
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -119,17 +121,18 @@ async function main(): Promise<void> {
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+    const log = withContext(logger, { gigId: gig.id, contractId: contract.id });
 
     const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
     const standingResult = handleStandingOfferGig(gig, contract.id, milestoneIds);
 
     if (standingResult.isStandingOffer && standingResult.config && standingResult.milestoneDates) {
-      logger.info({ gigId: gig.id, contractId: contract.id }, 'standing offer gig detected, skipping parser');
+      log.info('standing offer gig detected, skipping parser');
 
       try {
         await comms.packageStarted(contract.id, standingResult.config, standingResult.milestoneDates);
       } catch (err) {
-        logger.warn({ err, contractId: contract.id }, 'failed to send packageStarted message');
+        log.warn({ err }, 'failed to send packageStarted message');
       }
 
       scheduler.addJob(standingResult.config);
@@ -137,10 +140,11 @@ async function main(): Promise<void> {
     }
 
     let parseResult;
+    const parseStart = Date.now();
     try {
       parseResult = await parser.parse(gig, contract.id);
     } catch (err) {
-      logger.error({ err, gigId: gig.id, contractId: contract.id }, 'failed to parse gig on proposal.accepted');
+      log.error({ err, durationMs: Date.now() - parseStart }, 'failed to parse gig on proposal.accepted');
       return;
     }
 
@@ -151,7 +155,7 @@ async function main(): Promise<void> {
       try {
         await messenger.send(contract.id, question, 'clarification_request');
       } catch (err) {
-        logger.error({ err, contractId: contract.id }, 'failed to send clarification request');
+        log.error({ err }, 'failed to send clarification request');
       }
       return;
     }
@@ -159,16 +163,18 @@ async function main(): Promise<void> {
     try {
       await comms.setupConfirmed(contract.id, config);
     } catch (err) {
-      logger.warn({ err, contractId: contract.id }, 'failed to send setupConfirmed message');
+      log.warn({ err }, 'failed to send setupConfirmed message');
     }
 
     scheduler.addJob(config);
 
+    const firstCheckStart = Date.now();
     try {
       const summary = await scheduler.runOnce(config);
+      log.info({ durationMs: Date.now() - firstCheckStart }, 'first check complete');
       await comms.firstCheckComplete(contract.id, config, summary);
     } catch (err) {
-      logger.warn({ err, contractId: contract.id }, 'immediate first check failed');
+      log.warn({ err, durationMs: Date.now() - firstCheckStart }, 'immediate first check failed');
     }
   });
 

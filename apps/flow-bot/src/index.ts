@@ -1,4 +1,3 @@
-import pino from 'pino';
 import {
   AgentClient,
   createGigPoller,
@@ -8,6 +7,8 @@ import {
   syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
+  createLogger,
+  withContext,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -30,7 +31,7 @@ import { handleFlowStandingGig } from './standinghandler.js';
 // Logger
 // ---------------------------------------------------------------------------
 
-const logger = pino({ name: 'flow-bot' });
+let logger = createLogger({ service: 'flow-bot' });
 
 // ---------------------------------------------------------------------------
 // Env vars
@@ -71,6 +72,7 @@ async function main(): Promise<void> {
   });
 
   const effectiveBotId = botId || resolvedBotId;
+  logger = createLogger({ service: 'flow-bot', botId: effectiveBotId });
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -124,6 +126,7 @@ async function main(): Promise<void> {
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
     const contractId = contract.id;
+    const log = withContext(logger, { gigId: gig.id, contractId });
     const milestoneIds = contract.milestones.map((m) => m.id);
     const [m1Id, m2Id, m3Id] = milestoneIds;
 
@@ -149,21 +152,21 @@ async function main(): Promise<void> {
         });
 
         if (standingConfig.inputType !== 'pdf') {
-          logger.info(
-            { gigId: gig.id, contractId, inputType: standingConfig.inputType },
+          log.info(
+            { inputType: standingConfig.inputType },
             'data-sync standing offer: scheduled sync pipeline will run weekly; executing first milestone ETL run now',
           );
 
           let extractedRows: Record<string, unknown>[];
 
           if (standingConfig.inputType === 'csv' || standingConfig.inputType === 'sheet') {
-            const csvResult = await extractCsv(standingConfig.inputSource, { logger });
+            const csvResult = await extractCsv(standingConfig.inputSource, { logger: log });
             extractedRows = csvResult.rows;
           } else {
             const apiResult = await extractApi({
               url: standingConfig.inputSource,
               paginationStyle: 'offset',
-              logger,
+              logger: log,
             });
             extractedRows = apiResult.records;
           }
@@ -171,13 +174,14 @@ async function main(): Promise<void> {
           const normalizeStats = normalizeRows(extractedRows, standingConfig.transformRules);
           const firstMilestoneId = standingConfig.milestoneIds[0];
 
+          const deliverStart = Date.now();
           await deliverOutput(
             contractId,
             firstMilestoneId ?? '',
             normalizeStats.rows,
             standingConfig,
             normalizeStats,
-            { client, apiKey: anthropicApiKey, logger },
+            { client, apiKey: anthropicApiKey, logger: log },
           );
 
           setJob(contractId, {
@@ -186,23 +190,24 @@ async function main(): Promise<void> {
             updatedAt: new Date().toISOString(),
           });
 
-          logger.info({ contractId, gigId: gig.id }, 'data-sync standing offer: first milestone ETL run complete');
+          log.info({ durationMs: Date.now() - deliverStart }, 'data-sync standing offer: first milestone ETL run complete');
         } else {
           const pdfResult = await extractPdf(standingConfig.inputSource, standingConfig.targetSchema, {
             apiKey: anthropicApiKey,
-            logger,
+            logger: log,
           });
 
           const normalizeStats = normalizeRows(pdfResult.rows, standingConfig.transformRules);
           const firstMilestoneId = standingConfig.milestoneIds[0];
 
+          const deliverStart = Date.now();
           await deliverOutput(
             contractId,
             firstMilestoneId ?? '',
             normalizeStats.rows,
             standingConfig,
             normalizeStats,
-            { client, apiKey: anthropicApiKey, logger },
+            { client, apiKey: anthropicApiKey, logger: log },
           );
 
           setJob(contractId, {
@@ -211,7 +216,7 @@ async function main(): Promise<void> {
             updatedAt: new Date().toISOString(),
           });
 
-          logger.info({ contractId, gigId: gig.id }, 'invoice-batch standing offer: extraction pipeline complete');
+          log.info({ durationMs: Date.now() - deliverStart }, 'invoice-batch standing offer: extraction pipeline complete');
         }
 
         return;
@@ -239,8 +244,8 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
 
-      logger.info(
-        { gigId: gig.id, contractId, inputType: config.inputType, milestoneIds: config.milestoneIds },
+      log.info(
+        { inputType: config.inputType, milestoneIds: config.milestoneIds },
         'job configured',
       );
 
@@ -254,14 +259,15 @@ async function main(): Promise<void> {
       let extractedRows: Record<string, unknown>[];
       let extractSummary: string;
 
+      const extractStart = Date.now();
       if (config.inputType === 'csv' || config.inputType === 'sheet') {
-        const csvResult = await extractCsv(config.inputSource, { logger });
+        const csvResult = await extractCsv(config.inputSource, { logger: log });
         extractedRows = csvResult.rows;
         extractSummary = csvResult.summary;
       } else if (config.inputType === 'pdf') {
         const pdfResult = await extractPdf(config.inputSource, config.targetSchema, {
           apiKey: anthropicApiKey,
-          logger,
+          logger: log,
         });
         extractedRows = pdfResult.rows;
         extractSummary = pdfResult.summary;
@@ -269,11 +275,12 @@ async function main(): Promise<void> {
         const apiResult = await extractApi({
           url: config.inputSource,
           paginationStyle: 'offset',
-          logger,
+          logger: log,
         });
         extractedRows = apiResult.records;
         extractSummary = apiResult.summary;
       }
+      log.info({ durationMs: Date.now() - extractStart }, 'extract phase complete');
 
       await client.sendMessage(
         contractId,
@@ -286,7 +293,6 @@ async function main(): Promise<void> {
         await client.deliverMilestone(contractId, m1Id, { note: extractSummary });
       }
 
-
       setJob(contractId, {
         ...getJob(contractId)!,
         status: 'transforming',
@@ -295,7 +301,9 @@ async function main(): Promise<void> {
       });
 
       // --- Normalize ---
+      const normalizeStart = Date.now();
       const normalizeStats = normalizeRows(extractedRows, config.transformRules);
+      log.info({ durationMs: Date.now() - normalizeStart }, 'transform phase complete');
 
       await client.sendMessage(
         contractId,
@@ -316,13 +324,14 @@ async function main(): Promise<void> {
       });
 
       // --- Deliver output (Milestone 3) ---
+      const deliverStart = Date.now();
       const deliveryResult = await deliverOutput(
         contractId,
         m3Id ?? '',
         normalizeStats.rows,
         config,
         normalizeStats,
-        { client, apiKey: anthropicApiKey, logger },
+        { client, apiKey: anthropicApiKey, logger: log },
       );
 
       if (!deliveryResult.delivered) {
@@ -346,9 +355,9 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
 
-      logger.info({ contractId, gigId: gig.id }, 'ETL pipeline complete');
+      log.info({ durationMs: Date.now() - deliverStart }, 'ETL pipeline complete');
     } catch (err) {
-      logger.error({ err, gigId: gig.id, contractId }, 'ETL pipeline failed');
+      log.error({ err }, 'ETL pipeline failed');
 
       const existing = getJob(contractId);
       if (existing) {
