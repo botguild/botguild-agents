@@ -1,4 +1,3 @@
-import pino from 'pino';
 import cron from 'node-cron';
 import {
   AgentClient,
@@ -9,6 +8,8 @@ import {
   syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
+  createLogger,
+  withContext,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -34,7 +35,7 @@ import type { ScheduledTask } from 'node-cron';
 // Logger
 // ---------------------------------------------------------------------------
 
-const logger = pino({ name: 'verifier-bot' });
+let logger = createLogger({ service: 'verifier-bot' });
 
 // ---------------------------------------------------------------------------
 // Nightly cron job registry
@@ -81,6 +82,7 @@ async function main(): Promise<void> {
   });
 
   const effectiveBotId = botId || resolvedBotId;
+  logger = createLogger({ service: 'verifier-bot', botId: effectiveBotId });
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -134,6 +136,7 @@ async function main(): Promise<void> {
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
     const contractId = contract.id;
+    const log = withContext(logger, { gigId: gig.id, contractId });
     const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
 
     // --- Standing offer detection ---
@@ -142,8 +145,8 @@ async function main(): Promise<void> {
     if (standingResult.isStandingOffer && standingResult.plan && standingResult.standingType) {
       const { plan, standingType } = standingResult;
 
-      logger.info(
-        { gigId: gig.id, contractId, standingType, criteriaCount: plan.criteriaList.length },
+      log.info(
+        { standingType, criteriaCount: plan.criteriaList.length },
         'standing offer gig detected',
       );
 
@@ -166,15 +169,16 @@ async function main(): Promise<void> {
         const rule = VERIFIER_OFFER_RULES['nightly smoke test package'];
 
         const checkTask = cron.schedule(rule.checkSchedule!, async () => {
-          logger.info({ contractId }, 'nightly smoke check firing');
+          log.info('nightly smoke check firing');
           const nightlyResults: CheckResult[] = [];
+          const smokeStart = Date.now();
           for (const criterion of plan.criteriaList) {
             const target = plan.targets[0] ?? '';
             try {
-              const checkResult = await runHttpCheck(target, criterion.id, criterion.description, { logger });
+              const checkResult = await runHttpCheck(target, criterion.id, criterion.description, { logger: log });
               nightlyResults.push(checkResult);
             } catch (err) {
-              logger.error({ err, contractId, criterionId: criterion.id }, 'nightly http check failed');
+              log.error({ err, criterionId: criterion.id }, 'nightly http check failed');
             }
           }
 
@@ -189,6 +193,7 @@ async function main(): Promise<void> {
           });
 
           const failCount = nightlyResults.filter((r) => r.verdict === 'fail').length;
+          log.info({ durationMs: Date.now() - smokeStart, failCount, total: nightlyResults.length }, 'nightly smoke run complete');
           if (failCount > 0) {
             await client.sendMessage(
               contractId,
@@ -199,13 +204,14 @@ async function main(): Promise<void> {
         });
 
         const milestoneTask = cron.schedule(rule.milestoneSchedule!, async () => {
-          logger.info({ contractId }, 'weekly milestone report firing');
+          log.info('weekly milestone report firing');
           const existing = getJob(contractId);
           const accumulatedResults = existing?.checkResults ?? [];
           const nextMilestoneId = plan.milestoneIds.find((id) => {
             return id;
           }) ?? plan.milestoneIds[0] ?? '';
 
+          const reportStart = Date.now();
           try {
             await generateAndDeliverReport(
               contractId,
@@ -213,15 +219,16 @@ async function main(): Promise<void> {
               accumulatedResults,
               [],
               [],
-              { client, apiKey: anthropicApiKey, logger },
+              { client, apiKey: anthropicApiKey, logger: log },
             );
+            log.info({ durationMs: Date.now() - reportStart }, 'weekly milestone report delivered');
           } catch (err) {
-            logger.error({ err, contractId }, 'weekly milestone report delivery failed');
+            log.error({ err, durationMs: Date.now() - reportStart }, 'weekly milestone report delivery failed');
           }
         });
 
         nightlyJobs.set(contractId, { checkTask, milestoneTask });
-        logger.info({ contractId }, 'nightly smoke cron jobs registered');
+        log.info('nightly smoke cron jobs registered');
       } else if (standingType === 'acceptance-review') {
         const allCheckResults: CheckResult[] = [];
         const allAuditVerdicts: AuditVerdict[] = [];
@@ -234,15 +241,17 @@ async function main(): Promise<void> {
             description: c.description,
             expected: c.expected,
           }));
+          const auditStart = Date.now();
           try {
             const auditResult = await runAcceptanceAudit(deliverableContent, auditCriteria, {
               apiKey: anthropicApiKey,
-              logger,
+              logger: log,
             });
             allCheckResults.push(...auditResult.checkResults);
             allAuditVerdicts.push(...auditResult.auditVerdicts);
+            log.info({ durationMs: Date.now() - auditStart }, 'acceptance audit complete');
           } catch (err) {
-            logger.error({ err, contractId }, 'acceptance audit failed');
+            log.error({ err, durationMs: Date.now() - auditStart }, 'acceptance audit failed');
           }
         }
 
@@ -265,13 +274,14 @@ async function main(): Promise<void> {
         });
 
         const milestoneId = plan.milestoneIds[0] ?? '';
+        const reportStart = Date.now();
         await generateAndDeliverReport(
           contractId,
           milestoneId,
           allCheckResults,
           allAuditVerdicts,
           [],
-          { client, apiKey: anthropicApiKey, logger },
+          { client, apiKey: anthropicApiKey, logger: log },
         );
 
         setJob(contractId, {
@@ -283,7 +293,7 @@ async function main(): Promise<void> {
           updatedAt: new Date().toISOString(),
         });
 
-        logger.info({ contractId, passCount, failCount }, 'acceptance review pipeline complete');
+        log.info({ passCount, failCount, durationMs: Date.now() - reportStart }, 'acceptance review pipeline complete');
       }
 
       return;
@@ -303,10 +313,8 @@ async function main(): Promise<void> {
 
       const { plan } = result;
 
-      logger.info(
+      log.info(
         {
-          gigId: gig.id,
-          contractId,
           checkType: plan.checkType,
           criteriaCount: plan.criteriaList.length,
           milestoneIds: plan.milestoneIds,
@@ -345,10 +353,11 @@ async function main(): Promise<void> {
       const dataCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'data');
       const claudeCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'claude');
 
+      const checksStart = Date.now();
       for (const criterion of httpCriteria) {
         const target = plan.targets[0] ?? '';
         const checkResult = await runHttpCheck(target, criterion.id, criterion.description, {
-          logger,
+          logger: log,
         });
         allCheckResults.push(checkResult);
       }
@@ -363,7 +372,7 @@ async function main(): Promise<void> {
         }));
         const domResult = await runDomChecks(target, domChecks, {
           screenshotEnabled: plan.evidenceRequired.screenshot,
-          logger,
+          logger: log,
         });
         allCheckResults.push(...domResult.results);
         if (domResult.screenshotBase64) {
@@ -379,7 +388,7 @@ async function main(): Promise<void> {
           field: c.id,
           check: 'null-rate' as const,
         }));
-        const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, { logger });
+        const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, { logger: log });
         allCheckResults.push(...dataResult.checkResults);
       }
 
@@ -392,7 +401,7 @@ async function main(): Promise<void> {
         }));
         const auditResult = await runAcceptanceAudit(deliverableContent, auditCriteria, {
           apiKey: anthropicApiKey,
-          logger,
+          logger: log,
         });
         allCheckResults.push(...auditResult.checkResults);
         allAuditVerdicts.push(...auditResult.auditVerdicts);
@@ -400,6 +409,7 @@ async function main(): Promise<void> {
 
       const passCount = allCheckResults.filter((r) => r.verdict === 'pass').length;
       const failCount = allCheckResults.filter((r) => r.verdict === 'fail').length;
+      log.info({ durationMs: Date.now() - checksStart, passCount, failCount }, 'checks complete');
 
       await client.sendMessage(
         contractId,
@@ -417,13 +427,14 @@ async function main(): Promise<void> {
       });
 
       const milestone2Id = plan.milestoneIds[1] ?? plan.milestoneIds[0] ?? '';
+      const reportStart = Date.now();
       await generateAndDeliverReport(
         contractId,
         milestone2Id,
         allCheckResults,
         allAuditVerdicts,
         screenshotBase64s,
-        { client, apiKey: anthropicApiKey, logger },
+        { client, apiKey: anthropicApiKey, logger: log },
       );
 
       setJob(contractId, {
@@ -435,9 +446,9 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
 
-      logger.info({ contractId, passCount, failCount }, 'verification pipeline complete');
+      log.info({ passCount, failCount, durationMs: Date.now() - reportStart }, 'verification pipeline complete');
     } catch (err) {
-      logger.error({ err, gigId: gig.id, contractId }, 'verification pipeline failed');
+      log.error({ err }, 'verification pipeline failed');
 
       const existing = getJob(contractId);
       setJob(contractId, {
