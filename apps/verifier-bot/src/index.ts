@@ -1,4 +1,5 @@
 import pino from 'pino';
+import cron from 'node-cron';
 import {
   AgentClient,
   createGigPoller,
@@ -24,14 +25,22 @@ import { runDataQualityChecks } from './runners/data.js';
 import { runAcceptanceAudit } from './runners/audit.js';
 import { generateAndDeliverReport } from './report.js';
 import { loadStore, setJob, getJob } from './store.js';
+import { handleVerifierStandingGig, VERIFIER_OFFER_RULES } from './standinghandler.js';
 import type { CheckResult } from './runners/http.js';
 import type { AuditVerdict } from './runners/audit.js';
+import type { ScheduledTask } from 'node-cron';
 
 // ---------------------------------------------------------------------------
 // Logger
 // ---------------------------------------------------------------------------
 
 const logger = pino({ name: 'verifier-bot' });
+
+// ---------------------------------------------------------------------------
+// Nightly cron job registry
+// ---------------------------------------------------------------------------
+
+const nightlyJobs = new Map<string, { checkTask: ScheduledTask; milestoneTask: ScheduledTask }>();
 
 // ---------------------------------------------------------------------------
 // Env vars
@@ -125,9 +134,163 @@ async function main(): Promise<void> {
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
     const contractId = contract.id;
+    const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
+
+    // --- Standing offer detection ---
+    const standingResult = handleVerifierStandingGig(gig, contractId, milestoneIds);
+
+    if (standingResult.isStandingOffer && standingResult.plan && standingResult.standingType) {
+      const { plan, standingType } = standingResult;
+
+      logger.info(
+        { gigId: gig.id, contractId, standingType, criteriaCount: plan.criteriaList.length },
+        'standing offer gig detected',
+      );
+
+      await client.sendMessage(
+        contractId,
+        `Standing offer accepted: ${standingType}. Running ${plan.criteriaList.length} criteria.`,
+        'progress_update',
+      );
+
+      setJob(contractId, {
+        gigId: gig.id,
+        contractId,
+        checkType: plan.checkType,
+        status: 'running',
+        checkResults: [],
+        updatedAt: new Date().toISOString(),
+      });
+
+      if (standingType === 'smoke-test') {
+        const rule = VERIFIER_OFFER_RULES['nightly smoke test package'];
+
+        const checkTask = cron.schedule(rule.checkSchedule!, async () => {
+          logger.info({ contractId }, 'nightly smoke check firing');
+          const nightlyResults: CheckResult[] = [];
+          for (const criterion of plan.criteriaList) {
+            const target = plan.targets[0] ?? '';
+            try {
+              const checkResult = await runHttpCheck(target, criterion.id, criterion.description, { logger });
+              nightlyResults.push(checkResult);
+            } catch (err) {
+              logger.error({ err, contractId, criterionId: criterion.id }, 'nightly http check failed');
+            }
+          }
+
+          const existing = getJob(contractId);
+          setJob(contractId, {
+            gigId: gig.id,
+            contractId,
+            checkType: plan.checkType,
+            status: 'running',
+            checkResults: [...(existing?.checkResults ?? []), ...nightlyResults],
+            updatedAt: new Date().toISOString(),
+          });
+
+          const failCount = nightlyResults.filter((r) => r.verdict === 'fail').length;
+          if (failCount > 0) {
+            await client.sendMessage(
+              contractId,
+              `Nightly smoke run: ${failCount} failure(s) detected out of ${nightlyResults.length} checks.`,
+              'alert',
+            );
+          }
+        });
+
+        const milestoneTask = cron.schedule(rule.milestoneSchedule!, async () => {
+          logger.info({ contractId }, 'weekly milestone report firing');
+          const existing = getJob(contractId);
+          const accumulatedResults = existing?.checkResults ?? [];
+          const nextMilestoneId = plan.milestoneIds.find((id) => {
+            return id;
+          }) ?? plan.milestoneIds[0] ?? '';
+
+          try {
+            await generateAndDeliverReport(
+              contractId,
+              nextMilestoneId,
+              accumulatedResults,
+              [],
+              [],
+              { client, apiKey: anthropicApiKey, logger },
+            );
+          } catch (err) {
+            logger.error({ err, contractId }, 'weekly milestone report delivery failed');
+          }
+        });
+
+        nightlyJobs.set(contractId, { checkTask, milestoneTask });
+        logger.info({ contractId }, 'nightly smoke cron jobs registered');
+      } else if (standingType === 'acceptance-review') {
+        const allCheckResults: CheckResult[] = [];
+        const allAuditVerdicts: AuditVerdict[] = [];
+
+        const claudeCriteria = plan.criteriaList.filter((c) => c.checkMethod === 'claude');
+        if (claudeCriteria.length > 0) {
+          const deliverableContent = plan.targets[0] ?? '';
+          const auditCriteria = claudeCriteria.map((c) => ({
+            criterionId: c.id,
+            description: c.description,
+            expected: c.expected,
+          }));
+          try {
+            const auditResult = await runAcceptanceAudit(deliverableContent, auditCriteria, {
+              apiKey: anthropicApiKey,
+              logger,
+            });
+            allCheckResults.push(...auditResult.checkResults);
+            allAuditVerdicts.push(...auditResult.auditVerdicts);
+          } catch (err) {
+            logger.error({ err, contractId }, 'acceptance audit failed');
+          }
+        }
+
+        const passCount = allCheckResults.filter((r) => r.verdict === 'pass').length;
+        const failCount = allCheckResults.filter((r) => r.verdict === 'fail').length;
+
+        await client.sendMessage(
+          contractId,
+          `Acceptance audit complete. ${passCount} passed, ${failCount} failed. Generating report.`,
+          'progress_update',
+        );
+
+        setJob(contractId, {
+          gigId: gig.id,
+          contractId,
+          checkType: plan.checkType,
+          status: 'delivering',
+          checkResults: allCheckResults,
+          updatedAt: new Date().toISOString(),
+        });
+
+        const milestoneId = plan.milestoneIds[0] ?? '';
+        await generateAndDeliverReport(
+          contractId,
+          milestoneId,
+          allCheckResults,
+          allAuditVerdicts,
+          [],
+          { client, apiKey: anthropicApiKey, logger },
+        );
+
+        setJob(contractId, {
+          gigId: gig.id,
+          contractId,
+          checkType: plan.checkType,
+          status: 'complete',
+          checkResults: allCheckResults,
+          updatedAt: new Date().toISOString(),
+        });
+
+        logger.info({ contractId, passCount, failCount }, 'acceptance review pipeline complete');
+      }
+
+      return;
+    }
 
     try {
-      const result = await parser.parse(gig, contractId, contract.milestones.map((m) => m.id));
+      const result = await parser.parse(gig, contractId, milestoneIds);
 
       if (result.needsClarification) {
         await client.sendMessage(
