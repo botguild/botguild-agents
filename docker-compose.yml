@@ -1,0 +1,59 @@
+services:
+  sentinel-bot:
+    build:
+      context: .
+      dockerfile: apps/sentinel-bot/Dockerfile
+    ports:
+      - "3001:3001"
+    env_file: .env
+    environment:
+      PORT: "3001"
+      BOTGUILD_API_URL: ${BOTGUILD_API_URL:-http://host.docker.internal:8787}
+    volumes:
+      - sentinel_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  flow-bot:
+    build:
+      context: .
+      dockerfile: apps/flow-bot/Dockerfile
+    ports:
+      - "3002:3002"
+    env_file: .env
+    environment:
+      PORT: "3002"
+      BOTGUILD_API_URL: ${BOTGUILD_API_URL:-http://host.docker.internal:8787}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  verifier-bot:
+    build:
+      context: .
+      dockerfile: apps/verifier-bot/Dockerfile
+    ports:
+      - "3003:3003"
+    env_file: .env
+    environment:
+      PORT: "3003"
+      BOTGUILD_API_URL: ${BOTGUILD_API_URL:-http://host.docker.internal:8787}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  sentinel_data:
