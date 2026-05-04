@@ -24,6 +24,7 @@ import { extractApi } from './extractors/api.js';
 import { normalizeRows } from './normalizer.js';
 import { deliverOutput } from './delivery.js';
 import { loadStore, setJob, getJob } from './store.js';
+import { handleFlowStandingGig } from './standinghandler.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -123,10 +124,100 @@ async function main(): Promise<void> {
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
     const contractId = contract.id;
-    const [m1Id, m2Id, m3Id] = contract.milestones.map((m) => m.id);
+    const milestoneIds = contract.milestones.map((m) => m.id);
+    const [m1Id, m2Id, m3Id] = milestoneIds;
 
     try {
-      const result = await parser.parse(gig, contractId, contract.milestones.map((m) => m.id));
+      const standingResult = handleFlowStandingGig(gig, contractId, milestoneIds);
+
+      if (standingResult.isStandingOffer && standingResult.config) {
+        const standingConfig = standingResult.config;
+
+        await client.sendMessage(
+          contractId,
+          `Standing offer package started: ${standingConfig.inputType} sync. ${standingResult.milestoneLabels?.length ?? 0} milestones scheduled.`,
+          'progress_update',
+        );
+
+        setJob(contractId, {
+          gigId: gig.id,
+          contractId,
+          inputType: standingConfig.inputType,
+          status: 'fetching',
+          currentMilestoneIndex: 0,
+          updatedAt: new Date().toISOString(),
+        });
+
+        if (standingConfig.inputType !== 'pdf') {
+          logger.info(
+            { gigId: gig.id, contractId, inputType: standingConfig.inputType },
+            'data-sync standing offer: scheduled sync pipeline will run weekly; executing first milestone ETL run now',
+          );
+
+          let extractedRows: Record<string, unknown>[];
+
+          if (standingConfig.inputType === 'csv' || standingConfig.inputType === 'sheet') {
+            const csvResult = await extractCsv(standingConfig.inputSource, { logger });
+            extractedRows = csvResult.rows;
+          } else {
+            const apiResult = await extractApi({
+              url: standingConfig.inputSource,
+              paginationStyle: 'offset',
+              logger,
+            });
+            extractedRows = apiResult.records;
+          }
+
+          const normalizeStats = normalizeRows(extractedRows, standingConfig.transformRules);
+          const firstMilestoneId = standingConfig.milestoneIds[0];
+
+          await deliverOutput(
+            contractId,
+            firstMilestoneId ?? '',
+            normalizeStats.rows,
+            standingConfig,
+            normalizeStats,
+            { client, apiKey: anthropicApiKey, logger },
+          );
+
+          setJob(contractId, {
+            ...getJob(contractId)!,
+            status: 'complete',
+            updatedAt: new Date().toISOString(),
+          });
+
+          logger.info({ contractId, gigId: gig.id }, 'data-sync standing offer: first milestone ETL run complete');
+        } else {
+          const pdfResult = await extractPdf(standingConfig.inputSource, standingConfig.targetSchema, {
+            apiKey: anthropicApiKey,
+            logger,
+          });
+
+          const normalizeStats = normalizeRows(pdfResult.rows, standingConfig.transformRules);
+          const firstMilestoneId = standingConfig.milestoneIds[0];
+
+          await deliverOutput(
+            contractId,
+            firstMilestoneId ?? '',
+            normalizeStats.rows,
+            standingConfig,
+            normalizeStats,
+            { client, apiKey: anthropicApiKey, logger },
+          );
+
+          setJob(contractId, {
+            ...getJob(contractId)!,
+            status: 'complete',
+            updatedAt: new Date().toISOString(),
+          });
+
+          logger.info({ contractId, gigId: gig.id }, 'invoice-batch standing offer: extraction pipeline complete');
+        }
+
+        return;
+      }
+
+      const result = await parser.parse(gig, contractId, milestoneIds);
 
       if (result.needsClarification) {
         await client.sendMessage(
@@ -194,6 +285,7 @@ async function main(): Promise<void> {
       if (m1Id) {
         await client.deliverMilestone(contractId, m1Id, { note: extractSummary });
       }
+
 
       setJob(contractId, {
         ...getJob(contractId)!,
