@@ -9,3 +9,4 @@ export * from './registration';
 export * from './webhookregistration';
 export * from './messenger';
 export * from './logger';
+export * from './alerting';

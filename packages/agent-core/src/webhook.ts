@@ -74,7 +74,12 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
   });
 
   app.get('/health', (c) => {
-    return c.json({ status: 'ok', botId, uptime: process.uptime() });
+    return c.json({
+      status: 'ok',
+      botId,
+      uptime: process.uptime(),
+      version: process.env['npm_package_version'] ?? 'unknown',
+    });
   });
 
   return {

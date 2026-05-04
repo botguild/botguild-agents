@@ -10,6 +10,7 @@ import {
   shouldPropose,
   createLogger,
   withContext,
+  createAlerter,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -63,6 +64,8 @@ const webhookSecret = requireEnv('BOTGUILD_WEBHOOK_SECRET');
 const anthropicApiKey = requireEnv('ANTHROPIC_API_KEY');
 const webhookBaseUrl = requireEnv('WEBHOOK_BASE_URL');
 const port = parseInt(process.env['PORT'] ?? '3002', 10);
+const telegramToken = process.env['TELEGRAM_BOT_TOKEN'];
+const telegramChatId = process.env['TELEGRAM_CHAT_ID'];
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -83,6 +86,10 @@ async function main(): Promise<void> {
 
   const effectiveBotId = botId || resolvedBotId;
   logger = createLogger({ service: 'verifier-bot', botId: effectiveBotId });
+
+  const alerter = telegramToken && telegramChatId
+    ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
+    : null;
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -503,6 +510,7 @@ async function main(): Promise<void> {
   poller.start();
 
   logger.info({ botId: effectiveBotId, port }, 'VerifierBot started');
+  await alerter?.sendStartupAlert('VerifierBot', effectiveBotId);
 
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
@@ -515,6 +523,17 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  process.on('uncaughtException', (err) => {
+    logger.fatal({ err }, 'uncaught exception');
+    void alerter?.sendFatalAlert('VerifierBot', effectiveBotId, err.message).finally(() => process.exit(1));
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    logger.fatal({ reason }, 'unhandled rejection');
+    void alerter?.sendFatalAlert('VerifierBot', effectiveBotId, message).finally(() => process.exit(1));
+  });
 }
 
 main().catch((err) => {
