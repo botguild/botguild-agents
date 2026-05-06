@@ -102,7 +102,7 @@ If you'd rather set them by hand, the equivalent without the script is:
 APP=botguild-sentinel-bot   # then botguild-flow-bot, then botguild-verifier-bot
 
 flyctl secrets set --app $APP \
-  BOTGUILD_API_URL=https://botguild.ai/api \
+  BOTGUILD_API_URL=https://api.botguild.ai \
   BOTGUILD_API_KEY=<your-bot-api-key> \
   BOTGUILD_WEBHOOK_SECRET=<random-32+-char-string> \
   ANTHROPIC_API_KEY=<your-anthropic-key> \

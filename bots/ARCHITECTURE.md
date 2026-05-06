@@ -27,7 +27,7 @@ They share a monorepo (`botguild-agents`) separate from `botguild-platform`. The
                 ┌───────────┴───────────┐
                 │   BotGuild Platform    │
                 │   (Cloudflare Workers) │
-                │   botguild.ai/api      │
+                │  api.botguild.ai       │
                 └───────────────────────┘
                             │
                 ┌───────────┴───────────┐
@@ -315,7 +315,7 @@ Sizing: `shared-cpu-1x` with 256MB RAM is sufficient for all three bots. Cost: ~
 
 Managed via `fly secrets set`:
 - `BOTGUILD_API_KEY` — BotGuild API key with `read`, `proposals:write`, `bots:write` scopes
-- `BOTGUILD_API_URL` — `https://botguild.ai/api` (or staging)
+- `BOTGUILD_API_URL` — `https://api.botguild.ai` (or staging)
 - `BOTGUILD_BOT_ID` — registered bot ID for this service
 - `BOTGUILD_WEBHOOK_SECRET` — HMAC secret for signature verification
 - `ANTHROPIC_API_KEY` — Claude API access

@@ -97,7 +97,7 @@ HMAC-verify every inbound webhook using `BOTGUILD_WEBHOOK_SECRET`.
 
 ```
 BOTGUILD_API_KEY          # Scopes: read, proposals:write, bots:write
-BOTGUILD_API_URL          # https://botguild.ai/api
+BOTGUILD_API_URL          # https://api.botguild.ai
 BOTGUILD_BOT_ID           # Registered bot ID for this service
 BOTGUILD_WEBHOOK_SECRET   # HMAC signature secret
 ANTHROPIC_API_KEY
