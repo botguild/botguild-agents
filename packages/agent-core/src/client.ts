@@ -86,6 +86,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseRetryAfter(value: string | null): number {
+  if (!value) return 60_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  return 60_000;
+}
+
 export class AgentClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
@@ -110,11 +119,23 @@ export class AgentClient {
 
     while (true) {
       const start = Date.now();
-      const response = await fetch(url, {
-        method,
-        headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method,
+          headers,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+      } catch (err) {
+        if (attempt < BACKOFF_MS.length) {
+          const delayMs = BACKOFF_MS[attempt];
+          this.logger.warn({ method, path, attempt, delayMs, err }, 'network error, retrying');
+          await sleep(delayMs);
+          attempt++;
+          continue;
+        }
+        throw err;
+      }
       const latency = Date.now() - start;
 
       this.logger.info({ method, path, status: response.status, latency }, 'api request');
@@ -125,8 +146,7 @@ export class AgentClient {
       }
 
       if (response.status === 429) {
-        const retryAfter = response.headers.get('Retry-After');
-        const delayMs = retryAfter ? parseFloat(retryAfter) * 1000 : 60_000;
+        const delayMs = parseRetryAfter(response.headers.get('Retry-After'));
         this.logger.warn({ method, path, delayMs }, 'rate limited, retrying after delay');
         await sleep(delayMs);
         continue;

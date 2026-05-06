@@ -5,9 +5,23 @@ export interface FlowJobState {
   gigId: string;
   contractId: string;
   inputType: string;
-  status: 'pending' | 'fetching' | 'transforming' | 'delivering' | 'complete' | 'error';
+  status: 'pending' | 'fetching' | 'transforming' | 'delivering' | 'complete' | 'error' | 'awaiting_input' | 'recurring';
   currentMilestoneIndex: number;
   updatedAt: string;
+  // Standing-offer recurring state. Present only on data-sync packages so we can
+  // re-register the weekly cron after a restart.
+  standing?: {
+    standingType: 'data-sync' | 'invoice-batch';
+    inputSource: string;
+    outputFormat: 'csv' | 'json' | 'airtable';
+    targetSchema: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
+    transformRules: Record<string, unknown>;
+    remainingMilestoneIds: string[];
+  };
+}
+
+export function listJobs(): FlowJobState[] {
+  return Array.from(store.values());
 }
 
 const DATA_DIR = join(process.cwd(), 'data');
@@ -39,5 +53,10 @@ export function getJob(contractId: string): FlowJobState | undefined {
 
 export function setJob(contractId: string, state: FlowJobState): void {
   store.set(contractId, state);
+  saveStore();
+}
+
+export function deleteJob(contractId: string): void {
+  store.delete(contractId);
   saveStore();
 }

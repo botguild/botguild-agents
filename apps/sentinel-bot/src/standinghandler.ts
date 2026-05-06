@@ -1,6 +1,6 @@
 import type { Gig } from '@botguild/agent-core';
-import type { WatchJobConfig } from './parser.ts';
-import { standingOffers } from './config.ts';
+import type { WatchJobConfig } from './parser.js';
+import { standingOffers } from './config.js';
 
 export interface StandingOfferMatch {
   offerTitle: string;
@@ -15,6 +15,10 @@ export interface StandingGigResult {
   config?: WatchJobConfig;
   milestoneDates?: string[];
   milestoneLabels?: string[];
+  // Set when we matched a standing offer but couldn't infer a target URL —
+  // caller should request clarification rather than start a watch.
+  needsClarification?: boolean;
+  clarificationQuestion?: string;
 }
 
 export const OFFER_RULES: Record<
@@ -36,27 +40,17 @@ export const OFFER_RULES: Record<
 };
 
 export function detectStandingOffer(gig: Gig): StandingOfferMatch | null {
-  const standingOfferId = (gig as any).standingOfferId as string | undefined;
-
-  if (standingOfferId) {
-    for (const offer of standingOffers) {
-      const titleKey = offer.title.toLowerCase();
-      const rule = OFFER_RULES[titleKey];
-      if (rule) {
-        return { offerTitle: offer.title, ...rule };
-      }
-    }
-  }
-
+  // Disambiguate by gig title — `standingOfferId` only confirms it's a
+  // standing-offer hire, not which offer was hired. The platform copies the
+  // offer's title onto the gig.
   const gigTitleLower = gig.title.toLowerCase();
   for (const offer of standingOffers) {
     const titleKey = offer.title.toLowerCase();
     const rule = OFFER_RULES[titleKey];
-    if (rule && gigTitleLower.startsWith(titleKey)) {
+    if (rule && (gigTitleLower.startsWith(titleKey) || gigTitleLower.includes(titleKey))) {
       return { offerTitle: offer.title, ...rule };
     }
   }
-
   return null;
 }
 
@@ -65,9 +59,12 @@ export function buildStandingJobConfig(
   contractId: string,
   match: StandingOfferMatch,
   milestoneIds: string[],
-): WatchJobConfig {
+): WatchJobConfig | null {
   const urlMatches = gig.description.match(/https?:\/\/[^\s,]+/g);
-  const targets = urlMatches && urlMatches.length > 0 ? urlMatches : ['https://example.com'];
+  if (!urlMatches || urlMatches.length === 0) {
+    return null;
+  }
+  const targets = urlMatches;
 
   return {
     gigId: gig.id,
@@ -110,6 +107,19 @@ export function handleStandingOfferGig(
   const config = buildStandingJobConfig(gig, contractId, match, milestoneIds);
   const milestoneDates = buildMilestoneDates();
   const milestoneLabels = buildMilestoneLabels(match.watchType);
+
+  if (!config) {
+    return {
+      isStandingOffer: true,
+      milestoneDates,
+      milestoneLabels,
+      needsClarification: true,
+      clarificationQuestion:
+        match.watchType === 'uptime'
+          ? 'Which API endpoint(s) should I monitor for uptime? Please paste the full URL(s).'
+          : 'Which page(s) should I watch for changes? Please paste the full URL(s).',
+    };
+  }
 
   return { isStandingOffer: true, config, milestoneDates, milestoneLabels };
 }

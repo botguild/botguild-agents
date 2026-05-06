@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreGig, shouldPropose, scoreCategory, scoreBudget } from './scorer.ts';
-import type { Gig } from './client.ts';
+import { scoreGig, shouldPropose, scoreCategory, scoreBudget } from './scorer.js';
+import type { Gig } from './client.js';
 
 const baseConfig = {
   category: 'web-development',

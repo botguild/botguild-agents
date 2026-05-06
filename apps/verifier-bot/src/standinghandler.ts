@@ -1,6 +1,6 @@
 import type { Gig } from '@botguild/agent-core';
-import type { CheckPlan, CheckType, Criterion, EvidenceRequirement } from './parser.ts';
-import { standingOffers } from './config.ts';
+import type { CheckPlan, CheckType, Criterion, EvidenceRequirement } from './parser.js';
+import { standingOffers } from './config.js';
 
 export type VerifierStandingType = 'smoke-test' | 'acceptance-review';
 
@@ -18,6 +18,8 @@ export interface VerifierStandingResult {
   milestoneLabels?: string[];
   milestoneDates?: string[];
   standingType?: VerifierStandingType;
+  needsClarification?: boolean;
+  clarificationQuestion?: string;
 }
 
 export const VERIFIER_OFFER_RULES: Record<
@@ -44,27 +46,17 @@ export const VERIFIER_OFFER_RULES: Record<
 };
 
 export function detectVerifierStandingOffer(gig: Gig): VerifierStandingMatch | null {
-  const standingOfferId = (gig as unknown as Record<string, unknown>).standingOfferId as string | undefined;
-
-  if (standingOfferId) {
-    for (const offer of standingOffers) {
-      const titleKey = offer.title.toLowerCase();
-      const rule = VERIFIER_OFFER_RULES[titleKey];
-      if (rule) {
-        return { offerTitle: offer.title, ...rule };
-      }
-    }
-  }
-
+  // Disambiguate by gig title — the platform copies the offer's title onto
+  // the gig. `standingOfferId` only confirms it's a standing-offer hire,
+  // not which offer was hired.
   const gigTitleLower = gig.title.toLowerCase();
   for (const offer of standingOffers) {
     const titleKey = offer.title.toLowerCase();
     const rule = VERIFIER_OFFER_RULES[titleKey];
-    if (rule && gigTitleLower.startsWith(titleKey)) {
+    if (rule && (gigTitleLower.startsWith(titleKey) || gigTitleLower.includes(titleKey))) {
       return { offerTitle: offer.title, ...rule };
     }
   }
-
   return null;
 }
 
@@ -77,9 +69,10 @@ function buildSmokeCheckPlan(
   gig: Gig,
   contractId: string,
   milestoneIds: string[],
-): CheckPlan {
+): CheckPlan | null {
   const urls = extractUrls(gig.description);
-  const targets = urls.length > 0 ? urls : ['https://example.com'];
+  if (urls.length === 0) return null;
+  const targets = urls;
 
   const criteriaList: Criterion[] = [
     {
@@ -210,6 +203,18 @@ export function handleVerifierStandingGig(
 
   const milestoneLabels = buildMilestoneLabels(match.standingType);
   const milestoneDates = buildMilestoneDates(match.milestoneCount);
+
+  if (!plan) {
+    return {
+      isStandingOffer: true,
+      milestoneLabels,
+      milestoneDates,
+      standingType: match.standingType,
+      needsClarification: true,
+      clarificationQuestion:
+        'Which URL(s) should I run the nightly smoke checks against? Please paste the full URL(s).',
+    };
+  }
 
   return {
     isStandingOffer: true,

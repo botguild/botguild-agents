@@ -1,6 +1,6 @@
 import type { Gig } from '@botguild/agent-core';
-import type { TransformJobConfig } from './parser.ts';
-import { standingOffers } from './config.ts';
+import type { TransformJobConfig } from './parser.js';
+import { standingOffers } from './config.js';
 
 export type FlowStandingType = 'data-sync' | 'invoice-batch';
 
@@ -23,27 +23,17 @@ const OFFER_RULES: Record<string, { standingType: FlowStandingType; milestoneCou
 };
 
 export function detectFlowStandingOffer(gig: Gig): FlowStandingMatch | null {
-  const standingOfferId = (gig as any).standingOfferId as string | undefined;
-
-  if (standingOfferId) {
-    for (const offer of standingOffers) {
-      const titleKey = offer.title.toLowerCase();
-      const rule = OFFER_RULES[titleKey];
-      if (rule) {
-        return { offerTitle: offer.title, ...rule };
-      }
-    }
-  }
-
+  // The platform copies the offer's title onto the gig, so we always disambiguate
+  // by matching the gig title to a configured offer — `standingOfferId` alone
+  // doesn't tell us *which* offer was hired.
   const gigTitleLower = gig.title.toLowerCase();
   for (const offer of standingOffers) {
     const titleKey = offer.title.toLowerCase();
     const rule = OFFER_RULES[titleKey];
-    if (rule && gigTitleLower.startsWith(titleKey)) {
+    if (rule && (gigTitleLower.startsWith(titleKey) || gigTitleLower.includes(titleKey))) {
       return { offerTitle: offer.title, ...rule };
     }
   }
-
   return null;
 }
 

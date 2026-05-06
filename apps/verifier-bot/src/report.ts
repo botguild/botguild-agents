@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { AgentClient } from '@botguild/agent-core';
-import type { CheckResult } from './runners/http.ts';
-import type { AuditVerdict } from './runners/audit.ts';
+import type { CheckResult } from './runners/http.js';
+import type { AuditVerdict } from './runners/audit.js';
 import type { Logger } from 'pino';
 
 export type OverallVerdict = 'PASS' | 'FAIL' | 'PARTIAL';
@@ -143,9 +143,19 @@ export async function generateAndDeliverReport(
 
   const milestoneNote = buildMilestoneNote(verdict, passCount, failCount, checkResults);
 
-  logger.info({ contractId, milestoneId }, 'delivering milestone with report');
+  // Encode any screenshot evidence as data URLs so the client receives the
+  // visual proof — otherwise it's collected but silently dropped.
+  const attachments = screenshotBase64s.length > 0
+    ? screenshotBase64s.map((b64) => `data:image/png;base64,${b64}`)
+    : undefined;
+
+  logger.info(
+    { contractId, milestoneId, screenshotCount: screenshotBase64s.length },
+    'delivering milestone with report',
+  );
   await client.deliverMilestone(contractId, milestoneId, {
     note: milestoneNote + '\n\n' + reportMarkdown,
+    attachments,
   });
 
   logger.info({ contractId, milestoneId, verdict }, 'report delivered');

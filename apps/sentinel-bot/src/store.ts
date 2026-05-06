@@ -21,6 +21,18 @@ export interface JobState {
   accumulatedResults?: CheckRecord[];
   milestoneSchedule?: string;
   checkSchedule?: string;
+  // Persisted job config so we can restore cron schedules after a restart.
+  watchConfig?: unknown;
+  milestoneIndex?: number;
+}
+
+export function listJobs(): JobState[] {
+  return Array.from(store.values());
+}
+
+export function deleteJob(contractId: string): void {
+  store.delete(contractId);
+  saveStore();
 }
 
 const DATA_DIR = join(process.cwd(), 'data');

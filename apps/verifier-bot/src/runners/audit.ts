@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from 'pino';
-import type { CheckResult, CheckVerdict } from './http.ts';
+import type { CheckResult, CheckVerdict } from './http.js';
 
 export interface AuditCriterion {
   criterionId: string;
@@ -74,6 +74,11 @@ export async function runAcceptanceAudit(
     logger.info({ url: content }, 'fetching deliverable from URL');
     try {
       const response = await fetch(content);
+      if (!response.ok) {
+        const reason = `Deliverable URL returned HTTP ${response.status} ${response.statusText}`;
+        logger.error({ url: deliverableContent, status: response.status }, reason);
+        return buildFailResults(criteria, reason);
+      }
       content = await response.text();
       if (content.length > CONTENT_TRUNCATION_LIMIT) {
         logger.warn(
@@ -137,13 +142,33 @@ export async function runAcceptanceAudit(
 
   const criteriaMap = new Map(criteria.map((c) => [c.criterionId, c]));
 
-  const auditVerdicts: AuditVerdict[] = parsed.map((item) => ({
-    criterionId: item.criterionId,
-    verdict: item.verdict as 'pass' | 'fail' | 'partial',
-    reasoning: item.reasoning,
-    confidence: item.confidence,
-    needsHumanReview: item.confidence < CONFIDENCE_REVIEW_THRESHOLD,
-  }));
+  const verdictsById = new Map<string, { verdict: string; reasoning: string; confidence: number }>();
+  for (const item of parsed) {
+    if (item.criterionId) verdictsById.set(item.criterionId, item);
+  }
+
+  // Make sure every requested criterion has a verdict — Claude can omit
+  // entries, which would otherwise silently drop them from the report.
+  const auditVerdicts: AuditVerdict[] = criteria.map((c) => {
+    const item = verdictsById.get(c.criterionId);
+    if (!item) {
+      logger.warn({ criterionId: c.criterionId }, 'criterion missing from audit response, marking for review');
+      return {
+        criterionId: c.criterionId,
+        verdict: 'fail',
+        reasoning: 'Auditor did not return a verdict for this criterion; needs human review.',
+        confidence: 0,
+        needsHumanReview: true,
+      };
+    }
+    return {
+      criterionId: c.criterionId,
+      verdict: item.verdict as 'pass' | 'fail' | 'partial',
+      reasoning: item.reasoning,
+      confidence: item.confidence,
+      needsHumanReview: item.confidence < CONFIDENCE_REVIEW_THRESHOLD,
+    };
+  });
 
   const checkResults: CheckResult[] = auditVerdicts.map((v) => {
     const criterion = criteriaMap.get(v.criterionId);

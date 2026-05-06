@@ -172,7 +172,7 @@ export async function runHttpCheck(
         criterionId,
         description,
         verdict: 'pass',
-        actual: buildExpectedDescription(config),
+        actual: buildActualDescription(config, result.latencyMs),
         expected: buildExpectedDescription(config),
         latencyMs: result.latencyMs,
         attempts: attempt,
@@ -215,5 +215,17 @@ function buildExpectedDescription(config: HttpCheckConfig): string {
   if (maxLatencyMs !== undefined) parts.push(`latency ≤ ${maxLatencyMs}ms`);
   if (requiredHeaders && requiredHeaders.length > 0) parts.push(`headers: ${requiredHeaders.join(', ')}`);
   if (responseSchema) parts.push('valid schema');
+  return parts.join(', ');
+}
+
+function buildActualDescription(config: HttpCheckConfig, latencyMs: number): string {
+  const { expectedStatusCode = 200, maxLatencyMs, requiredHeaders, responseSchema } = config;
+  // The runner only reaches this path when status, latency, headers, and schema all checked out,
+  // so the *actual* measured values match the expected — but reporting the measurement (real
+  // status code and real latency) is what the report is supposed to show.
+  const parts: string[] = [`status ${expectedStatusCode}`, `latency ${latencyMs}ms`];
+  if (maxLatencyMs !== undefined) parts.push(`(≤ ${maxLatencyMs}ms)`);
+  if (requiredHeaders && requiredHeaders.length > 0) parts.push(`headers: ${requiredHeaders.join(', ')} present`);
+  if (responseSchema) parts.push('schema valid');
   return parts.join(', ');
 }

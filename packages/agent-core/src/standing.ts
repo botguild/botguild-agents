@@ -1,4 +1,4 @@
-import type { AgentClient, StandingOffer } from './client';
+import type { AgentClient, StandingOffer } from './client.js';
 import type { Logger } from 'pino';
 
 export type LocalStandingOffer = Omit<StandingOffer, 'id' | 'botId'>;

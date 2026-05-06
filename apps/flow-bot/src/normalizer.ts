@@ -1,4 +1,4 @@
-import type { TransformRules } from './parser.ts';
+import type { TransformRules } from './parser.js';
 
 export interface NormalizeResult {
   rows: Record<string, unknown>[];
@@ -13,12 +13,20 @@ export interface NormalizeResult {
 const DATE_FIELD_RE = /date|at|time|created|updated|timestamp/i;
 const PHONE_FIELD_RE = /phone|mobile|tel/i;
 
+function fromUnixNumber(n: number): string | null {
+  if (!Number.isFinite(n) || n <= 0) return null;
+  // 13+ digits → already milliseconds; 10–12 digits → seconds.
+  const ms = n >= 1e12 ? n : n * 1000;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 function normalizeDate(value: unknown): string | null {
   if (value === null || value === undefined || value === '') return null;
 
   if (typeof value === 'number') {
     if (value > 1_000_000_000) {
-      return new Date(value * 1000).toISOString();
+      return fromUnixNumber(value);
     }
     return null;
   }
@@ -26,8 +34,8 @@ function normalizeDate(value: unknown): string | null {
   if (typeof value !== 'string') return null;
 
   const numericStr = Number(value);
-  if (!Number.isNaN(numericStr) && numericStr > 1_000_000_000) {
-    return new Date(numericStr * 1000).toISOString();
+  if (!Number.isNaN(numericStr) && numericStr > 1_000_000_000 && /^\d+$/.test(value.trim())) {
+    return fromUnixNumber(numericStr);
   }
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -110,11 +118,19 @@ export function normalizeRows(
 
   let dedupedRows: Record<string, unknown>[];
   if (rules.dedupKey) {
+    const dedupKey = rules.dedupKey;
     const map = new Map<unknown, Record<string, unknown>>();
+    const noKey: Record<string, unknown>[] = [];
     for (const row of nonEmptyRows) {
-      map.set(row[rules.dedupKey], row);
+      const key = row[dedupKey];
+      if (key === undefined || key === null || key === '') {
+        // Rows without a dedup value can't be collapsed; keep them all.
+        noKey.push(row);
+      } else {
+        map.set(key, row);
+      }
     }
-    dedupedRows = Array.from(map.values());
+    dedupedRows = [...map.values(), ...noKey];
   } else {
     dedupedRows = nonEmptyRows;
   }

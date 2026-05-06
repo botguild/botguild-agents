@@ -1,5 +1,5 @@
 import type { Logger } from 'pino';
-import { getJob, setJob, type JobState } from '../store.ts';
+import { getJob, setJob, type JobState } from '../store.js';
 
 export interface UptimeCheckResult {
   target: string;

@@ -26,11 +26,16 @@ import { runDomChecks } from './runners/dom.js';
 import { runDataQualityChecks } from './runners/data.js';
 import { runAcceptanceAudit } from './runners/audit.js';
 import { generateAndDeliverReport } from './report.js';
-import { loadStore, setJob, getJob } from './store.js';
+import { loadStore, setJob, getJob, listJobs as listStoredJobs } from './store.js';
 import { handleVerifierStandingGig, VERIFIER_OFFER_RULES } from './standinghandler.js';
 import type { CheckResult } from './runners/http.js';
 import type { AuditVerdict } from './runners/audit.js';
 import type { ScheduledTask } from 'node-cron';
+import {
+  buildHttpConfigFromCriterion,
+  buildDomCheckFromCriterion,
+  buildDataQualityCriterion,
+} from './criterion-mapping.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -149,6 +154,20 @@ async function main(): Promise<void> {
     // --- Standing offer detection ---
     const standingResult = handleVerifierStandingGig(gig, contractId, milestoneIds);
 
+    if (standingResult.isStandingOffer && standingResult.needsClarification) {
+      log.info('standing-offer gig has no target URL — requesting clarification');
+      try {
+        await client.sendMessage(
+          contractId,
+          standingResult.clarificationQuestion ?? 'Could you share the URL(s) to verify?',
+          'clarification_request',
+        );
+      } catch (err) {
+        log.error({ err }, 'failed to send clarification request for standing offer');
+      }
+      return;
+    }
+
     if (standingResult.isStandingOffer && standingResult.plan && standingResult.standingType) {
       const { plan, standingType } = standingResult;
 
@@ -170,72 +189,13 @@ async function main(): Promise<void> {
         status: 'running',
         checkResults: [],
         updatedAt: new Date().toISOString(),
+        standingType,
+        standingPlan: plan,
+        milestoneIndex: 0,
       });
 
       if (standingType === 'smoke-test') {
-        const rule = VERIFIER_OFFER_RULES['nightly smoke test package'];
-
-        const checkTask = cron.schedule(rule.checkSchedule!, async () => {
-          log.info('nightly smoke check firing');
-          const nightlyResults: CheckResult[] = [];
-          const smokeStart = Date.now();
-          for (const criterion of plan.criteriaList) {
-            const target = plan.targets[0] ?? '';
-            try {
-              const checkResult = await runHttpCheck(target, criterion.id, criterion.description, { logger: log });
-              nightlyResults.push(checkResult);
-            } catch (err) {
-              log.error({ err, criterionId: criterion.id }, 'nightly http check failed');
-            }
-          }
-
-          const existing = getJob(contractId);
-          setJob(contractId, {
-            gigId: gig.id,
-            contractId,
-            checkType: plan.checkType,
-            status: 'running',
-            checkResults: [...(existing?.checkResults ?? []), ...nightlyResults],
-            updatedAt: new Date().toISOString(),
-          });
-
-          const failCount = nightlyResults.filter((r) => r.verdict === 'fail').length;
-          log.info({ durationMs: Date.now() - smokeStart, failCount, total: nightlyResults.length }, 'nightly smoke run complete');
-          if (failCount > 0) {
-            await client.sendMessage(
-              contractId,
-              `Nightly smoke run: ${failCount} failure(s) detected out of ${nightlyResults.length} checks.`,
-              'alert',
-            );
-          }
-        });
-
-        const milestoneTask = cron.schedule(rule.milestoneSchedule!, async () => {
-          log.info('weekly milestone report firing');
-          const existing = getJob(contractId);
-          const accumulatedResults = existing?.checkResults ?? [];
-          const nextMilestoneId = plan.milestoneIds.find((id) => {
-            return id;
-          }) ?? plan.milestoneIds[0] ?? '';
-
-          const reportStart = Date.now();
-          try {
-            await generateAndDeliverReport(
-              contractId,
-              nextMilestoneId,
-              accumulatedResults,
-              [],
-              [],
-              { client, apiKey: anthropicApiKey, logger: log },
-            );
-            log.info({ durationMs: Date.now() - reportStart }, 'weekly milestone report delivered');
-          } catch (err) {
-            log.error({ err, durationMs: Date.now() - reportStart }, 'weekly milestone report delivery failed');
-          }
-        });
-
-        nightlyJobs.set(contractId, { checkTask, milestoneTask });
-        log.info('nightly smoke cron jobs registered');
+        registerSmokeTestCron(contractId, gig.id, plan, log);
       } else if (standingType === 'acceptance-review') {
         const allCheckResults: CheckResult[] = [];
         const allAuditVerdicts: AuditVerdict[] = [];
@@ -363,20 +323,14 @@ async function main(): Promise<void> {
       const checksStart = Date.now();
       for (const criterion of httpCriteria) {
         const target = plan.targets[0] ?? '';
-        const checkResult = await runHttpCheck(target, criterion.id, criterion.description, {
-          logger: log,
-        });
+        const httpConfig = buildHttpConfigFromCriterion(criterion, { logger: log });
+        const checkResult = await runHttpCheck(target, criterion.id, criterion.description, httpConfig);
         allCheckResults.push(checkResult);
       }
 
       for (const target of plan.targets) {
         if (domCriteria.length === 0) break;
-        const domChecks = domCriteria.map((c) => ({
-          criterionId: c.id,
-          description: c.description,
-          checkType: 'element-present' as const,
-          selector: c.expected,
-        }));
+        const domChecks = domCriteria.map((c) => buildDomCheckFromCriterion(c));
         const domResult = await runDomChecks(target, domChecks, {
           screenshotEnabled: plan.evidenceRequired.screenshot,
           logger: log,
@@ -389,12 +343,7 @@ async function main(): Promise<void> {
 
       if (dataCriteria.length > 0) {
         const dataSource = plan.targets[0] ?? '';
-        const dataQualityCriteria = dataCriteria.map((c) => ({
-          criterionId: c.id,
-          description: c.description,
-          field: c.id,
-          check: 'null-rate' as const,
-        }));
+        const dataQualityCriteria = dataCriteria.map((c) => buildDataQualityCriterion(c));
         const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, { logger: log });
         allCheckResults.push(...dataResult.checkResults);
       }
@@ -479,6 +428,15 @@ async function main(): Promise<void> {
       { contractId: contract.id, status: contract.status },
       'contract status changed',
     );
+    if (contract.status === 'completed' || contract.status === 'cancelled') {
+      const tasks = nightlyJobs.get(contract.id);
+      if (tasks) {
+        tasks.checkTask.stop();
+        tasks.milestoneTask.stop();
+        nightlyJobs.delete(contract.id);
+        logger.info({ contractId: contract.id }, 'stopped nightly cron tasks for ended contract');
+      }
+    }
   });
 
   // Build gig poller
@@ -504,6 +462,22 @@ async function main(): Promise<void> {
       }
     },
   });
+
+  // Restore nightly cron jobs for any in-flight smoke-test standing-offer
+  // contracts persisted before this restart, so the bot resumes instead of
+  // silently dropping coverage.
+  for (const persisted of listStoredJobs()) {
+    if (persisted.standingType !== 'smoke-test' || !persisted.standingPlan) continue;
+    if (persisted.status === 'complete' || persisted.status === 'error') continue;
+    const log = withContext(logger, { gigId: persisted.gigId, contractId: persisted.contractId });
+    log.info('restoring nightly smoke-test cron from persisted store');
+    registerSmokeTestCron(
+      persisted.contractId,
+      persisted.gigId,
+      persisted.standingPlan as Parameters<typeof registerSmokeTestCron>[2],
+      log,
+    );
+  }
 
   // Start services
   await webhookServer.start();
@@ -534,6 +508,118 @@ async function main(): Promise<void> {
     logger.fatal({ reason }, 'unhandled rejection');
     void alerter?.sendFatalAlert('VerifierBot', effectiveBotId, message).finally(() => process.exit(1));
   });
+
+  function registerSmokeTestCron(
+    contractId: string,
+    gigId: string,
+    plan: import('./parser.js').CheckPlan,
+    log: ReturnType<typeof withContext>,
+  ): void {
+    const rule = VERIFIER_OFFER_RULES['nightly smoke test package'];
+    const existing = nightlyJobs.get(contractId);
+    if (existing) {
+      existing.checkTask.stop();
+      existing.milestoneTask.stop();
+    }
+
+    const checkTask = cron.schedule(rule.checkSchedule!, async () => {
+      log.info('nightly smoke check firing');
+      const nightlyResults: CheckResult[] = [];
+      const smokeStart = Date.now();
+      for (const criterion of plan.criteriaList) {
+        const target = plan.targets[0] ?? '';
+        try {
+          const httpConfig = buildHttpConfigFromCriterion(criterion, { logger: log });
+          const checkResult = await runHttpCheck(target, criterion.id, criterion.description, httpConfig);
+          nightlyResults.push(checkResult);
+        } catch (err) {
+          log.error({ err, criterionId: criterion.id }, 'nightly http check failed');
+        }
+      }
+
+      const existingState = getJob(contractId);
+      setJob(contractId, {
+        gigId,
+        contractId,
+        checkType: plan.checkType,
+        status: existingState?.status ?? 'running',
+        checkResults: [...(existingState?.checkResults ?? []), ...nightlyResults],
+        updatedAt: new Date().toISOString(),
+        standingType: 'smoke-test',
+        standingPlan: plan,
+        milestoneIndex: existingState?.milestoneIndex ?? 0,
+      });
+
+      const failCount = nightlyResults.filter((r) => r.verdict === 'fail').length;
+      log.info({ durationMs: Date.now() - smokeStart, failCount, total: nightlyResults.length }, 'nightly smoke run complete');
+      if (failCount > 0) {
+        await client.sendMessage(
+          contractId,
+          `Nightly smoke run: ${failCount} failure(s) detected out of ${nightlyResults.length} checks.`,
+          'alert',
+        );
+      }
+    });
+
+    const milestoneTask = cron.schedule(rule.milestoneSchedule!, async () => {
+      log.info('weekly milestone report firing');
+      const existingState = getJob(contractId);
+      const accumulatedResults = existingState?.checkResults ?? [];
+      const idx = existingState?.milestoneIndex ?? 0;
+
+      if (idx >= plan.milestoneIds.length) {
+        log.info('all weekly milestones already delivered, stopping cron');
+        checkTask.stop();
+        milestoneTask.stop();
+        nightlyJobs.delete(contractId);
+        return;
+      }
+
+      const nextMilestoneId = plan.milestoneIds[idx];
+
+      const reportStart = Date.now();
+      try {
+        await generateAndDeliverReport(
+          contractId,
+          nextMilestoneId,
+          accumulatedResults,
+          [],
+          [],
+          { client, apiKey: anthropicApiKey, logger: log },
+        );
+        log.info(
+          { durationMs: Date.now() - reportStart, milestoneId: nextMilestoneId, milestoneIndex: idx },
+          'weekly milestone report delivered',
+        );
+
+        const newIdx = idx + 1;
+        // Reset accumulated results so next week's report doesn't double-count.
+        setJob(contractId, {
+          gigId,
+          contractId,
+          checkType: plan.checkType,
+          status: newIdx >= plan.milestoneIds.length ? 'complete' : 'running',
+          checkResults: [],
+          updatedAt: new Date().toISOString(),
+          standingType: 'smoke-test',
+          standingPlan: plan,
+          milestoneIndex: newIdx,
+        });
+
+        if (newIdx >= plan.milestoneIds.length) {
+          log.info('final weekly milestone delivered, stopping cron tasks');
+          checkTask.stop();
+          milestoneTask.stop();
+          nightlyJobs.delete(contractId);
+        }
+      } catch (err) {
+        log.error({ err, durationMs: Date.now() - reportStart }, 'weekly milestone report delivery failed');
+      }
+    });
+
+    nightlyJobs.set(contractId, { checkTask, milestoneTask });
+    log.info('nightly smoke cron jobs registered');
+  }
 }
 
 main().catch((err) => {

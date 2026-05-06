@@ -1,4 +1,4 @@
-import type { Gig } from './client';
+import type { Gig } from './client.js';
 
 export interface ScorerConfig {
   category: string;           // exact category this bot handles

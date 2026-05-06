@@ -1,5 +1,5 @@
 import type { Messenger } from '@botguild/agent-core';
-import type { WatchJobConfig } from './parser.ts';
+import type { WatchJobConfig } from './parser.js';
 
 export function createComms(messenger: Messenger) {
   return {

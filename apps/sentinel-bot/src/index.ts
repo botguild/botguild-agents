@@ -24,6 +24,8 @@ import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
 import { handleStandingOfferGig } from './standinghandler.js';
+import { loadStore, listJobs as listStoredJobs } from './store.js';
+import type { WatchJobConfig } from './parser.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -60,6 +62,8 @@ const telegramChatId = process.env['TELEGRAM_CHAT_ID'];
 
 async function main(): Promise<void> {
   logger.info('SentinelBot starting up');
+
+  loadStore();
 
   // Register / patch bot profile; resolves the live botId
   const resolvedBotId = await registerBot({
@@ -132,6 +136,20 @@ async function main(): Promise<void> {
 
     const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
     const standingResult = handleStandingOfferGig(gig, contract.id, milestoneIds);
+
+    if (standingResult.isStandingOffer && standingResult.needsClarification) {
+      log.info('standing offer gig has no target URL — requesting clarification');
+      try {
+        await messenger.send(
+          contract.id,
+          standingResult.clarificationQuestion ?? 'Could you share the URL to monitor?',
+          'clarification_request',
+        );
+      } catch (err) {
+        log.error({ err }, 'failed to send clarification request for standing offer');
+      }
+      return;
+    }
 
     if (standingResult.isStandingOffer && standingResult.config && standingResult.milestoneDates) {
       log.info('standing offer gig detected, skipping parser');
@@ -224,6 +242,16 @@ async function main(): Promise<void> {
       }
     },
   });
+
+  // Restore cron schedules for any active watch contracts persisted from a
+  // prior run, so a restart doesn't silently stop monitoring.
+  for (const persisted of listStoredJobs()) {
+    if (!persisted.watchConfig) continue;
+    const cfg = persisted.watchConfig as WatchJobConfig;
+    if (!cfg.contractId || !cfg.targets || cfg.targets.length === 0) continue;
+    logger.info({ contractId: persisted.contractId }, 'restoring scheduled watch job from persisted store');
+    scheduler.addJob(cfg);
+  }
 
   // Start services
   await webhookServer.start();

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
 import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from 'pino';
-import { getJob, setJob, type JobState } from '../store.ts';
+import { getJob, setJob, type JobState } from '../store.js';
 
 export interface DiffCheckResult {
   target: string;
@@ -70,7 +70,10 @@ export async function checkDiff(
 
   const currentHash = createHash('sha256').update(content).digest('hex');
   const currentExcerpt = content.slice(0, 500);
-  const changed = previousHash !== currentHash;
+  // First-ever run has no previous baseline — record the snapshot but don't
+  // claim the page changed against itself.
+  const isFirstRun = previousHash === undefined;
+  const changed = !isFirstRun && previousHash !== currentHash;
 
   let diffSummary: string | undefined;
 
@@ -111,7 +114,9 @@ export async function checkDiff(
 
   setJob(storeKey, updatedState);
 
-  if (changed) {
+  if (isFirstRun) {
+    logger.info({ target, contractId, currentHash }, 'diff check: baseline established');
+  } else if (changed) {
     logger.info({ target, contractId, currentHash, previousHash }, 'diff check: content changed');
   } else {
     logger.info({ target, contractId, currentHash }, 'diff check: no change');

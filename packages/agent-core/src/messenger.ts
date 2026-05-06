@@ -1,4 +1,4 @@
-import type { AgentClient } from './client';
+import type { AgentClient } from './client.js';
 
 export type MessageContentType = 'progress_update' | 'clarification_request' | 'delivery_note' | 'general';
 

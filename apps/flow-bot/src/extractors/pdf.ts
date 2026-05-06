@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from 'pino';
 import pdfParse from 'pdf-parse';
-import type { SchemaField } from '../parser.ts';
+import type { SchemaField } from '../parser.js';
 
 export interface PdfExtractResult {
   rows: Record<string, unknown>[];

@@ -12,6 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.51.0",
     "@botguild/agent-core": "workspace:*",
+    "node-cron": "^3.0.0",
     "papaparse": "^5.4.0",
     "pdf-parse": "^1.1.1",
     "pino": "^9.0.0"

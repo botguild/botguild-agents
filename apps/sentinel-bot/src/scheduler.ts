@@ -1,11 +1,11 @@
 import cron from 'node-cron';
 import Anthropic from '@anthropic-ai/sdk';
 import type { AgentClient } from '@botguild/agent-core';
-import type { WatchJobConfig } from './parser.ts';
-import { checkUptime } from './runners/uptime.ts';
-import { checkDiff } from './runners/diff.ts';
-import { getJob, setJob } from './store.ts';
-import type { CheckRecord } from './store.ts';
+import type { WatchJobConfig } from './parser.js';
+import { checkUptime } from './runners/uptime.js';
+import { checkDiff } from './runners/diff.js';
+import { getJob, setJob } from './store.js';
+import type { CheckRecord } from './store.js';
 import type { Logger } from 'pino';
 
 export interface SchedulerConfig {
@@ -237,8 +237,9 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
         entry.milestoneIndex++;
         logger.info({ contractId, milestoneId, nextIndex: entry.milestoneIndex }, 'weekly milestone delivered');
 
-        if (state) {
-          setJob(contractId, { ...state, accumulatedResults: [] });
+        const fresh = getJob(contractId);
+        if (fresh) {
+          setJob(contractId, { ...fresh, accumulatedResults: [], milestoneIndex: entry.milestoneIndex });
         }
 
         if (entry.milestoneIndex >= job.milestoneIds.length) {
@@ -256,8 +257,9 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
           entry.milestoneIndex++;
           logger.info({ contractId, milestoneId }, 'weekly milestone delivered on retry');
 
-          if (state) {
-            setJob(contractId, { ...state, accumulatedResults: [] });
+          const fresh = getJob(contractId);
+          if (fresh) {
+            setJob(contractId, { ...fresh, accumulatedResults: [], milestoneIndex: entry.milestoneIndex });
           }
 
           if (entry.milestoneIndex >= job.milestoneIds.length) {
@@ -363,7 +365,24 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
       existing.milestoneTask?.stop();
     }
 
-    const milestoneIndex = jobs.get(job.contractId)?.milestoneIndex ?? 0;
+    // Persist a JobState for this contract so check handlers can accumulate
+    // results — without this, weekly milestone summaries find no records.
+    const persisted = getJob(job.contractId);
+    setJob(job.contractId, {
+      gigId: job.gigId,
+      contractId: job.contractId,
+      status: persisted?.status ?? 'unknown',
+      lastCheckedAt: persisted?.lastCheckedAt ?? new Date().toISOString(),
+      accumulatedResults: persisted?.accumulatedResults ?? [],
+      checkSchedule: checkExpr,
+      milestoneSchedule: milestoneExpr,
+      watchConfig: job,
+      milestoneIndex: persisted?.milestoneIndex ?? 0,
+      ...(persisted?.snapshotHash !== undefined ? { snapshotHash: persisted.snapshotHash } : {}),
+      ...(persisted?.snapshotExcerpt !== undefined ? { snapshotExcerpt: persisted.snapshotExcerpt } : {}),
+    });
+
+    const milestoneIndex = jobs.get(job.contractId)?.milestoneIndex ?? persisted?.milestoneIndex ?? 0;
 
     if (isDualSchedule) {
       const task = cron.schedule(checkExpr, buildAccumulatingCheckHandler(job.contractId));

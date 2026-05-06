@@ -1,4 +1,4 @@
-import type { AgentClient, WebhookRegistration } from './client';
+import type { AgentClient, WebhookRegistration } from './client.js';
 import type { Logger } from 'pino';
 
 export interface WebhookRegistrationConfig {
@@ -26,13 +26,16 @@ export async function ensureWebhookRegistered(
 
   if (matches.length === 1) {
     const [existing] = matches;
-    if (existing.secret === webhookSecret) {
+    if (existing.secret === webhookSecret && eventsMatch(existing.events, events)) {
       logger.info({ webhookUrl, webhookId: existing.id }, 'webhook already registered, no action');
       return existing;
     }
     await client.deleteWebhook(existing.id);
     const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
-    logger.info({ webhookUrl, webhookId: registration.id }, 're registered webhook (secret mismatch)');
+    logger.info(
+      { webhookUrl, webhookId: registration.id },
+      're registered webhook (secret or event list mismatch)'
+    );
     return registration;
   }
 
@@ -44,12 +47,21 @@ export async function ensureWebhookRegistered(
   await Promise.all(duplicates.map((r) => client.deleteWebhook(r.id)));
   logger.info({ webhookUrl, removed: duplicates.length }, `removed ${duplicates.length} duplicate webhooks`);
 
-  if (newest.secret === webhookSecret) {
+  if (newest.secret === webhookSecret && eventsMatch(newest.events, events)) {
     return newest;
   }
 
   await client.deleteWebhook(newest.id);
   const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
-  logger.info({ webhookUrl, webhookId: registration.id }, 're registered webhook (secret mismatch)');
+  logger.info(
+    { webhookUrl, webhookId: registration.id },
+    're registered webhook (secret or event list mismatch)'
+  );
   return registration;
+}
+
+function eventsMatch(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = new Set(a);
+  return b.every((e) => sa.has(e));
 }

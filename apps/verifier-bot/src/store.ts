@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { CheckResult } from './runners/http.ts';
+import type { CheckResult } from './runners/http.js';
 
 export interface VerifierJobState {
   gigId: string;
@@ -9,6 +9,20 @@ export interface VerifierJobState {
   status: 'pending' | 'running' | 'delivering' | 'complete' | 'error';
   checkResults: CheckResult[];
   updatedAt: string;
+  // Persisted plan + cursor so a restart can re-register cron jobs for
+  // standing-offer smoke-test contracts that haven't finished yet.
+  standingType?: 'smoke-test' | 'acceptance-review';
+  standingPlan?: unknown;
+  milestoneIndex?: number;
+}
+
+export function listJobs(): VerifierJobState[] {
+  return Array.from(store.values());
+}
+
+export function deleteJob(contractId: string): void {
+  store.delete(contractId);
+  saveStore();
 }
 
 const DATA_DIR = join(process.cwd(), 'data');

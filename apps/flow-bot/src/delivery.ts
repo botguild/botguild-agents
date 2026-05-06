@@ -1,8 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import Papa from 'papaparse';
 import type { AgentClient } from '@botguild/agent-core';
-import type { TransformJobConfig } from './parser.ts';
-import type { NormalizeResult } from './normalizer.ts';
+import type { TransformJobConfig } from './parser.js';
+import type { NormalizeResult } from './normalizer.js';
 import type { Logger } from 'pino';
 
 export interface DeliveryConfig {
@@ -32,10 +32,7 @@ export async function deliverOutput(
     return { delivered: false, reason: 'zero_rows', milestoneId };
   }
 
-  const serialized =
-    jobConfig.outputFormat === 'csv'
-      ? Papa.unparse(rows)
-      : JSON.stringify(rows, null, 2);
+  const { serialized, mimeType, formatNote } = serializeRows(rows, jobConfig.outputFormat);
 
   const anthropic = new Anthropic({ apiKey });
 
@@ -73,11 +70,15 @@ Transform rules: ${JSON.stringify(jobConfig.transformRules)}`,
 
   const preview = serialized.length > 2000 ? serialized.slice(0, 2000) : serialized;
   const hasMore = serialized.length > 2000;
+  const attachments = hasMore
+    ? [`data:${mimeType};base64,${Buffer.from(serialized, 'utf8').toString('base64')}`]
+    : undefined;
 
   const note = [
     claudeSummary,
     '',
     `Stats: ${normalizeStats.originalCount} input rows → ${rows.length} output rows (${normalizeStats.normalizedCount} normalized, ${normalizeStats.skippedCount} skipped)`,
+    formatNote ? '\n' + formatNote : '',
     '',
     'Output preview:',
     '```',
@@ -88,9 +89,30 @@ Transform rules: ${JSON.stringify(jobConfig.transformRules)}`,
     .join('\n')
     .trim();
 
-  await client.deliverMilestone(contractId, milestoneId, { note });
+  await client.deliverMilestone(contractId, milestoneId, { note, attachments });
 
   logger.info({ contractId, milestoneId, outputRows: rows.length }, 'milestone delivered');
 
   return { delivered: true, milestoneId };
+}
+
+function serializeRows(
+  rows: Record<string, unknown>[],
+  outputFormat: TransformJobConfig['outputFormat'],
+): { serialized: string; mimeType: string; formatNote: string } {
+  if (outputFormat === 'csv') {
+    return { serialized: Papa.unparse(rows), mimeType: 'text/csv', formatNote: '' };
+  }
+  if (outputFormat === 'airtable') {
+    // Direct Airtable upload requires per-customer base/API credentials we don't have here.
+    // Deliver Airtable-shaped JSON ({ records: [{ fields }] }) and note the import step.
+    const payload = { records: rows.map((fields) => ({ fields })) };
+    return {
+      serialized: JSON.stringify(payload, null, 2),
+      mimeType: 'application/json',
+      formatNote:
+        'Airtable destination: rows are shaped as `{records: [{fields}]}`. Import via Airtable\'s "Create records" API or paste into a base — direct upload requires your base ID and PAT.',
+    };
+  }
+  return { serialized: JSON.stringify(rows, null, 2), mimeType: 'application/json', formatNote: '' };
 }

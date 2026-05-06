@@ -1,6 +1,6 @@
 import { chromium } from 'playwright';
 import type { Logger } from 'pino';
-import type { CheckResult } from './http.ts';
+import type { CheckResult } from './http.js';
 
 export type DomCheckType = 'element-present' | 'text-match' | 'element-visible' | 'form-submit';
 

@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Gig, ProposalDraft } from './client';
+import type { Gig, ProposalDraft } from './client.js';
 import type { Logger } from 'pino';
 
 export interface BotProfile {

@@ -1,4 +1,4 @@
-import type { AgentClient, Gig } from './client';
+import type { AgentClient, Gig } from './client.js';
 import type { Logger } from 'pino';
 
 export interface GigPollerConfig {
@@ -31,11 +31,11 @@ export function createGigPoller(config: GigPollerConfig): GigPoller {
 
     for (const gig of gigs) {
       if (seen.has(gig.id)) continue;
-      seen.add(gig.id);
       try {
         await onGig(gig);
+        seen.add(gig.id);
       } catch (err) {
-        logger.error({ err, gigId: gig.id }, 'gig poller: onGig callback failed');
+        logger.error({ err, gigId: gig.id }, 'gig poller: onGig callback failed; will retry on next cycle');
       }
     }
   }

@@ -1,5 +1,6 @@
+import Papa from 'papaparse';
 import type { Logger } from 'pino';
-import type { CheckResult } from './http.ts';
+import type { CheckResult } from './http.js';
 
 export interface DataQualityCriterion {
   criterionId: string;
@@ -123,23 +124,12 @@ function computeColumnStats(
 }
 
 function parseCSV(text: string): Record<string, unknown>[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== '');
-  if (lines.length < 2) return [];
-
-  const headers = lines[0].split(',').map((h) => h.trim());
-  const rows: Record<string, unknown>[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cells = lines[i].split(',');
-    const row: Record<string, unknown> = {};
-    for (let j = 0; j < headers.length; j++) {
-      const cell = cells[j]?.trim() ?? '';
-      row[headers[j]] = cell === '' ? null : cell;
-    }
-    rows.push(row);
-  }
-
-  return rows;
+  const result = Papa.parse<Record<string, unknown>>(text, {
+    header: true,
+    skipEmptyLines: 'greedy',
+    transform: (value) => (value === '' ? null : value),
+  });
+  return result.data;
 }
 
 async function loadSource(source: string | Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
@@ -161,11 +151,18 @@ async function loadSource(source: string | Record<string, unknown>[]): Promise<R
 }
 
 function buildColumnIndex(rows: Record<string, unknown>[]): Map<string, unknown[]> {
-  const index = new Map<string, unknown[]>();
+  // Collect every field name first, so rows that omit a column entirely still
+  // contribute a `null` to that column's series — otherwise null-rate and
+  // uniqueness silently under-report sparse columns.
+  const allFields = new Set<string>();
   for (const row of rows) {
-    for (const [field, value] of Object.entries(row)) {
-      if (!index.has(field)) index.set(field, []);
-      index.get(field)!.push(value);
+    for (const field of Object.keys(row)) allFields.add(field);
+  }
+  const index = new Map<string, unknown[]>();
+  for (const field of allFields) index.set(field, []);
+  for (const row of rows) {
+    for (const field of allFields) {
+      index.get(field)!.push(field in row ? row[field] : null);
     }
   }
   return index;
