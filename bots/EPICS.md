@@ -592,7 +592,7 @@
 
 ## E7 · CI Hardening
 
-**Goal:** Every push (not just PRs) verifies typecheck, tests, and a Docker build before any code can land on `main`. The biggest gap surfaced during PR #1 review was that 35 review comments — including a blocking `tsconfig` issue and a CI-breaking lockfile — could only be caught by a human reviewer because the existing CI ran nothing beyond a single typecheck.
+**Goal:** Every push (not just PRs) verifies typecheck, tests, and a Docker build so regressions surface before they reach `develop` (or `main` on release). The biggest gap surfaced during PR #1 review was that 35 review comments — including a blocking `tsconfig` issue and a CI-breaking lockfile — could only be caught by a human reviewer because the existing CI ran nothing beyond a single typecheck. Branch protection isn't available on this GitHub plan, so the safety net is "fast green CI + gitflow conventions" rather than enforced rules.
 
 ---
 
@@ -635,28 +635,31 @@
 
 ---
 
-### E7-S4 · Branch protection on `main`
+### E7-S4 · Adopt gitflow with `develop` as default branch
 
-**As a maintainer**, I want `main` protected so that only PRs with green checks can merge, eliminating the class of "I'll just commit straight to main" mistakes.
+**As a maintainer**, I want a clear gitflow so that day-to-day work integrates on `develop` and only release-ready commits land on `main`. The repo isn't on a GitHub plan with branch protection, so the discipline lives in convention plus CI rather than enforced rules.
 
 **Acceptance criteria:**
-- GitHub branch protection enabled on `main` requiring: typecheck, test, lint, docker-build status checks
-- "Require branches to be up to date before merging" enabled
-- "Require linear history" enabled (matches the existing merge-commit pattern from epic branches)
-- Direct pushes to `main` blocked except via merge of an approved PR
-- Documented in `docs/cicd/branch-protection.md`
+- `develop` branch created from `main` and pushed to origin
+- GitHub default branch changed to `develop` (so PRs and clones default to it)
+- Deploy workflow continues to trigger only on push to `main` (releases)
+- CI runs on push to any branch *and* on PR targeting either `develop` or `main`
+- `docs/cicd/gitflow.md` documents the model: epic/feature branches branch off `develop` and target `develop`; releases merge `develop → main`
+- Pull-request template at `.github/pull_request_template.md` reminds contributors that the default base is `develop`
+- README updated to reference the gitflow doc
 
 ---
 
-### E7-S5 · Aggregate CI status workflow
+### E7-S5 · Consolidate workflow into `ci.yml` with aggregate status
 
-**As a contributor**, I want a single `ci` status check that reflects all required jobs so branch protection has one knob to flip and PR pages stay readable.
+**As a contributor**, I want a single `ci.yml` workflow with a final aggregate status job so PR pages show one green ✓ when everything passed and the file is named after what it actually does.
 
 **Acceptance criteria:**
-- `.github/workflows/ci.yml` is the single workflow file containing typecheck, test, lint, docker-build as jobs
-- Old `typecheck.yml` removed (or kept as alias for one cycle then removed)
-- Workflow has a final `ci-success` job that depends on all others; this is the only required check in branch protection
-- Job names line up with the names referenced in the protection config
+- Workflow file renamed from `typecheck.yml` to `ci.yml` (the workflow's `name:` is already "CI")
+- All existing jobs (lint, typecheck, test, docker-build matrix) live in `ci.yml`
+- Final `ci-success` job runs `if: always()` and depends on all others — passes only when none of the upstream jobs failed; useful as the single thing reviewers check on a PR
+- Workflow continues to run on push (any branch) and PRs to `develop` and `main`
+- No other workflow file references `typecheck.yml`
 
 ---
 
