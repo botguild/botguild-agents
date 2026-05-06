@@ -5,7 +5,15 @@ export interface FlowJobState {
   gigId: string;
   contractId: string;
   inputType: string;
-  status: 'pending' | 'fetching' | 'transforming' | 'delivering' | 'complete' | 'error' | 'awaiting_input' | 'recurring';
+  status:
+    | 'pending'
+    | 'fetching'
+    | 'transforming'
+    | 'delivering'
+    | 'complete'
+    | 'error'
+    | 'awaiting_input'
+    | 'recurring';
   currentMilestoneIndex: number;
   updatedAt: string;
   // Standing-offer recurring state. Present only on data-sync packages so we can

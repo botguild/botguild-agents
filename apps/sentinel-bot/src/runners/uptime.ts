@@ -30,9 +30,9 @@ export async function checkUptime(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  let status: 'up' | 'down' = 'down';
+  let status: 'up' | 'down';
   let statusCode: number | undefined;
-  let responseMs = 0;
+  let responseMs: number;
   let error: string | undefined;
 
   const start = Date.now();
@@ -65,9 +65,10 @@ export async function checkUptime(
     clearTimeout(timeoutId);
   }
 
-  const stateChanged = previousStatus === undefined
-    ? false
-    : previousStatus !== 'unknown' && previousStatus !== status;
+  const stateChanged =
+    previousStatus === undefined
+      ? false
+      : previousStatus !== 'unknown' && previousStatus !== status;
 
   const updatedState: JobState = {
     gigId: prior?.gigId ?? '',

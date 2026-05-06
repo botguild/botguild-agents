@@ -122,7 +122,10 @@ export async function runDomChecks(
 
     const results: CheckResult[] = [];
     for (const check of checks) {
-      logger.info({ criterionId: check.criterionId, checkType: check.checkType }, 'running DOM check');
+      logger.info(
+        { criterionId: check.criterionId, checkType: check.checkType },
+        'running DOM check',
+      );
       const result = await runSingleCheck(page, check, timeoutMs);
       logger.info(
         { criterionId: result.criterionId, verdict: result.verdict, actual: result.actual },

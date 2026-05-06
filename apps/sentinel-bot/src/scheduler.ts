@@ -42,9 +42,7 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
   async function runChecks(job: WatchJobConfig): Promise<string> {
     if (job.watchType === 'uptime' || job.watchType === 'scheduled') {
       const results = await Promise.all(
-        job.targets.map((target) =>
-          checkUptime(target, job.contractId, { logger }),
-        ),
+        job.targets.map((target) => checkUptime(target, job.contractId, { logger })),
       );
 
       const summary = results
@@ -109,8 +107,7 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     if (job.watchType === 'uptime') {
       const upCount = records.filter((r) => r.status === 'up').length;
       const incidentCount = records.filter((r) => r.status === 'down').length;
-      const uptimePercent =
-        checkCount > 0 ? ((upCount / checkCount) * 100).toFixed(1) : '0.0';
+      const uptimePercent = checkCount > 0 ? ((upCount / checkCount) * 100).toFixed(1) : '0.0';
       return `Week of ${weekOf}: ${uptimePercent}% uptime. ${incidentCount} incidents. Total checks: ${checkCount}.`;
     }
 
@@ -167,13 +164,7 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
 
       const record: CheckRecord = {
         timestamp: new Date().toISOString(),
-        status: isUptime
-          ? isDown
-            ? 'down'
-            : 'up'
-          : isChanged
-            ? 'changed'
-            : 'unchanged',
+        status: isUptime ? (isDown ? 'down' : 'up') : isChanged ? 'changed' : 'unchanged',
         detail: checkSummary,
       };
 
@@ -235,11 +226,18 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
       try {
         await attemptDelivery(contractId, milestoneId, reportSummary);
         entry.milestoneIndex++;
-        logger.info({ contractId, milestoneId, nextIndex: entry.milestoneIndex }, 'weekly milestone delivered');
+        logger.info(
+          { contractId, milestoneId, nextIndex: entry.milestoneIndex },
+          'weekly milestone delivered',
+        );
 
         const fresh = getJob(contractId);
         if (fresh) {
-          setJob(contractId, { ...fresh, accumulatedResults: [], milestoneIndex: entry.milestoneIndex });
+          setJob(contractId, {
+            ...fresh,
+            accumulatedResults: [],
+            milestoneIndex: entry.milestoneIndex,
+          });
         }
 
         if (entry.milestoneIndex >= job.milestoneIds.length) {
@@ -248,7 +246,10 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
           logger.info({ contractId }, 'all milestones delivered, cron jobs stopped');
         }
       } catch (firstErr) {
-        logger.warn({ err: firstErr, contractId, milestoneId }, 'weekly milestone delivery failed, retrying in 60s');
+        logger.warn(
+          { err: firstErr, contractId, milestoneId },
+          'weekly milestone delivery failed, retrying in 60s',
+        );
 
         await sleep(60_000);
 
@@ -259,7 +260,11 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
 
           const fresh = getJob(contractId);
           if (fresh) {
-            setJob(contractId, { ...fresh, accumulatedResults: [], milestoneIndex: entry.milestoneIndex });
+            setJob(contractId, {
+              ...fresh,
+              accumulatedResults: [],
+              milestoneIndex: entry.milestoneIndex,
+            });
           }
 
           if (entry.milestoneIndex >= job.milestoneIds.length) {
@@ -268,7 +273,10 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
             logger.info({ contractId }, 'all milestones delivered, cron jobs stopped');
           }
         } catch (secondErr) {
-          logger.fatal({ err: secondErr, contractId, milestoneId }, 'weekly milestone delivery failed after retry, pausing job');
+          logger.fatal(
+            { err: secondErr, contractId, milestoneId },
+            'weekly milestone delivery failed after retry, pausing job',
+          );
           pauseJob(contractId);
         }
       }
@@ -309,20 +317,29 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
       try {
         await client.sendMessage(contractId, reportSummary);
       } catch (err) {
-        logger.warn({ err, contractId }, 'inline progress update failed, continuing with milestone delivery');
+        logger.warn(
+          { err, contractId },
+          'inline progress update failed, continuing with milestone delivery',
+        );
       }
 
       try {
         await attemptDelivery(contractId, milestoneId, reportSummary);
         entry.milestoneIndex++;
-        logger.info({ contractId, milestoneId, nextIndex: entry.milestoneIndex }, 'milestone delivered');
+        logger.info(
+          { contractId, milestoneId, nextIndex: entry.milestoneIndex },
+          'milestone delivered',
+        );
 
         if (entry.milestoneIndex >= job.milestoneIds.length) {
           entry.task.stop();
           logger.info({ contractId }, 'all milestones delivered, cron job stopped');
         }
       } catch (firstErr) {
-        logger.warn({ err: firstErr, contractId, milestoneId }, 'milestone delivery failed, retrying in 60s');
+        logger.warn(
+          { err: firstErr, contractId, milestoneId },
+          'milestone delivery failed, retrying in 60s',
+        );
 
         await sleep(60_000);
 
@@ -336,7 +353,10 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
             logger.info({ contractId }, 'all milestones delivered, cron job stopped');
           }
         } catch (secondErr) {
-          logger.fatal({ err: secondErr, contractId, milestoneId }, 'milestone delivery failed after retry, pausing job');
+          logger.fatal(
+            { err: secondErr, contractId, milestoneId },
+            'milestone delivery failed after retry, pausing job',
+          );
           pauseJob(contractId);
         }
       }
@@ -350,12 +370,18 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     const milestoneExpr = isDualSchedule ? job.milestoneSchedule! : undefined;
 
     if (!cron.validate(checkExpr)) {
-      logger.error({ contractId: job.contractId, schedule: checkExpr }, 'invalid cron expression, skipping job');
+      logger.error(
+        { contractId: job.contractId, schedule: checkExpr },
+        'invalid cron expression, skipping job',
+      );
       return;
     }
 
     if (milestoneExpr && !cron.validate(milestoneExpr)) {
-      logger.error({ contractId: job.contractId, milestoneSchedule: milestoneExpr }, 'invalid milestone cron expression, skipping job');
+      logger.error(
+        { contractId: job.contractId, milestoneSchedule: milestoneExpr },
+        'invalid milestone cron expression, skipping job',
+      );
       return;
     }
 
@@ -379,14 +405,20 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
       watchConfig: job,
       milestoneIndex: persisted?.milestoneIndex ?? 0,
       ...(persisted?.snapshotHash !== undefined ? { snapshotHash: persisted.snapshotHash } : {}),
-      ...(persisted?.snapshotExcerpt !== undefined ? { snapshotExcerpt: persisted.snapshotExcerpt } : {}),
+      ...(persisted?.snapshotExcerpt !== undefined
+        ? { snapshotExcerpt: persisted.snapshotExcerpt }
+        : {}),
     });
 
-    const milestoneIndex = jobs.get(job.contractId)?.milestoneIndex ?? persisted?.milestoneIndex ?? 0;
+    const milestoneIndex =
+      jobs.get(job.contractId)?.milestoneIndex ?? persisted?.milestoneIndex ?? 0;
 
     if (isDualSchedule) {
       const task = cron.schedule(checkExpr, buildAccumulatingCheckHandler(job.contractId));
-      const milestoneTask = cron.schedule(milestoneExpr!, buildMilestoneDeliveryHandler(job.contractId));
+      const milestoneTask = cron.schedule(
+        milestoneExpr!,
+        buildMilestoneDeliveryHandler(job.contractId),
+      );
       jobs.set(job.contractId, { task, milestoneTask, job, milestoneIndex });
       logger.info(
         { contractId: job.contractId, checkSchedule: checkExpr, milestoneSchedule: milestoneExpr },
@@ -426,7 +458,10 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
     const milestoneExpr = isDualSchedule ? job.milestoneSchedule! : undefined;
 
     if (!cron.validate(checkExpr)) {
-      logger.error({ contractId, schedule: checkExpr }, 'invalid cron expression on resume, skipping');
+      logger.error(
+        { contractId, schedule: checkExpr },
+        'invalid cron expression on resume, skipping',
+      );
       return;
     }
 
@@ -435,7 +470,10 @@ export function createScheduler(config: SchedulerConfig): Scheduler {
 
     if (isDualSchedule) {
       const task = cron.schedule(checkExpr, buildAccumulatingCheckHandler(contractId));
-      const milestoneTask = cron.schedule(milestoneExpr!, buildMilestoneDeliveryHandler(contractId));
+      const milestoneTask = cron.schedule(
+        milestoneExpr!,
+        buildMilestoneDeliveryHandler(contractId),
+      );
       entry.task = task;
       entry.milestoneTask = milestoneTask;
     } else {

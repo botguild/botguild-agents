@@ -18,7 +18,8 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     category: 'web-development',
     budget: 5000,
     warrantyTerms: '30 days of bug fixes included',
-    acceptanceCriteria: 'All pages load within 2 seconds, mobile-responsive, passes accessibility audit',
+    acceptanceCriteria:
+      'All pages load within 2 seconds, mobile-responsive, passes accessibility audit',
     timeline: '4 weeks',
     status: 'open',
     payerId: 'payer-1',

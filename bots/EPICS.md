@@ -1,7 +1,8 @@
 # BotGuild Agents — Epics & Stories
 
-**Version:** 1.1  
-**Date:** 2026-05-03  
+**Version:** 1.2  
+**Date:** 2026-05-06  
+**Change (v1.2):** E7–E9 added — CI hardening, local dev DX, and deploy hardening — driven by gaps surfaced during the PR #1 review pass and Fly.io setup walkthrough.  
 **Change (v1.1):** E5 redesigned — subscription/flat-monthly pricing removed; all standing offers use upfront multi-milestone fixed contracts (blockchain escrow does not support recurring billing). E2-S7 replaced accordingly.
 
 ---
@@ -16,6 +17,9 @@
 | E4 | VerifierBot — QA Agent | VerifierBot | Live QA bot accepting gigs and delivering pass/fail reports |
 | E5 | Standing Offers (multi-milestone packages) | All | All three bots publish standing offer templates; each hire is an upfront fixed-price gig with weekly milestones |
 | E6 | Infra, Deployment & Observability | All | All three bots deployed on Fly.io, monitored, secrets managed |
+| E7 | CI Hardening | All | Every push runs typecheck + tests + Docker build; main is protected; bad code can't merge |
+| E8 | Local Dev Experience | All | One command brings up a hot-reload dev stack with public webhook URL; new contributors are productive in under 15 minutes |
+| E9 | Deploy Hardening | All | Path-filtered, gated deploys with post-deploy health verification; deploy of one bot can't accidentally redeploy others |
 
 ---
 
@@ -583,3 +587,229 @@
 - Fly.io HTTP health check configured for `GET /health` on each bot (interval: 30s, timeout: 5s, passing threshold: 2, failing threshold: 3)
 - On machine restart (Fly.io event): sends a Telegram message to handler with bot name, restart time, and last error log line
 - Fly.io metrics dashboard link documented in `README.md`
+
+---
+
+## E7 · CI Hardening
+
+**Goal:** Every push (not just PRs) verifies typecheck, tests, and a Docker build so regressions surface before they reach `develop` (or `main` on release). The biggest gap surfaced during PR #1 review was that 35 review comments — including a blocking `tsconfig` issue and a CI-breaking lockfile — could only be caught by a human reviewer because the existing CI ran nothing beyond a single typecheck. Branch protection isn't available on this GitHub plan, so the safety net is "fast green CI + gitflow conventions" rather than enforced rules.
+
+---
+
+### E7-S1 · Run unit tests on every push
+
+**As a maintainer**, I need `pnpm test` to run automatically on every push and PR so that test regressions can't slip into `main` unnoticed.
+
+**Acceptance criteria:**
+- `.github/workflows/typecheck.yml` (or a renamed `ci.yml`) runs `pnpm test` after typecheck succeeds
+- Triggers on `push` to any branch *and* `pull_request` to `main`
+- Test job fails the workflow when any test fails
+- Job uses the same pnpm/Node versions as typecheck (single setup step or shared composite action)
+- Cache `~/.pnpm-store` and `~/.cache/playwright` across runs to keep CI under 3 minutes
+
+---
+
+### E7-S2 · Verify Docker builds in CI
+
+**As a maintainer**, I need each bot's Docker image to build successfully in CI before merge so that a broken Dockerfile never reaches `flyctl deploy`.
+
+**Acceptance criteria:**
+- New CI job `docker-build` runs `docker buildx build` for all three bots in parallel
+- Uses BuildKit cache (e.g. GitHub Actions cache backend) so unchanged dependencies don't re-download
+- Build job runs on every push and PR
+- Job fails when any bot's Dockerfile fails to build or produces warnings
+- Total docker-build job time under 5 minutes on cache-warm runs
+
+---
+
+### E7-S3 · Configure linting (ESLint + format check)
+
+**As a maintainer**, I want `pnpm lint` to actually do something so the existing turbo `lint` task isn't a lie.
+
+**Acceptance criteria:**
+- ESLint configured at the repo root with TypeScript support (`@typescript-eslint`)
+- Each workspace package has a `lint` script (`eslint . --max-warnings=0`)
+- Prettier installed for format-checking; `format:check` script added at root
+- CI runs `pnpm lint` and `pnpm format:check`
+- Existing source passes lint cleanly (or violations are fixed in this story; no `--fix` needed at runtime)
+
+---
+
+### E7-S4 · Adopt gitflow with `develop` as default branch
+
+**As a maintainer**, I want a clear gitflow so that day-to-day work integrates on `develop` and only release-ready commits land on `main`. The repo isn't on a GitHub plan with branch protection, so the discipline lives in convention plus CI rather than enforced rules.
+
+**Acceptance criteria:**
+- `develop` branch created from `main` and pushed to origin
+- GitHub default branch changed to `develop` (so PRs and clones default to it)
+- Deploy workflow continues to trigger only on push to `main` (releases)
+- CI runs on push to any branch *and* on PR targeting either `develop` or `main`
+- `docs/cicd/gitflow.md` documents the model: epic/feature branches branch off `develop` and target `develop`; releases merge `develop → main`
+- Pull-request template at `.github/pull_request_template.md` reminds contributors that the default base is `develop`
+- README updated to reference the gitflow doc
+
+---
+
+### E7-S5 · Consolidate workflow into `ci.yml` with aggregate status
+
+**As a contributor**, I want a single `ci.yml` workflow with a final aggregate status job so PR pages show one green ✓ when everything passed and the file is named after what it actually does.
+
+**Acceptance criteria:**
+- Workflow file renamed from `typecheck.yml` to `ci.yml` (the workflow's `name:` is already "CI")
+- All existing jobs (lint, typecheck, test, docker-build matrix) live in `ci.yml`
+- Final `ci-success` job runs `if: always()` and depends on all others — passes only when none of the upstream jobs failed; useful as the single thing reviewers check on a PR
+- Workflow continues to run on push (any branch) and PRs to `develop` and `main`
+- No other workflow file references `typecheck.yml`
+
+---
+
+## E8 · Local Dev Experience
+
+**Goal:** A new contributor goes from `git clone` to a working hot-reload dev stack — including public webhook URL — in under 15 minutes. Today they get a production docker-compose that requires a full rebuild on every code change.
+
+---
+
+### E8-S1 · Hot-reload dev compose profile
+
+**As a contributor**, I want `docker compose --profile dev up` to launch all three bots in `tsx watch` mode with bind-mounted source so editing TypeScript reloads the running bot in seconds, not minutes.
+
+**Acceptance criteria:**
+- `docker-compose.dev.yml` (overlay) defines `*-dev` services for each bot using a smaller dev base image
+- Bind-mounts `./apps/<bot>/src`, `./packages/agent-core/src`, and the corresponding workspace `package.json` files
+- Runs `pnpm --filter @botguild/<bot> dev` (which already invokes `tsx watch`)
+- Healthchecks honor `start_period` long enough for the watcher's first compile
+- Documented at the top of `README.md` as the recommended dev workflow
+
+---
+
+### E8-S2 · Run a single bot easily
+
+**As a contributor**, I want to bring up just one bot without the others (e.g. when iterating on FlowBot only) so dev resource use stays low.
+
+**Acceptance criteria:**
+- Compose profiles or named services let you run `docker compose up flow-bot-dev`
+- Per-bot npm script at root: `pnpm dev:flow`, `pnpm dev:sentinel`, `pnpm dev:verifier`
+- Each script tears down only its own service on Ctrl-C
+- Documented in `README.md` and `docs/local-dev/quickstart.md`
+
+---
+
+### E8-S3 · Cloudflared tunnel sidecar for webhooks
+
+**As a contributor**, I want a public URL pointing at my local bot so the BotGuild platform can deliver `proposal.accepted` webhooks during development without me running `ngrok` separately.
+
+**Acceptance criteria:**
+- Optional `cloudflared` (or `ngrok` — pick one and document why) sidecar service in `docker-compose.dev.yml`, gated by a profile or `--profile tunnel`
+- On startup, sidecar prints the public URL to stdout in a parseable format
+- Helper script `scripts/tunnel-url.sh` extracts that URL and exports `WEBHOOK_BASE_URL` to the bot containers
+- Tunnel survives bot restarts (URL stays stable for the session)
+- Cleanup on `docker compose down` removes the tunnel cleanly
+
+---
+
+### E8-S4 · Per-bot env files
+
+**As a contributor**, I want per-bot `.env` files so I can give each bot a different `BOTGUILD_BOT_ID` / `WEBHOOK_BASE_URL` without juggling one shared `.env`.
+
+**Acceptance criteria:**
+- Compose `env_file` directive points each service at `apps/<bot>/.env.local`
+- A root `.env.shared` (or unchanged `.env`) holds keys all three bots share (`ANTHROPIC_API_KEY`, etc.)
+- `.env.example` files updated for both root-shared and per-bot overrides
+- All `.env.local` files added to `.gitignore`
+- Compose `env_file` order documented so per-bot values override shared
+
+---
+
+### E8-S5 · Mock BotGuild platform fixture
+
+**As a contributor**, I want a stub BotGuild API server so I can run the bots end-to-end offline (no real `BOTGUILD_API_KEY`, no live network).
+
+**Acceptance criteria:**
+- New package `packages/mock-botguild` exposes a Hono server with stubs for `GET /gigs`, `POST /gigs/:id/proposals`, `POST /contracts/:id/milestones/:id/deliver`, `GET /webhooks`, `POST /webhooks`, `GET /standing-offers`, `POST /standing-offers`
+- Fixture data lives in `packages/mock-botguild/fixtures/*.json` (sample gigs, contracts) so deterministic test gigs can be replayed
+- Compose service `mock-platform` exposes port 8787 — already the default `BOTGUILD_API_URL` in compose
+- README documents the offline dev path
+- Mock signs outbound webhook deliveries with the bot's `BOTGUILD_WEBHOOK_SECRET`
+
+---
+
+### E8-S6 · Makefile or unified npm scripts at root
+
+**As a contributor**, I want a discoverable list of common dev commands so I don't have to read every Dockerfile or compose override to figure out how to run things.
+
+**Acceptance criteria:**
+- Either a `Makefile` with targets (`make dev`, `make dev-flow`, `make tunnel`, `make mock`, `make test`, `make lint`) **or** equivalent root-level npm scripts (`pnpm dev`, `pnpm dev:flow`, etc.)
+- `make help` (or `pnpm run` with description comments) lists every command with one-line descriptions
+- Every command in `docs/local-dev/quickstart.md` corresponds to one of these targets
+- No command requires the contributor to `cd` into a subdirectory
+
+---
+
+## E9 · Deploy Hardening
+
+**Goal:** Deploys to Fly.io are scoped, gated, and verified. Touching `flow-bot` shouldn't redeploy `verifier-bot`; a deploy that brings up a broken `/health` should fail the workflow loudly.
+
+---
+
+### E9-S1 · Path-filtered deploy jobs
+
+**As a maintainer**, I want each bot's deploy job to run only when *its* code (or `agent-core`) actually changed so unrelated PRs don't churn unrelated bots.
+
+**Acceptance criteria:**
+- `deploy-agents.yml` uses `dorny/paths-filter` (or equivalent) to compute per-bot change flags
+- Each per-bot deploy job is gated by `if: needs.changes.outputs.<bot> == 'true'`
+- A change to `packages/agent-core/**` triggers all three bot deploys (it's a shared dep)
+- A change to `apps/flow-bot/**` triggers only `deploy-flow`
+- Workflow run shows skipped jobs explicitly so it's obvious which bots were redeployed
+
+---
+
+### E9-S2 · Post-deploy `/health` smoke test
+
+**As a maintainer**, I want each deploy job to verify `GET /health` returns 200 after `flyctl deploy` so a deploy that "succeeds" but immediately crash-loops fails the workflow loudly.
+
+**Acceptance criteria:**
+- After `flyctl deploy`, the job polls `https://<app>.fly.dev/health` for up to 90 s with 5 s spacing
+- Health check expects HTTP 200 and JSON body `{ "status": "ok", ... }`
+- On failure, job marks the deploy failed and emits the last 50 log lines from `flyctl logs` for triage
+- On success, job emits a one-line summary: app name, version, response time
+
+---
+
+### E9-S3 · Production environment gate
+
+**As a maintainer**, I want a GitHub `production` environment protecting deploy jobs so secrets are scoped and a maintainer can require manual approval before a deploy ships.
+
+**Acceptance criteria:**
+- GitHub environment `production` created with `FLY_API_TOKEN` scoped to it
+- Each deploy job has `environment: production`
+- Required reviewer list configured for the environment (one or more maintainers)
+- Documented in `docs/cicd/deploy.md` how to add reviewers and how rollback works
+- Direct `flyctl deploy` from a developer laptop still works (manual override path documented)
+
+---
+
+### E9-S4 · Shared base Dockerfile
+
+**As a maintainer**, I want one shared base Dockerfile so per-bot files only declare what's actually different (entrypoint, port, whether Playwright is needed) and hardening (non-root user, HEALTHCHECK, Node patch pin) lives in one place.
+
+**Acceptance criteria:**
+- New `Dockerfile.base` defines `deps` and `build` stages parameterized by `BOT_NAME` build arg
+- Each bot has a thin `apps/<bot>/Dockerfile` that `FROM`s the shared image and only sets `EXPOSE`, `CMD`, and runner base (`node:22-slim` vs Playwright)
+- Runner stage runs as a non-root user (`USER node` or equivalent)
+- `HEALTHCHECK CMD` directive added to runner stage hitting `/health`
+- Node version pinned to a specific patch (`node:22.x.y-slim`) to avoid surprise base updates
+- All three images still build in CI (E7-S2) and on Fly.io
+
+---
+
+### E9-S5 · Deploy rollback runbook
+
+**As an on-call engineer**, I want a one-page runbook for "the deploy is bad, get me back to the previous version" so I'm not learning Fly's release commands during an incident.
+
+**Acceptance criteria:**
+- `docs/cicd/rollback.md` covers: identifying the bad release, `flyctl releases list`, `flyctl deploy --image <previous-image-ref>`, verifying `/health`
+- Includes the GitHub Actions path: re-run the previous successful deploy workflow
+- Lists which contracts/jobs each bot owns so a rollback decision can weigh which work is in-flight
+- Linked from `README.md` and from the deploy workflow's success summary
+

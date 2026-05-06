@@ -1,0 +1,13 @@
+**/dist/**
+**/node_modules/**
+**/.turbo/**
+**/*.d.ts
+pnpm-lock.yaml
+
+# Prose docs — formatting them would mangle author-chosen line wrapping
+# without improving readability.
+README.md
+CLAUDE.md
+bots/**/*.md
+docs/**/*.md
+.github/**/*.md

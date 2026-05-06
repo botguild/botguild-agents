@@ -10,7 +10,7 @@ export interface WebhookRegistrationConfig {
 }
 
 export async function ensureWebhookRegistered(
-  config: WebhookRegistrationConfig
+  config: WebhookRegistrationConfig,
 ): Promise<WebhookRegistration> {
   const { client, webhookSecret, events, logger } = config;
   const webhookUrl = config.webhookBaseUrl.replace(/\/$/, '') + '/webhook';
@@ -34,18 +34,21 @@ export async function ensureWebhookRegistered(
     const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
     logger.info(
       { webhookUrl, webhookId: registration.id },
-      're registered webhook (secret or event list mismatch)'
+      're registered webhook (secret or event list mismatch)',
     );
     return registration;
   }
 
   const sorted = [...matches].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
   const [newest, ...duplicates] = sorted;
 
   await Promise.all(duplicates.map((r) => client.deleteWebhook(r.id)));
-  logger.info({ webhookUrl, removed: duplicates.length }, `removed ${duplicates.length} duplicate webhooks`);
+  logger.info(
+    { webhookUrl, removed: duplicates.length },
+    `removed ${duplicates.length} duplicate webhooks`,
+  );
 
   if (newest.secret === webhookSecret && eventsMatch(newest.events, events)) {
     return newest;
@@ -55,7 +58,7 @@ export async function ensureWebhookRegistered(
   const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
   logger.info(
     { webhookUrl, webhookId: registration.id },
-    're registered webhook (secret or event list mismatch)'
+    're registered webhook (secret or event list mismatch)',
   );
   return registration;
 }

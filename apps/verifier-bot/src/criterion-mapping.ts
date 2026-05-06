@@ -12,15 +12,18 @@ export function buildHttpConfigFromCriterion(
   const expected = criterion.expected ?? '';
   const out: HttpCheckConfig = { ...baseConfig };
 
-  const statusMatch = expected.match(/status\s*(?:code\s*)?(\d{3})/i)
-    ?? expected.match(/\bHTTP\s*(\d{3})\b/i)
-    ?? expected.match(/\b(\d{3})\b/);
+  const statusMatch =
+    expected.match(/status\s*(?:code\s*)?(\d{3})/i) ??
+    expected.match(/\bHTTP\s*(\d{3})\b/i) ??
+    expected.match(/\b(\d{3})\b/);
   if (statusMatch) out.expectedStatusCode = Number(statusMatch[1]);
 
   const latencyMs = parseLatencyMs(expected);
   if (latencyMs !== null) out.maxLatencyMs = latencyMs;
 
-  const headerMatches = [...expected.matchAll(/header[s]?[:\s]+([A-Za-z0-9_-]+(?:\s*,\s*[A-Za-z0-9_-]+)*)/gi)];
+  const headerMatches = [
+    ...expected.matchAll(/header[s]?[:\s]+([A-Za-z0-9_-]+(?:\s*,\s*[A-Za-z0-9_-]+)*)/gi),
+  ];
   if (headerMatches.length > 0) {
     out.requiredHeaders = headerMatches
       .flatMap((m) => m[1].split(/\s*,\s*/))
@@ -40,7 +43,7 @@ function parseLatencyMs(text: string): number | null {
   return null;
 }
 
-const CSS_SELECTOR_RE = /([#.][A-Za-z][\w-]*|\[[^\]]+\]|[A-Za-z][\w-]*\s*[#.\[][^\s'"]+)/;
+const CSS_SELECTOR_RE = /([#.][A-Za-z][\w-]*|\[[^\]]+\]|[A-Za-z][\w-]*\s*[#.[][^\s'"]+)/;
 
 export function buildDomCheckFromCriterion(criterion: Criterion): DomCheck {
   const expected = criterion.expected ?? '';
@@ -76,9 +79,9 @@ export function buildDataQualityCriterion(criterion: Criterion): DataQualityCrit
   const text = `${desc} ${expected}`;
 
   const fieldMatch =
-    expected.match(/field\s+["']?([A-Za-z_][\w-]*)["']?/i)
-    ?? expected.match(/column\s+["']?([A-Za-z_][\w-]*)["']?/i)
-    ?? criterion.description.match(/["']([A-Za-z_][\w-]*)["']/);
+    expected.match(/field\s+["']?([A-Za-z_][\w-]*)["']?/i) ??
+    expected.match(/column\s+["']?([A-Za-z_][\w-]*)["']?/i) ??
+    criterion.description.match(/["']([A-Za-z_][\w-]*)["']/);
   const field = fieldMatch ? fieldMatch[1] : criterion.id;
 
   const base = {
@@ -95,7 +98,10 @@ export function buildDataQualityCriterion(criterion: Criterion): DataQualityCrit
       threshold: pct ? Number(pct[1]) / 100 : 1,
     };
   }
-  if (/type|integer|number|string|boolean|date/.test(text) && /correct|is\s+a\s+|must\s+be/.test(text)) {
+  if (
+    /type|integer|number|string|boolean|date/.test(text) &&
+    /correct|is\s+a\s+|must\s+be/.test(text)
+  ) {
     const typeMatch = expected.match(/\b(string|number|integer|float|boolean|date)\b/i);
     return {
       ...base,

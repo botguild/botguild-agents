@@ -107,7 +107,10 @@ export function createGigParser(config: GigParserConfig): {
           ],
         });
       } catch (err) {
-        logger.error({ err, gigId: gig.id, contractId }, 'Claude API call failed during gig parsing');
+        logger.error(
+          { err, gigId: gig.id, contractId },
+          'Claude API call failed during gig parsing',
+        );
         throw err;
       }
 
@@ -129,7 +132,7 @@ export function createGigParser(config: GigParserConfig): {
           { err, gigId: gig.id, contractId, rawText: textBlock.text },
           'failed to parse Claude JSON response for gig',
         );
-        throw new Error(`JSON parse failed for gig ${gig.id}: ${String(err)}`);
+        throw new Error(`JSON parse failed for gig ${gig.id}: ${String(err)}`, { cause: err });
       }
 
       const config: WatchJobConfig = {

@@ -112,26 +112,21 @@ function detectCheckType(gig: Gig): CheckType {
   if (text.includes('smoke') || text.includes('regression')) return 'smoke';
   if (text.includes('data') || text.includes('quality')) return 'dataQuality';
   if (text.includes('api') || text.includes('contract')) return 'apiContract';
-  if (
-    text.includes('acceptance') ||
-    text.includes('criteria') ||
-    text.includes('audit')
-  ) {
+  if (text.includes('acceptance') || text.includes('criteria') || text.includes('audit')) {
     return 'acceptanceAudit';
   }
   return 'smoke';
 }
 
-export function pricingCalc(
-  gig: Gig
-): { price: number; timeline: string; milestones: MilestoneDraft[] } {
+export function pricingCalc(gig: Gig): {
+  price: number;
+  timeline: string;
+  milestones: MilestoneDraft[];
+} {
   const checkType = detectCheckType(gig);
   const baseRate = verifierPricing.baseRates[checkType];
 
-  const price = Math.min(
-    verifierPricing.budgetMax,
-    Math.max(verifierPricing.budgetMin, baseRate)
-  );
+  const price = Math.min(verifierPricing.budgetMax, Math.max(verifierPricing.budgetMin, baseRate));
 
   const m1Price = Math.round(price * 0.5);
   const m2Price = price - m1Price;

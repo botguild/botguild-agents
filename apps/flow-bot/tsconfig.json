@@ -4,8 +4,6 @@
     "rootDir": "./src",
     "outDir": "./dist"
   },
-  "references": [
-    { "path": "../../packages/agent-core" }
-  ],
+  "references": [{ "path": "../../packages/agent-core" }],
   "include": ["src"]
 }

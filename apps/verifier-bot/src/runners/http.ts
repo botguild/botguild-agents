@@ -69,7 +69,7 @@ async function runAttempt(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   const start = Date.now();
-  let latencyMs = 0;
+  let latencyMs: number;
 
   try {
     const response = await fetch(target, { headers, signal: controller.signal });
@@ -126,7 +126,6 @@ async function runAttempt(
 
     return { latencyMs };
   } catch (err) {
-    latencyMs = Date.now() - start;
     clearTimeout(timeoutId);
 
     if (err instanceof Error && err.name === 'AbortError') {
@@ -156,10 +155,9 @@ export async function runHttpCheck(
   description: string,
   config: HttpCheckConfig,
 ): Promise<CheckResult> {
-  const { logger, expectedStatusCode = 200, maxLatencyMs, requiredHeaders, responseSchema } = config;
+  const { logger } = config;
 
   let lastFailure: AttemptFailure | null = null;
-  let lastLatencyMs: number | undefined;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     logger.info({ target, criterionId, attempt }, 'running HTTP check attempt');
@@ -167,7 +165,10 @@ export async function runHttpCheck(
     const result = await runAttempt(target, config);
 
     if ('latencyMs' in result) {
-      logger.info({ target, criterionId, attempt, latencyMs: result.latencyMs }, 'HTTP check passed');
+      logger.info(
+        { target, criterionId, attempt, latencyMs: result.latencyMs },
+        'HTTP check passed',
+      );
       return {
         criterionId,
         description,
@@ -180,10 +181,16 @@ export async function runHttpCheck(
     }
 
     lastFailure = result;
-    lastLatencyMs = undefined;
 
     logger.warn(
-      { target, criterionId, attempt, actual: result.actual, expected: result.expected, error: result.error },
+      {
+        target,
+        criterionId,
+        attempt,
+        actual: result.actual,
+        expected: result.expected,
+        error: result.error,
+      },
       'HTTP check attempt failed',
     );
 
@@ -203,7 +210,6 @@ export async function runHttpCheck(
     verdict: 'fail',
     actual: lastFailure!.actual,
     expected: lastFailure!.expected,
-    latencyMs: lastLatencyMs,
     error: lastFailure!.error,
     attempts: MAX_ATTEMPTS,
   };
@@ -213,7 +219,8 @@ function buildExpectedDescription(config: HttpCheckConfig): string {
   const { expectedStatusCode = 200, maxLatencyMs, requiredHeaders, responseSchema } = config;
   const parts: string[] = [`status ${expectedStatusCode}`];
   if (maxLatencyMs !== undefined) parts.push(`latency ≤ ${maxLatencyMs}ms`);
-  if (requiredHeaders && requiredHeaders.length > 0) parts.push(`headers: ${requiredHeaders.join(', ')}`);
+  if (requiredHeaders && requiredHeaders.length > 0)
+    parts.push(`headers: ${requiredHeaders.join(', ')}`);
   if (responseSchema) parts.push('valid schema');
   return parts.join(', ');
 }
@@ -225,7 +232,8 @@ function buildActualDescription(config: HttpCheckConfig, latencyMs: number): str
   // status code and real latency) is what the report is supposed to show.
   const parts: string[] = [`status ${expectedStatusCode}`, `latency ${latencyMs}ms`];
   if (maxLatencyMs !== undefined) parts.push(`(≤ ${maxLatencyMs}ms)`);
-  if (requiredHeaders && requiredHeaders.length > 0) parts.push(`headers: ${requiredHeaders.join(', ')} present`);
+  if (requiredHeaders && requiredHeaders.length > 0)
+    parts.push(`headers: ${requiredHeaders.join(', ')} present`);
   if (responseSchema) parts.push('schema valid');
   return parts.join(', ');
 }
