@@ -1,7 +1,8 @@
 # BotGuild Agents — Epics & Stories
 
-**Version:** 1.0  
-**Date:** 2026-05-03
+**Version:** 1.1  
+**Date:** 2026-05-03  
+**Change (v1.1):** E5 redesigned — subscription/flat-monthly pricing removed; all standing offers use upfront multi-milestone fixed contracts (blockchain escrow does not support recurring billing). E2-S7 replaced accordingly.
 
 ---
 
@@ -13,7 +14,7 @@
 | E2 | SentinelBot — Monitoring Agent | SentinelBot | Live monitoring bot accepting gigs and running scheduled watch jobs |
 | E3 | FlowBot — Data Transform Agent | FlowBot | Live ETL bot accepting gigs and delivering clean structured data |
 | E4 | VerifierBot — QA Agent | VerifierBot | Live QA bot accepting gigs and delivering pass/fail reports |
-| E5 | Standing Offers & Subscriptions | All | All three bots publish and service standing offers |
+| E5 | Standing Offers (multi-milestone packages) | All | All three bots publish standing offer templates; each hire is an upfront fixed-price gig with weekly milestones |
 | E6 | Infra, Deployment & Observability | All | All three bots deployed on Fly.io, monitored, secrets managed |
 
 ---
@@ -231,17 +232,16 @@
 
 ---
 
-### E2-S7 · Standing offer subscription handler
+### E2-S7 · Standing offer gig handler
 
-**As SentinelBot**, I need to handle subscription events for my standing offers so that new subscribers get their monitoring jobs set up automatically.
+**As SentinelBot**, I need to handle a gig opened from one of my standing offer templates so that the payer gets a pre-configured multi-milestone watch package without me re-parsing the brief from scratch.
 
 **Acceptance criteria:**
-- Handles `subscription.activated` webhook event
-- Creates a watch job from the subscription's configured parameters
-- Sends a "Subscription started" thread message with job summary
-- Handles `subscription.cancelled` → stops and removes the watch job
-- Handles `subscription.paused` → pauses the cron job (does not delete config)
-- Handles `subscription.resumed` → resumes the cron job
+- Detects that an accepted gig originated from a standing offer template (via a `standingOfferId` field on the gig or a known title prefix)
+- Looks up the matching local standing offer config to determine: watch type, default schedule, milestone count (4 weekly), and default price breakdown
+- Creates the watch job config and 4 milestones automatically without sending a clarification request (config is pre-defined by the template)
+- Sends "Package started" thread message with: watch targets, schedule, milestone delivery dates
+- Milestone titles follow the pattern "Week N — [watch type] report"
 
 ---
 
@@ -433,69 +433,89 @@
 
 ---
 
-## E5 · Standing Offers & Subscriptions
+## E5 · Standing Offers (multi-milestone packages)
 
-**Goal:** All three bots have published standing offers on BotGuild and can service them — recurring jobs for subscribers.
+**Goal:** All three bots publish standing offer templates on BotGuild. Each hire creates an upfront fixed-price gig with escrow covering the full package; the bot delivers one milestone per period (weekly or per-batch). No subscription billing — each contract is discrete.
 
----
-
-### E5-S1 · SentinelBot standing offer: Daily Site Watch
-
-**Acceptance criteria:**
-- Offer published: flat-monthly pricing, 7-day trial, 15-min alert SLO
-- Subscription activation sets up a once-daily page diff job for subscriber's configured URLs
-- Alert fires within 15 minutes of detected change (event-driven, not scheduled)
-- Monthly "no changes detected" summary sent if nothing changed all month
+**Design principle:** A standing offer is a well-defined, pre-priced service template. Payers open a gig from the template with minimal configuration; the bot auto-configures milestones from the template definition rather than parsing a free-form brief.
 
 ---
 
-### E5-S2 · SentinelBot standing offer: API Health Monitor
+### E5-S1 · SentinelBot standing offer: Site Watch Package
+
+**As a payer**, I want to hire SentinelBot for a 4-week site monitoring package so that I get weekly diff reports and immediate alerts without writing a custom gig brief.
 
 **Acceptance criteria:**
-- Offer published: flat-monthly pricing, checks every 15 minutes, Slack/Telegram alert on failure
-- Subscription activation configures health check cron for subscriber's endpoints
-- Downtime alert sent to payer's preferred channel
-- Weekly uptime summary report delivered as a thread message
+- Standing offer template published: fixed price (4-week package), deliverable = 4 weekly milestone reports + immediate thread alert on change detection
+- Template defines default config: once-daily page diff, full-page screenshot on change, summary diff via Claude
+- On hire: bot auto-creates 4 milestones ("Week 1 — Site Watch Report" … "Week 4"), no clarification request needed unless targets are missing
+- Each weekly milestone includes: change count, diff summary, screenshots if any changes, "no changes detected" note if clean week
+- Alert on change: thread message within 15 minutes of detection (does not wait for weekly milestone)
 
 ---
 
-### E5-S3 · FlowBot standing offer: Daily Data Sync
+### E5-S2 · SentinelBot standing offer: API Health Monitor Package
+
+**As a payer**, I want to hire SentinelBot for a 4-week API monitoring package so that I receive weekly uptime summaries and immediate downtime alerts.
 
 **Acceptance criteria:**
-- Offer published: flat-monthly pricing, daily schedule, up to 3 data sources per subscription
-- Subscription activation configures a daily cron job with subscriber's source + destination config
-- On each run: fetches, normalizes, delivers output file to agreed destination (email, upload, or webhook)
-- Monthly usage summary sent (rows processed, any errors)
+- Standing offer template published: fixed price (4-week package), deliverable = 4 weekly uptime summary milestones
+- Template defines default config: health check every 15 minutes, records status code + latency
+- On hire: bot auto-creates 4 weekly milestones, begins polling immediately
+- Each weekly milestone includes: uptime percentage, total checks, downtime incidents with timestamps and durations
+- Downtime alert: thread message within 15 minutes of first failure detection
 
 ---
 
-### E5-S4 · FlowBot standing offer: Invoice Processing Lane
+### E5-S3 · FlowBot standing offer: Data Sync Package
+
+**As a payer**, I want to hire FlowBot for a recurring data sync package so that my data source is fetched, normalized, and delivered on a fixed schedule.
 
 **Acceptance criteria:**
-- Offer published: per-use pricing (price per invoice document)
-- Subscriber sends invoice URLs or email attachments (via thread message)
-- FlowBot processes each batch within 4 hours, delivers structured CSV
-- Monthly invoice with total documents processed and total cost
+- Standing offer template published: fixed price, deliverable = N milestone deliveries (payer chooses 4-weekly or 8-biweekly at hire time via gig description)
+- Template defines default config: up to 3 input sources, CSV or JSON output
+- On hire: bot auto-creates milestones based on chosen cadence; each milestone = one sync run delivery
+- Each milestone includes: output file upload, row count, error count, any schema drift detected vs. prior run
+- If a sync run produces 0 rows: delivers milestone with explanation rather than silently skipping
 
 ---
 
-### E5-S5 · VerifierBot standing offer: Nightly Smoke Test
+### E5-S4 · FlowBot standing offer: Invoice Processing Batch
+
+**As a payer**, I want to hire FlowBot to process a batch of invoices so that I receive a structured CSV without writing a custom ETL brief.
 
 **Acceptance criteria:**
-- Offer published: flat-monthly pricing, runs nightly at 2am UTC
-- Subscription activation configures check suite for subscriber's endpoints/URLs
-- Nightly report delivered via thread message: pass/fail per check, any regressions vs. prior night
-- Immediate alert on critical failure (< 15 min from run completion)
+- Standing offer template published: fixed price per batch (single-milestone gig)
+- Payer pastes invoice URLs or attaches files in the gig description or opening thread message
+- Bot processes all documents in the batch as a single milestone: PDF extraction → normalize → deliver CSV
+- Milestone includes: document count, row count, any `needs_review` flags, download link
+- Turnaround: milestone delivered within 4 hours of contract acceptance
 
 ---
 
-### E5-S6 · VerifierBot standing offer: Acceptance Review Pack
+### E5-S5 · VerifierBot standing offer: Nightly Smoke Test Package
+
+**As a payer**, I want to hire VerifierBot for a 4-week nightly smoke test package so that I receive weekly regression summaries and immediate critical failure alerts.
 
 **Acceptance criteria:**
-- Offer published: per-use pricing (price per deliverable reviewed)
-- Subscriber submits deliverable + criteria via thread message
-- VerifierBot runs full check suite and delivers report within 4 hours
-- Report delivered to thread, not as a formal contract milestone (single-shot, lightweight)
+- Standing offer template published: fixed price (4-week package), deliverable = 4 weekly summary milestones
+- Template defines default config: nightly run at 2am UTC, HTTP + DOM checks
+- On hire: bot auto-creates 4 weekly milestones; each covers 7 nightly runs
+- Each milestone includes: pass/fail per check, regression count vs. prior week, nightly trend table
+- Critical failure alert: thread message within 15 minutes of a nightly run that has any `FAIL` verdict
+
+---
+
+### E5-S6 · VerifierBot standing offer: Acceptance Review
+
+**As a payer**, I want to hire VerifierBot to review a single deliverable against stated criteria so that I get a structured pass/fail report quickly.
+
+**Acceptance criteria:**
+- Standing offer template published: fixed price per review (single-milestone gig)
+- Payer provides deliverable URL/content and criteria list in gig description
+- Bot runs full check suite (HTTP, DOM if applicable, Claude criteria audit) as a single milestone
+- Milestone delivers the standard VerifierBot report: Verdict, per-criterion table, evidence, recommendations
+- Turnaround: milestone delivered within 4 hours of contract acceptance
 
 ---
 
