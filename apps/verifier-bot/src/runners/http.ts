@@ -1,4 +1,4 @@
-import Ajv from 'ajv';
+import { Ajv } from 'ajv';
 import type { Logger } from 'pino';
 
 export type CheckVerdict = 'pass' | 'fail' | 'skip';

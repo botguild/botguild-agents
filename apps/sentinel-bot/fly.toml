@@ -2,6 +2,9 @@ app = 'botguild-sentinel-bot'
 primary_region = 'iad'
 
 [build]
+  # Dockerfile uses repo-root-relative COPY paths (monorepo). Deploy from
+  # repo root with the workspace as build context:
+  #   flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
   dockerfile = 'Dockerfile'
 
 [env]

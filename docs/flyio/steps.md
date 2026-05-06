@@ -68,40 +68,74 @@ volumes (`flow_data`, `verifier_data`).
 
 ## 5. Set per-app secrets
 
-Each bot needs the same set of credentials. Run this block three times — once
-per app:
+Each bot needs the same set of credentials. The repo ships a helper script
+that reads `.env` and pushes secrets to all three apps in one shot:
+
+```bash
+# 1. Copy .env.example to .env and fill in values
+cp .env.example .env
+$EDITOR .env
+
+# 2. Generate a webhook secret (paste output into BOTGUILD_WEBHOOK_SECRET)
+openssl rand -hex 32
+
+# 3. Preview what the script will push (values are masked in output)
+./scripts/fly-secrets.sh --dry-run
+
+# 4. Apply
+./scripts/fly-secrets.sh
+```
+
+The script:
+- Reads `.env` from the repo root and validates that the four required values
+  (`BOTGUILD_API_URL`, `BOTGUILD_API_KEY`, `BOTGUILD_WEBHOOK_SECRET`,
+  `ANTHROPIC_API_KEY`) are non-empty.
+- Computes `WEBHOOK_BASE_URL` per-app as `https://<app>.fly.dev`, ignoring
+  whatever's in `.env` (which is for local docker-compose / ngrok).
+- Skips `PORT` because each bot's `fly.toml` owns it.
+- Pushes optional values (`BOTGUILD_BOT_ID`, `TELEGRAM_*`) only if set.
+- Use `--app <name>` to limit to one bot, or `--dry-run` to preview.
+
+If you'd rather set them by hand, the equivalent without the script is:
 
 ```bash
 APP=botguild-sentinel-bot   # then botguild-flow-bot, then botguild-verifier-bot
 
 flyctl secrets set --app $APP \
-  BOTGUILD_API_URL=https://botguild.ai/api \
+  BOTGUILD_API_URL=https://api.botguild.ai \
   BOTGUILD_API_KEY=<your-bot-api-key> \
-  BOTGUILD_BOT_ID=<bot-id-or-blank-to-resolve-on-startup> \
   BOTGUILD_WEBHOOK_SECRET=<random-32+-char-string> \
   ANTHROPIC_API_KEY=<your-anthropic-key> \
-  WEBHOOK_BASE_URL=https://$APP.fly.dev \
-  TELEGRAM_BOT_TOKEN=<optional> \
-  TELEGRAM_CHAT_ID=<optional>
+  WEBHOOK_BASE_URL=https://$APP.fly.dev
 ```
 
-`WEBHOOK_BASE_URL` must match the public hostname Fly assigns each app — by
-default `<app-name>.fly.dev`. The bot appends `/webhook` to it on startup
-when registering with the platform.
-
-`PORT` is already set per-bot in `fly.toml` (3001/3002/3003) — don't override
-it via secrets.
+Notes:
+- `WEBHOOK_BASE_URL` must match the public hostname Fly assigns each app — by
+  default `<app-name>.fly.dev`. The bot appends `/webhook` to it on startup
+  when registering with the platform.
+- `PORT` is already set per-bot in `fly.toml` (3001/3002/3003) — don't override
+  it via secrets.
+- `BOTGUILD_BOT_ID` can be left blank initially; the bot resolves it on
+  startup via `registerBot` and you can read it back from `flyctl logs`.
 
 ## 6. First deploy (manual smoke test)
 
 Deploy each bot manually first so you can watch logs and catch config issues
-before handing off to CI:
+before handing off to CI. **Run from the repo root** — the Dockerfiles use
+monorepo-relative `COPY apps/<bot>/...` paths, so the build context must be
+the workspace, not the bot subdirectory.
 
 ```bash
-cd apps/sentinel-bot && flyctl deploy --remote-only
-cd ../flow-bot       && flyctl deploy --remote-only
-cd ../verifier-bot   && flyctl deploy --remote-only
+flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
+flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
+flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
 ```
+
+The trailing `.` is significant — it sets the Docker build context to the
+current directory (repo root) so the Dockerfile's `COPY apps/<bot>/...`
+paths resolve correctly. Without it, flyctl would default the context to
+the directory containing `fly.toml` and the build fails with
+`apps/<bot>: not found`.
 
 `--remote-only` builds the Docker image on Fly's builder so you don't need
 local Docker. After each deploy:

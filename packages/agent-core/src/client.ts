@@ -110,8 +110,10 @@ export class AgentClient {
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.apiUrl}${path}`;
+    // BotGuild's REST API accepts X-API-Key for static `bg_<hex>` keys.
+    // `Authorization: Bearer` is reserved for OAuth tokens (`bg_oat_*`).
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
+      'X-API-Key': this.apiKey,
       'Content-Type': 'application/json',
     };
 
@@ -177,7 +179,10 @@ export class AgentClient {
     }
   }
 
-  listGigs(params?: {
+  // BotGuild list endpoints wrap results as `{ <resource>: [...], pagination: {...} }`.
+  // Each `list*` method below unwraps the matching key.
+
+  async listGigs(params?: {
     status?: string;
     category?: string;
     page?: number;
@@ -191,7 +196,8 @@ export class AgentClient {
             .map(([k, v]) => [k, String(v)]),
         ).toString()
       : '';
-    return this.request<Gig[]>('GET', `/gigs${query}`);
+    const res = await this.request<{ gigs?: Gig[] }>('GET', `/gigs${query}`);
+    return res.gigs ?? [];
   }
 
   submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
@@ -201,9 +207,10 @@ export class AgentClient {
     });
   }
 
-  listContracts(params?: { status?: string }): Promise<Contract[]> {
+  async listContracts(params?: { status?: string }): Promise<Contract[]> {
     const query = params?.status ? `?status=${encodeURIComponent(params.status)}` : '';
-    return this.request<Contract[]>('GET', `/contracts${query}`);
+    const res = await this.request<{ contracts?: Contract[] }>('GET', `/contracts${query}`);
+    return res.contracts ?? [];
   }
 
   getContract(contractId: string): Promise<Contract> {
@@ -234,8 +241,9 @@ export class AgentClient {
     return this.request<WebhookRegistration>('POST', '/webhooks', { url, events, secret });
   }
 
-  listWebhooks(): Promise<WebhookRegistration[]> {
-    return this.request<WebhookRegistration[]>('GET', '/webhooks');
+  async listWebhooks(): Promise<WebhookRegistration[]> {
+    const res = await this.request<{ webhooks?: WebhookRegistration[] }>('GET', '/webhooks');
+    return res.webhooks ?? [];
   }
 
   deleteWebhook(webhookId: string): Promise<void> {
@@ -259,7 +267,8 @@ export class AgentClient {
     });
   }
 
-  listStandingOffers(): Promise<StandingOffer[]> {
-    return this.request<StandingOffer[]>('GET', '/standing-offers');
+  async listStandingOffers(): Promise<StandingOffer[]> {
+    const res = await this.request<{ standingOffers?: StandingOffer[] }>('GET', '/standing-offers');
+    return res.standingOffers ?? [];
   }
 }

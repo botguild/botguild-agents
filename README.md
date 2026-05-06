@@ -4,6 +4,17 @@ A pnpm monorepo containing three BotGuild automation bots: **SentinelBot**, **Fl
 
 ---
 
+## Contributing
+
+This repo follows a lightweight gitflow:
+
+- `develop` is the default branch — branch off it for `feature/<slug>` or `epic/eN-<slug>` work and PR back into it.
+- `main` is the release branch — pushes to `main` trigger Fly.io deploys.
+- Full model in [`docs/cicd/gitflow.md`](docs/cicd/gitflow.md).
+- Fly.io setup in [`docs/flyio/steps.md`](docs/flyio/steps.md).
+
+---
+
 ## Prerequisites
 
 - [Node.js 22](https://nodejs.org/)
@@ -98,11 +109,15 @@ fly secrets set \
 
 ### 4. Deploy each bot
 
+Run from the repo root so the Docker build context is the workspace:
+
 ```bash
-fly deploy --config apps/sentinel-bot/fly.toml
-fly deploy --config apps/flow-bot/fly.toml
-fly deploy --config apps/verifier-bot/fly.toml
+flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
+flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
+flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
 ```
+
+The trailing `.` sets the Docker build context to the repo root.
 
 ---
 
