@@ -11,8 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only --app botguild-sentinel-bot
-        working-directory: apps/sentinel-bot
+      # Deploy from repo root so the Docker build context is the whole
+      # workspace — the Dockerfile uses monorepo-relative COPY paths.
+      - run: flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -22,8 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only --app botguild-flow-bot
-        working-directory: apps/flow-bot
+      - run: flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
@@ -33,7 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only --app botguild-verifier-bot
-        working-directory: apps/verifier-bot
+      - run: flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
