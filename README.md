@@ -109,11 +109,15 @@ fly secrets set \
 
 ### 4. Deploy each bot
 
+Run from the repo root so the Docker build context is the workspace:
+
 ```bash
-fly deploy --config apps/sentinel-bot/fly.toml
-fly deploy --config apps/flow-bot/fly.toml
-fly deploy --config apps/verifier-bot/fly.toml
+flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
+flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
+flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
 ```
+
+The trailing `.` sets the Docker build context to the repo root.
 
 ---
 

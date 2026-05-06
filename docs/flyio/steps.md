@@ -121,13 +121,21 @@ Notes:
 ## 6. First deploy (manual smoke test)
 
 Deploy each bot manually first so you can watch logs and catch config issues
-before handing off to CI:
+before handing off to CI. **Run from the repo root** — the Dockerfiles use
+monorepo-relative `COPY apps/<bot>/...` paths, so the build context must be
+the workspace, not the bot subdirectory.
 
 ```bash
-cd apps/sentinel-bot && flyctl deploy --remote-only
-cd ../flow-bot       && flyctl deploy --remote-only
-cd ../verifier-bot   && flyctl deploy --remote-only
+flyctl deploy . --remote-only --config apps/sentinel-bot/fly.toml
+flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
+flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
 ```
+
+The trailing `.` is significant — it sets the Docker build context to the
+current directory (repo root) so the Dockerfile's `COPY apps/<bot>/...`
+paths resolve correctly. Without it, flyctl would default the context to
+the directory containing `fly.toml` and the build fails with
+`apps/<bot>: not found`.
 
 `--remote-only` builds the Docker image on Fly's builder so you don't need
 local Docker. After each deploy:
