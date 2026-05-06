@@ -4,6 +4,17 @@ A pnpm monorepo containing three BotGuild automation bots: **SentinelBot**, **Fl
 
 ---
 
+## Contributing
+
+This repo follows a lightweight gitflow:
+
+- `develop` is the default branch — branch off it for `feature/<slug>` or `epic/eN-<slug>` work and PR back into it.
+- `main` is the release branch — pushes to `main` trigger Fly.io deploys.
+- Full model in [`docs/cicd/gitflow.md`](docs/cicd/gitflow.md).
+- Fly.io setup in [`docs/flyio/steps.md`](docs/flyio/steps.md).
+
+---
+
 ## Prerequisites
 
 - [Node.js 22](https://nodejs.org/)
