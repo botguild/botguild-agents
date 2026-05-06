@@ -144,9 +144,11 @@ function deriveComplexity(targetCount: number): Complexity {
 
 type MilestoneDraft = { title: string; description: string; price: number };
 
-export function pricingCalc(
-  gig: Gig
-): { price: number; timeline: string; milestones: MilestoneDraft[] } {
+export function pricingCalc(gig: Gig): {
+  price: number;
+  timeline: string;
+  milestones: MilestoneDraft[];
+} {
   const watchType = detectWatchType(gig);
   const targetCount = estimateTargetCount(gig);
   const complexity = deriveComplexity(targetCount);
@@ -157,7 +159,7 @@ export function pricingCalc(
 
   const price = Math.min(
     sentinelPricing.budgetMax,
-    Math.max(sentinelPricing.budgetMin, Math.round(rawPrice))
+    Math.max(sentinelPricing.budgetMin, Math.round(rawPrice)),
   );
 
   const weeklyPrice = Math.round(price / 4);

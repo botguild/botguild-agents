@@ -39,7 +39,8 @@ export function detectFlowStandingOffer(gig: Gig): FlowStandingMatch | null {
 
 function detectInputTypeFromDescription(description: string): 'csv' | 'json' | 'api' | 'sheet' {
   const text = description.toLowerCase();
-  if (text.includes('sheet') || text.includes('google sheet') || text.includes('airtable')) return 'sheet';
+  if (text.includes('sheet') || text.includes('google sheet') || text.includes('airtable'))
+    return 'sheet';
   if (text.includes('csv') || text.includes('spreadsheet') || text.includes('excel')) return 'csv';
   if (text.includes('json')) return 'json';
   if (text.includes('api') || text.includes('endpoint') || text.includes('rest')) return 'api';
@@ -110,12 +111,7 @@ function buildMilestoneDates(count: number): string[] {
 
 function buildMilestoneLabels(standingType: FlowStandingType): string[] {
   if (standingType === 'data-sync') {
-    return [
-      'Week 1 — Sync Run',
-      'Week 2 — Sync Run',
-      'Week 3 — Sync Run',
-      'Week 4 — Sync Run',
-    ];
+    return ['Week 1 — Sync Run', 'Week 2 — Sync Run', 'Week 3 — Sync Run', 'Week 4 — Sync Run'];
   }
   return ['Invoice Processing Complete'];
 }

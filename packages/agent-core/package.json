@@ -15,7 +15,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.51.0",

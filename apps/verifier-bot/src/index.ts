@@ -14,12 +14,7 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import {
-  botProfile,
-  scorerConfig,
-  standingOffers,
-  pricingCalc,
-} from './config.js';
+import { botProfile, scorerConfig, standingOffers, pricingCalc } from './config.js';
 import { createGigParser } from './parser.js';
 import { runHttpCheck } from './runners/http.js';
 import { runDomChecks } from './runners/dom.js';
@@ -92,9 +87,10 @@ async function main(): Promise<void> {
   const effectiveBotId = botId || resolvedBotId;
   logger = createLogger({ service: 'verifier-bot', botId: effectiveBotId });
 
-  const alerter = telegramToken && telegramChatId
-    ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
-    : null;
+  const alerter =
+    telegramToken && telegramChatId
+      ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
+      : null;
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -260,7 +256,10 @@ async function main(): Promise<void> {
           updatedAt: new Date().toISOString(),
         });
 
-        log.info({ passCount, failCount, durationMs: Date.now() - reportStart }, 'acceptance review pipeline complete');
+        log.info(
+          { passCount, failCount, durationMs: Date.now() - reportStart },
+          'acceptance review pipeline complete',
+        );
       }
 
       return;
@@ -324,7 +323,12 @@ async function main(): Promise<void> {
       for (const criterion of httpCriteria) {
         const target = plan.targets[0] ?? '';
         const httpConfig = buildHttpConfigFromCriterion(criterion, { logger: log });
-        const checkResult = await runHttpCheck(target, criterion.id, criterion.description, httpConfig);
+        const checkResult = await runHttpCheck(
+          target,
+          criterion.id,
+          criterion.description,
+          httpConfig,
+        );
         allCheckResults.push(checkResult);
       }
 
@@ -344,7 +348,9 @@ async function main(): Promise<void> {
       if (dataCriteria.length > 0) {
         const dataSource = plan.targets[0] ?? '';
         const dataQualityCriteria = dataCriteria.map((c) => buildDataQualityCriterion(c));
-        const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, { logger: log });
+        const dataResult = await runDataQualityChecks(dataSource, dataQualityCriteria, {
+          logger: log,
+        });
         allCheckResults.push(...dataResult.checkResults);
       }
 
@@ -402,7 +408,10 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
 
-      log.info({ passCount, failCount, durationMs: Date.now() - reportStart }, 'verification pipeline complete');
+      log.info(
+        { passCount, failCount, durationMs: Date.now() - reportStart },
+        'verification pipeline complete',
+      );
     } catch (err) {
       log.error({ err }, 'verification pipeline failed');
 
@@ -424,10 +433,7 @@ async function main(): Promise<void> {
 
   webhookServer.on('contract.status.changed', async (event) => {
     const { contract } = event.payload as { contract: Contract };
-    logger.info(
-      { contractId: contract.id, status: contract.status },
-      'contract status changed',
-    );
+    logger.info({ contractId: contract.id, status: contract.status }, 'contract status changed');
     if (contract.status === 'completed' || contract.status === 'cancelled') {
       const tasks = nightlyJobs.get(contract.id);
       if (tasks) {
@@ -500,13 +506,17 @@ async function main(): Promise<void> {
 
   process.on('uncaughtException', (err) => {
     logger.fatal({ err }, 'uncaught exception');
-    void alerter?.sendFatalAlert('VerifierBot', effectiveBotId, err.message).finally(() => process.exit(1));
+    void alerter
+      ?.sendFatalAlert('VerifierBot', effectiveBotId, err.message)
+      .finally(() => process.exit(1));
   });
 
   process.on('unhandledRejection', (reason) => {
     const message = reason instanceof Error ? reason.message : String(reason);
     logger.fatal({ reason }, 'unhandled rejection');
-    void alerter?.sendFatalAlert('VerifierBot', effectiveBotId, message).finally(() => process.exit(1));
+    void alerter
+      ?.sendFatalAlert('VerifierBot', effectiveBotId, message)
+      .finally(() => process.exit(1));
   });
 
   function registerSmokeTestCron(
@@ -530,7 +540,12 @@ async function main(): Promise<void> {
         const target = plan.targets[0] ?? '';
         try {
           const httpConfig = buildHttpConfigFromCriterion(criterion, { logger: log });
-          const checkResult = await runHttpCheck(target, criterion.id, criterion.description, httpConfig);
+          const checkResult = await runHttpCheck(
+            target,
+            criterion.id,
+            criterion.description,
+            httpConfig,
+          );
           nightlyResults.push(checkResult);
         } catch (err) {
           log.error({ err, criterionId: criterion.id }, 'nightly http check failed');
@@ -551,7 +566,10 @@ async function main(): Promise<void> {
       });
 
       const failCount = nightlyResults.filter((r) => r.verdict === 'fail').length;
-      log.info({ durationMs: Date.now() - smokeStart, failCount, total: nightlyResults.length }, 'nightly smoke run complete');
+      log.info(
+        { durationMs: Date.now() - smokeStart, failCount, total: nightlyResults.length },
+        'nightly smoke run complete',
+      );
       if (failCount > 0) {
         await client.sendMessage(
           contractId,
@@ -579,16 +597,17 @@ async function main(): Promise<void> {
 
       const reportStart = Date.now();
       try {
-        await generateAndDeliverReport(
-          contractId,
-          nextMilestoneId,
-          accumulatedResults,
-          [],
-          [],
-          { client, apiKey: anthropicApiKey, logger: log },
-        );
+        await generateAndDeliverReport(contractId, nextMilestoneId, accumulatedResults, [], [], {
+          client,
+          apiKey: anthropicApiKey,
+          logger: log,
+        });
         log.info(
-          { durationMs: Date.now() - reportStart, milestoneId: nextMilestoneId, milestoneIndex: idx },
+          {
+            durationMs: Date.now() - reportStart,
+            milestoneId: nextMilestoneId,
+            milestoneIndex: idx,
+          },
           'weekly milestone report delivered',
         );
 
@@ -613,7 +632,10 @@ async function main(): Promise<void> {
           nightlyJobs.delete(contractId);
         }
       } catch (err) {
-        log.error({ err, durationMs: Date.now() - reportStart }, 'weekly milestone report delivery failed');
+        log.error(
+          { err, durationMs: Date.now() - reportStart },
+          'weekly milestone report delivery failed',
+        );
       }
     });
 

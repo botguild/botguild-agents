@@ -64,7 +64,10 @@ Transform rules: ${JSON.stringify(jobConfig.transformRules)}`,
     );
     claudeSummary = textBlock?.text ?? 'Transformation complete.';
   } catch (err) {
-    logger.warn({ err, contractId, milestoneId }, 'Claude summary generation failed, using fallback');
+    logger.warn(
+      { err, contractId, milestoneId },
+      'Claude summary generation failed, using fallback',
+    );
     claudeSummary = `Transformed ${normalizeStats.originalCount} input rows into ${rows.length} output rows in ${jobConfig.outputFormat} format.`;
   }
 
@@ -114,5 +117,9 @@ function serializeRows(
         'Airtable destination: rows are shaped as `{records: [{fields}]}`. Import via Airtable\'s "Create records" API or paste into a base — direct upload requires your base ID and PAT.',
     };
   }
-  return { serialized: JSON.stringify(rows, null, 2), mimeType: 'application/json', formatNote: '' };
+  return {
+    serialized: JSON.stringify(rows, null, 2),
+    mimeType: 'application/json',
+    formatNote: '',
+  };
 }

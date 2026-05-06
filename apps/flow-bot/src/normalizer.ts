@@ -69,10 +69,7 @@ function normalizeDate(value: unknown): string | null {
   return null;
 }
 
-function normalizePhone(
-  value: unknown,
-  phoneFailCount: { count: number },
-): string {
+function normalizePhone(value: unknown, phoneFailCount: { count: number }): string {
   const original = String(value);
 
   if (original.startsWith('+')) {
@@ -158,7 +155,12 @@ export function normalizeRows(
           normalized = dateResult;
           changed = true;
         }
-      } else if (PHONE_FIELD_RE.test(key) && normalized !== null && normalized !== undefined && normalized !== '') {
+      } else if (
+        PHONE_FIELD_RE.test(key) &&
+        normalized !== null &&
+        normalized !== undefined &&
+        normalized !== ''
+      ) {
         const phoneResult = normalizePhone(normalized, phoneFailCounter);
         if (phoneResult !== normalized) {
           normalized = phoneResult;

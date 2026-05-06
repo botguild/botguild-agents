@@ -14,12 +14,7 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import {
-  botProfile,
-  scorerConfig,
-  standingOffers,
-  pricingCalc,
-} from './config.js';
+import { botProfile, scorerConfig, standingOffers, pricingCalc } from './config.js';
 import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
@@ -76,9 +71,10 @@ async function main(): Promise<void> {
   const effectiveBotId = botId || resolvedBotId;
   logger = createLogger({ service: 'sentinel-bot', botId: effectiveBotId });
 
-  const alerter = telegramToken && telegramChatId
-    ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
-    : null;
+  const alerter =
+    telegramToken && telegramChatId
+      ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
+      : null;
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -91,7 +87,17 @@ async function main(): Promise<void> {
     client,
     webhookBaseUrl,
     webhookSecret,
-    events: ['gig.created', 'gig.updated', 'contract.created', 'contract.updated', 'message.created', 'proposal.accepted', 'milestone.accepted', 'message.clarification_request', 'contract.status.changed'],
+    events: [
+      'gig.created',
+      'gig.updated',
+      'contract.created',
+      'contract.updated',
+      'message.created',
+      'proposal.accepted',
+      'milestone.accepted',
+      'message.clarification_request',
+      'contract.status.changed',
+    ],
     logger,
   });
 
@@ -155,7 +161,11 @@ async function main(): Promise<void> {
       log.info('standing offer gig detected, skipping parser');
 
       try {
-        await comms.packageStarted(contract.id, standingResult.config, standingResult.milestoneDates);
+        await comms.packageStarted(
+          contract.id,
+          standingResult.config,
+          standingResult.milestoneDates,
+        );
       } catch (err) {
         log.warn({ err }, 'failed to send packageStarted message');
       }
@@ -169,14 +179,19 @@ async function main(): Promise<void> {
     try {
       parseResult = await parser.parse(gig, contract.id);
     } catch (err) {
-      log.error({ err, durationMs: Date.now() - parseStart }, 'failed to parse gig on proposal.accepted');
+      log.error(
+        { err, durationMs: Date.now() - parseStart },
+        'failed to parse gig on proposal.accepted',
+      );
       return;
     }
 
     const { config, needsClarification, clarificationQuestion } = parseResult;
 
     if (needsClarification) {
-      const question = clarificationQuestion ?? 'Could you provide more details about what you would like monitored?';
+      const question =
+        clarificationQuestion ??
+        'Could you provide more details about what you would like monitored?';
       try {
         await messenger.send(contract.id, question, 'clarification_request');
       } catch (err) {
@@ -208,14 +223,20 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('message.clarification_request', async (event) => {
-    logger.info({ payload: event.payload }, 'clarification request received, awaiting human response');
+    logger.info(
+      { payload: event.payload },
+      'clarification request received, awaiting human response',
+    );
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
     const { contract } = event.payload as { contract: Contract };
     if (contract.status === 'cancelled' || contract.status === 'completed') {
       scheduler.removeJob(contract.id);
-      logger.info({ contractId: contract.id, status: contract.status }, 'job removed due to contract status change');
+      logger.info(
+        { contractId: contract.id, status: contract.status },
+        'job removed due to contract status change',
+      );
     }
   });
 
@@ -249,7 +270,10 @@ async function main(): Promise<void> {
     if (!persisted.watchConfig) continue;
     const cfg = persisted.watchConfig as WatchJobConfig;
     if (!cfg.contractId || !cfg.targets || cfg.targets.length === 0) continue;
-    logger.info({ contractId: persisted.contractId }, 'restoring scheduled watch job from persisted store');
+    logger.info(
+      { contractId: persisted.contractId },
+      'restoring scheduled watch job from persisted store',
+    );
     scheduler.addJob(cfg);
   }
 
@@ -274,13 +298,17 @@ async function main(): Promise<void> {
 
   process.on('uncaughtException', (err) => {
     logger.fatal({ err }, 'uncaught exception');
-    void alerter?.sendFatalAlert('SentinelBot', effectiveBotId, err.message).finally(() => process.exit(1));
+    void alerter
+      ?.sendFatalAlert('SentinelBot', effectiveBotId, err.message)
+      .finally(() => process.exit(1));
   });
 
   process.on('unhandledRejection', (reason) => {
     const message = reason instanceof Error ? reason.message : String(reason);
     logger.fatal({ reason }, 'unhandled rejection');
-    void alerter?.sendFatalAlert('SentinelBot', effectiveBotId, message).finally(() => process.exit(1));
+    void alerter
+      ?.sendFatalAlert('SentinelBot', effectiveBotId, message)
+      .finally(() => process.exit(1));
   });
 }
 

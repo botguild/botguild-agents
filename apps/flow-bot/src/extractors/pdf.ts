@@ -23,12 +23,9 @@ const SYSTEM_PROMPT =
   'You are a data extraction assistant. Extract structured records from document text and return them as a JSON array matching the provided schema. For each record include a `_confidence` field (0.0–1.0). Return only valid JSON.';
 
 function buildUserPrompt(targetSchema: SchemaField[], text: string): string {
-  const schemaDescription = targetSchema
-    .map((f) => `  - ${f.name} (${f.type})`)
-    .join('\n');
+  const schemaDescription = targetSchema.map((f) => `  - ${f.name} (${f.type})`).join('\n');
 
-  const truncatedText =
-    text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH) : text;
+  const truncatedText = text.length > MAX_TEXT_LENGTH ? text.slice(0, MAX_TEXT_LENGTH) : text;
 
   return `Extract records from the following document text and return a JSON array matching this schema:
 
@@ -96,8 +93,13 @@ export async function extractPdf(
   try {
     rawRows = JSON.parse(textBlock.text) as (Record<string, unknown> & { _confidence?: number })[];
   } catch (err) {
-    logger.error({ err, url, rawText: textBlock.text }, 'failed to parse Claude JSON response for PDF');
-    throw new Error(`JSON parse failed for PDF extraction from ${url}: ${String(err)}`);
+    logger.error(
+      { err, url, rawText: textBlock.text },
+      'failed to parse Claude JSON response for PDF',
+    );
+    throw new Error(`JSON parse failed for PDF extraction from ${url}: ${String(err)}`, {
+      cause: err,
+    });
   }
 
   let needsReviewCount = 0;

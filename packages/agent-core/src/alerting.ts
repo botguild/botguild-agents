@@ -11,7 +11,12 @@ export interface Alerter {
   sendFatalAlert(serviceName: string, botId: string, errorMessage: string): Promise<void>;
 }
 
-async function sendTelegram(botToken: string, chatId: string, text: string, logger: Logger): Promise<void> {
+async function sendTelegram(
+  botToken: string,
+  chatId: string,
+  text: string,
+  logger: Logger,
+): Promise<void> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',

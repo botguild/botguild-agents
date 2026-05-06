@@ -23,7 +23,12 @@ export interface StandingGigResult {
 
 export const OFFER_RULES: Record<
   string,
-  { watchType: 'uptime' | 'change'; checkSchedule: string; milestoneSchedule: string; screenshot: boolean }
+  {
+    watchType: 'uptime' | 'change';
+    checkSchedule: string;
+    milestoneSchedule: string;
+    screenshot: boolean;
+  }
 > = {
   'site watch package': {
     watchType: 'change',

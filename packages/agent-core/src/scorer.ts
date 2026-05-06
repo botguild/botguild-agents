@@ -1,19 +1,19 @@
 import type { Gig } from './client.js';
 
 export interface ScorerConfig {
-  category: string;           // exact category this bot handles
-  budgetMin: number;          // minimum acceptable budget
-  budgetMax: number;          // maximum budget (full score)
-  proposalThreshold: number;  // minimum score to propose (0-100)
+  category: string; // exact category this bot handles
+  budgetMin: number; // minimum acceptable budget
+  budgetMax: number; // maximum budget (full score)
+  proposalThreshold: number; // minimum score to propose (0-100)
 }
 
 export interface ScoreBreakdown {
-  category: number;   // 0 or 40
-  budget: number;     // 0-20
-  warranty: number;   // 0-15
-  clarity: number;    // 0-15
-  timeline: number;   // 0-10
-  total: number;      // sum
+  category: number; // 0 or 40
+  budget: number; // 0-20
+  warranty: number; // 0-15
+  clarity: number; // 0-15
+  timeline: number; // 0-10
+  total: number; // sum
 }
 
 export function scoreCategory(gig: Gig, category: string): number {

@@ -13,12 +13,7 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import {
-  botProfile,
-  scorerConfig,
-  standingOffers,
-  pricingCalc,
-} from './config.js';
+import { botProfile, scorerConfig, standingOffers, pricingCalc } from './config.js';
 import { createGigParser } from './parser.js';
 import { extractCsv } from './extractors/csv.js';
 import { extractPdf } from './extractors/pdf.js';
@@ -81,9 +76,10 @@ async function main(): Promise<void> {
   const effectiveBotId = botId || resolvedBotId;
   logger = createLogger({ service: 'flow-bot', botId: effectiveBotId });
 
-  const alerter = telegramToken && telegramChatId
-    ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
-    : null;
+  const alerter =
+    telegramToken && telegramChatId
+      ? createAlerter({ botToken: telegramToken, chatId: telegramChatId, logger })
+      : null;
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
@@ -251,13 +247,20 @@ async function main(): Promise<void> {
               status: 'complete',
               updatedAt: new Date().toISOString(),
             });
-            log.info({ durationMs: Date.now() - deliverStart }, 'data-sync standing offer: complete');
+            log.info(
+              { durationMs: Date.now() - deliverStart },
+              'data-sync standing offer: complete',
+            );
           }
         } else {
-          const pdfResult = await extractPdf(standingConfig.inputSource, standingConfig.targetSchema, {
-            apiKey: anthropicApiKey,
-            logger: log,
-          });
+          const pdfResult = await extractPdf(
+            standingConfig.inputSource,
+            standingConfig.targetSchema,
+            {
+              apiKey: anthropicApiKey,
+              logger: log,
+            },
+          );
 
           const normalizeStats = normalizeRows(pdfResult.rows, standingConfig.transformRules);
           const firstMilestoneId = standingConfig.milestoneIds[0];
@@ -278,7 +281,10 @@ async function main(): Promise<void> {
             updatedAt: new Date().toISOString(),
           });
 
-          log.info({ durationMs: Date.now() - deliverStart }, 'invoice-batch standing offer: extraction pipeline complete');
+          log.info(
+            { durationMs: Date.now() - deliverStart },
+            'invoice-batch standing offer: extraction pipeline complete',
+          );
         }
 
         return;
@@ -438,10 +444,7 @@ async function main(): Promise<void> {
 
   webhookServer.on('contract.status.changed', async (event) => {
     const { contract } = event.payload as { contract: Contract };
-    logger.info(
-      { contractId: contract.id, status: contract.status },
-      'contract status changed',
-    );
+    logger.info({ contractId: contract.id, status: contract.status }, 'contract status changed');
     if (contract.status === 'completed' || contract.status === 'cancelled') {
       const task = weeklyTasks.get(contract.id);
       if (task) {
@@ -562,7 +565,9 @@ async function main(): Promise<void> {
 
   process.on('uncaughtException', (err) => {
     logger.fatal({ err }, 'uncaught exception');
-    void alerter?.sendFatalAlert('FlowBot', effectiveBotId, err.message).finally(() => process.exit(1));
+    void alerter
+      ?.sendFatalAlert('FlowBot', effectiveBotId, err.message)
+      .finally(() => process.exit(1));
   });
 
   process.on('unhandledRejection', (reason) => {

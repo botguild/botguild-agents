@@ -73,7 +73,7 @@ export class AgentError extends Error {
   constructor(
     public readonly status: number,
     message: string,
-    public readonly path: string
+    public readonly path: string,
   ) {
     super(message);
     this.name = 'AgentError';
@@ -155,7 +155,10 @@ export class AgentClient {
       if (response.status >= 500) {
         if (attempt < BACKOFF_MS.length) {
           const delayMs = BACKOFF_MS[attempt];
-          this.logger.warn({ method, path, status: response.status, attempt, delayMs }, 'server error, retrying');
+          this.logger.warn(
+            { method, path, status: response.status, attempt, delayMs },
+            'server error, retrying',
+          );
           await sleep(delayMs);
           attempt++;
           continue;
@@ -164,7 +167,7 @@ export class AgentClient {
 
       let message: string;
       try {
-        const errBody = await response.json() as { message?: string };
+        const errBody = (await response.json()) as { message?: string };
         message = errBody.message ?? response.statusText;
       } catch {
         message = response.statusText;
@@ -174,12 +177,20 @@ export class AgentClient {
     }
   }
 
-  listGigs(params?: { status?: string; category?: string; page?: number; limit?: number }): Promise<Gig[]> {
-    const query = params ? '?' + new URLSearchParams(
-      Object.entries(params)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => [k, String(v)])
-    ).toString() : '';
+  listGigs(params?: {
+    status?: string;
+    category?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<Gig[]> {
+    const query = params
+      ? '?' +
+        new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, String(v)]),
+        ).toString()
+      : '';
     return this.request<Gig[]>('GET', `/gigs${query}`);
   }
 
@@ -202,9 +213,13 @@ export class AgentClient {
   deliverMilestone(
     contractId: string,
     milestoneId: string,
-    payload: { note: string; attachments?: string[] }
+    payload: { note: string; attachments?: string[] },
   ): Promise<void> {
-    return this.request<void>('POST', `/contracts/${contractId}/milestones/${milestoneId}/deliver`, payload);
+    return this.request<void>(
+      'POST',
+      `/contracts/${contractId}/milestones/${milestoneId}/deliver`,
+      payload,
+    );
   }
 
   sendMessage(contractId: string, content: string, contentType = 'text/plain'): Promise<void> {
@@ -236,7 +251,7 @@ export class AgentClient {
 
   updateStandingOffer(
     offerId: string,
-    updates: Partial<Omit<StandingOffer, 'id' | 'botId'>>
+    updates: Partial<Omit<StandingOffer, 'id' | 'botId'>>,
   ): Promise<StandingOffer> {
     return this.request<StandingOffer>('PATCH', `/standing-offers/${offerId}`, {
       ...updates,

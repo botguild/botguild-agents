@@ -132,7 +132,9 @@ function parseCSV(text: string): Record<string, unknown>[] {
   return result.data;
 }
 
-async function loadSource(source: string | Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+async function loadSource(
+  source: string | Record<string, unknown>[],
+): Promise<Record<string, unknown>[]> {
   if (Array.isArray(source)) return source;
 
   const response = await fetch(source);
@@ -270,7 +272,9 @@ function evaluateCriterion(
         criterionId,
         description,
         verdict: pass ? 'pass' : 'fail',
-        actual: pass ? `all ${nonNull.length} values match` : `${(failRate * 100).toFixed(1)}% fail (${failCount}/${nonNull.length})`,
+        actual: pass
+          ? `all ${nonNull.length} values match`
+          : `${(failRate * 100).toFixed(1)}% fail (${failCount}/${nonNull.length})`,
         expected: `all values match /${pattern}/`,
         attempts: 1,
       };
@@ -301,7 +305,10 @@ export async function runDataQualityChecks(
   const statsMap = new Map(columnStats.map((s) => [s.field, s]));
 
   const checkResults: CheckResult[] = criteria.map((criterion) => {
-    logger.info({ criterionId: criterion.criterionId, field: criterion.field, check: criterion.check }, 'evaluating criterion');
+    logger.info(
+      { criterionId: criterion.criterionId, field: criterion.field, check: criterion.check },
+      'evaluating criterion',
+    );
     return evaluateCriterion(criterion, statsMap, columnIndex);
   });
 
@@ -311,7 +318,10 @@ export async function runDataQualityChecks(
 
   const summary = `Checked ${rowCount} rows across ${columnStats.length} fields. Criteria: ${passCount} passed, ${failCount} failed, ${skipCount} skipped. Outlier warnings: ${outlierWarnings.length}.`;
 
-  logger.info({ passCount, failCount, skipCount, outlierWarnings: outlierWarnings.length }, 'data quality checks complete');
+  logger.info(
+    { passCount, failCount, skipCount, outlierWarnings: outlierWarnings.length },
+    'data quality checks complete',
+  );
 
   return { checkResults, columnStats, rowCount, outlierWarnings, summary };
 }

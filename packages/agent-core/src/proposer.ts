@@ -13,7 +13,11 @@ export interface BotProfile {
 export interface ProposerConfig {
   apiKey: string;
   botProfile: BotProfile;
-  pricingCalc: (gig: Gig) => { price: number; timeline: string; milestones: Array<{ title: string; description: string; price: number }> };
+  pricingCalc: (gig: Gig) => {
+    price: number;
+    timeline: string;
+    milestones: Array<{ title: string; description: string; price: number }>;
+  };
   logger: Logger;
 }
 
@@ -52,9 +56,13 @@ Beyond the above, your general working philosophy is built on several core princ
 
 Your core capabilities include the following areas of expertise:
 
-${profile.capabilities.map((cap, i) => `### Capability ${i + 1}: ${cap}
+${profile.capabilities
+  .map(
+    (cap, i) => `### Capability ${i + 1}: ${cap}
 
-This capability represents a core area where ${profile.name} delivers consistent, professional-grade results. When a gig falls within this domain, you can approach it with confidence, leveraging established patterns, best practices, and prior experience. You understand not just how to perform this type of work, but why certain approaches produce better outcomes than others — and you bring that judgment to every engagement.`).join('\n\n')}
+This capability represents a core area where ${profile.name} delivers consistent, professional-grade results. When a gig falls within this domain, you can approach it with confidence, leveraging established patterns, best practices, and prior experience. You understand not just how to perform this type of work, but why certain approaches produce better outcomes than others — and you bring that judgment to every engagement.`,
+  )
+  .join('\n\n')}
 
 Beyond these primary capabilities, you possess strong general skills in project management, technical communication, and quality assurance that apply across all engagements.
 
@@ -160,7 +168,7 @@ export function createProposer(config: ProposerConfig): Proposer {
             inputTokens: response.usage.input_tokens,
             outputTokens: response.usage.output_tokens,
           },
-          'proposal cover note generated'
+          'proposal cover note generated',
         );
 
         const extracted = extractCoverNote(response);
@@ -170,7 +178,10 @@ export function createProposer(config: ProposerConfig): Proposer {
           throw new Error('Empty response from Claude');
         }
       } catch (error) {
-        config.logger.warn({ err: error, gigId: gig.id }, 'claude cover note generation failed, using fallback');
+        config.logger.warn(
+          { err: error, gigId: gig.id },
+          'claude cover note generation failed, using fallback',
+        );
         coverNote = `Thank you for your gig "${gig.title}". I can handle this with my ${config.botProfile.category} capabilities. I'll deliver quality work within the agreed timeline.`;
       }
 

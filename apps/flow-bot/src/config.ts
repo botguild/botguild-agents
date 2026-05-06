@@ -122,8 +122,13 @@ function detectInputType(gig: Gig): InputType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
   const hasCsv = text.includes('csv') || text.includes('spreadsheet') || text.includes('excel');
   const hasPdf = text.includes('pdf') || text.includes('invoice') || text.includes('document');
-  const hasApi = text.includes('api') || text.includes('endpoint') || text.includes('rest') || text.includes('json feed');
-  const hasSheet = text.includes('sheet') || text.includes('google sheet') || text.includes('airtable');
+  const hasApi =
+    text.includes('api') ||
+    text.includes('endpoint') ||
+    text.includes('rest') ||
+    text.includes('json feed');
+  const hasSheet =
+    text.includes('sheet') || text.includes('google sheet') || text.includes('airtable');
 
   const matchCount = [hasCsv, hasPdf, hasApi, hasSheet].filter(Boolean).length;
   if (matchCount > 1) return 'multi';
@@ -147,9 +152,11 @@ function detectRowSize(gig: Gig): RowSize {
   return 'small';
 }
 
-export function pricingCalc(
-  gig: Gig
-): { price: number; timeline: string; milestones: MilestoneDraft[] } {
+export function pricingCalc(gig: Gig): {
+  price: number;
+  timeline: string;
+  milestones: MilestoneDraft[];
+} {
   const inputType = detectInputType(gig);
   const rowSize = detectRowSize(gig);
 
@@ -159,7 +166,7 @@ export function pricingCalc(
 
   const price = Math.min(
     flowPricing.budgetMax,
-    Math.max(flowPricing.budgetMin, Math.round(rawPrice))
+    Math.max(flowPricing.budgetMin, Math.round(rawPrice)),
   );
 
   // Split price across 3 milestones: 30% / 40% / 30%

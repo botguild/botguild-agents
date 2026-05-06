@@ -127,7 +127,12 @@ export async function runAcceptanceAudit(
     return buildFailResults(criteria, `Claude API error: ${message}`);
   }
 
-  let parsed: Array<{ criterionId: string; verdict: string; reasoning: string; confidence: number }>;
+  let parsed: Array<{
+    criterionId: string;
+    verdict: string;
+    reasoning: string;
+    confidence: number;
+  }>;
   try {
     const jsonMatch = rawResponse.match(/\[[\s\S]*\]/);
     if (!jsonMatch) {
@@ -142,7 +147,10 @@ export async function runAcceptanceAudit(
 
   const criteriaMap = new Map(criteria.map((c) => [c.criterionId, c]));
 
-  const verdictsById = new Map<string, { verdict: string; reasoning: string; confidence: number }>();
+  const verdictsById = new Map<
+    string,
+    { verdict: string; reasoning: string; confidence: number }
+  >();
   for (const item of parsed) {
     if (item.criterionId) verdictsById.set(item.criterionId, item);
   }
@@ -152,7 +160,10 @@ export async function runAcceptanceAudit(
   const auditVerdicts: AuditVerdict[] = criteria.map((c) => {
     const item = verdictsById.get(c.criterionId);
     if (!item) {
-      logger.warn({ criterionId: c.criterionId }, 'criterion missing from audit response, marking for review');
+      logger.warn(
+        { criterionId: c.criterionId },
+        'criterion missing from audit response, marking for review',
+      );
       return {
         criterionId: c.criterionId,
         verdict: 'fail',
@@ -184,10 +195,7 @@ export async function runAcceptanceAudit(
 
   const needsHumanReviewCount = auditVerdicts.filter((v) => v.needsHumanReview).length;
 
-  logger.info(
-    { total: auditVerdicts.length, needsHumanReviewCount },
-    'acceptance audit complete',
-  );
+  logger.info({ total: auditVerdicts.length, needsHumanReviewCount }, 'acceptance audit complete');
 
   return { checkResults, auditVerdicts, needsHumanReviewCount };
 }

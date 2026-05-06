@@ -1,9 +1,9 @@
 import pino from 'pino';
 
 export interface LoggerOptions {
-  service: string;   // 'sentinel-bot' | 'flow-bot' | 'verifier-bot'
+  service: string; // 'sentinel-bot' | 'flow-bot' | 'verifier-bot'
   botId?: string;
-  level?: string;    // defaults to process.env.LOG_LEVEL ?? 'info'
+  level?: string; // defaults to process.env.LOG_LEVEL ?? 'info'
 }
 
 export function createLogger(options: LoggerOptions): pino.Logger {
@@ -22,9 +22,6 @@ export function createLogger(options: LoggerOptions): pino.Logger {
   });
 }
 
-export function withContext(
-  logger: pino.Logger,
-  context: Record<string, unknown>
-): pino.Logger {
+export function withContext(logger: pino.Logger, context: Record<string, unknown>): pino.Logger {
   return logger.child(context);
 }

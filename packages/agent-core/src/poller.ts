@@ -35,7 +35,10 @@ export function createGigPoller(config: GigPollerConfig): GigPoller {
         await onGig(gig);
         seen.add(gig.id);
       } catch (err) {
-        logger.error({ err, gigId: gig.id }, 'gig poller: onGig callback failed; will retry on next cycle');
+        logger.error(
+          { err, gigId: gig.id },
+          'gig poller: onGig callback failed; will retry on next cycle',
+        );
       }
     }
   }

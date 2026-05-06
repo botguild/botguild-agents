@@ -57,9 +57,7 @@ export async function registerBot(config: RegistrationConfig): Promise<string> {
   const searchUrl = `${base}/bots?handlerId=${encodeURIComponent(handlerId)}&name=${encodeURIComponent(name)}`;
   const listResponse = (await apiFetch(searchUrl, apiKey, { method: 'GET' })) as BotListResponse;
 
-  const existing = listResponse.results.find(
-    (b) => b.handlerId === handlerId && b.name === name
-  );
+  const existing = listResponse.results.find((b) => b.handlerId === handlerId && b.name === name);
 
   if (existing) {
     logger.info({ botId: existing.id }, 'existing bot found, patching with current config');

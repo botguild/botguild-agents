@@ -20,7 +20,10 @@ export interface ReportResult {
   failCount: number;
 }
 
-function computeVerdict(checkResults: CheckResult[], auditVerdicts: AuditVerdict[]): OverallVerdict {
+function computeVerdict(
+  checkResults: CheckResult[],
+  auditVerdicts: AuditVerdict[],
+): OverallVerdict {
   const hasFail = checkResults.some((r) => r.verdict === 'fail');
   if (hasFail) return 'FAIL';
 
@@ -122,7 +125,8 @@ export async function generateAndDeliverReport(
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5',
       max_tokens: 1500,
-      system: 'You are a QA report writer. Generate a structured markdown report from check results.',
+      system:
+        'You are a QA report writer. Generate a structured markdown report from check results.',
       messages: [
         {
           role: 'user',
@@ -145,9 +149,10 @@ export async function generateAndDeliverReport(
 
   // Encode any screenshot evidence as data URLs so the client receives the
   // visual proof — otherwise it's collected but silently dropped.
-  const attachments = screenshotBase64s.length > 0
-    ? screenshotBase64s.map((b64) => `data:image/png;base64,${b64}`)
-    : undefined;
+  const attachments =
+    screenshotBase64s.length > 0
+      ? screenshotBase64s.map((b64) => `data:image/png;base64,${b64}`)
+      : undefined;
 
   logger.info(
     { contractId, milestoneId, screenshotCount: screenshotBase64s.length },

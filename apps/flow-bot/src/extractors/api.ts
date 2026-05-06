@@ -84,10 +84,14 @@ export async function extractApi(config: ApiExtractorConfig): Promise<ApiExtract
   let lastProgressLogPage = 0;
   let lastProgressLogRecord = 0;
 
-  async function fetchPage(fetchUrl: string): Promise<{ body: unknown; linkHeader: string | null }> {
+  async function fetchPage(
+    fetchUrl: string,
+  ): Promise<{ body: unknown; linkHeader: string | null }> {
     const response = await fetch(fetchUrl, { headers: authHeaders });
     if (!response.ok) {
-      throw new Error(`API request failed: ${response.status} ${response.statusText} for ${fetchUrl}`);
+      throw new Error(
+        `API request failed: ${response.status} ${response.statusText} for ${fetchUrl}`,
+      );
     }
     const linkHeader = response.headers.get('Link');
     const body = await response.json();
@@ -98,10 +102,7 @@ export async function extractApi(config: ApiExtractorConfig): Promise<ApiExtract
     const pagesSinceLast = pagesFetched - lastProgressLogPage;
     const recordsSinceLast = records.length - lastProgressLogRecord;
     if (pagesSinceLast >= 5 || recordsSinceLast >= 1000) {
-      logger.info(
-        { pagesFetched, totalRecords: records.length },
-        'progress_update',
-      );
+      logger.info({ pagesFetched, totalRecords: records.length }, 'progress_update');
       lastProgressLogPage = pagesFetched;
       lastProgressLogRecord = records.length;
     }
