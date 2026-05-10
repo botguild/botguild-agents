@@ -243,7 +243,6 @@ async function main(): Promise<void> {
   // Build gig poller
   const poller = createGigPoller({
     client,
-    category: scorerConfig.category,
     logger,
     async onGig(gig) {
       const score = shouldPropose(gig, scorerConfig);

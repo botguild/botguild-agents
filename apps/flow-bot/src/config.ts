@@ -73,7 +73,7 @@ export const flowPricing: FlowPricing = {
 // ---------------------------------------------------------------------------
 
 export const scorerConfig: ScorerConfig = {
-  category: 'Ops & Automation',
+  categories: ['Ops & Automation'],
   budgetMin: 60,
   budgetMax: 350,
   proposalThreshold: 50,

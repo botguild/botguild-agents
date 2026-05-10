@@ -60,7 +60,7 @@ export const sentinelPricing: SentinelPricing = {
     moderate: 1.3,
     complex: 1.6,
   },
-  budgetMin: 80,
+  budgetMin: 1,
   budgetMax: 400,
 };
 
@@ -69,8 +69,8 @@ export const sentinelPricing: SentinelPricing = {
 // ---------------------------------------------------------------------------
 
 export const scorerConfig: ScorerConfig = {
-  category: 'Ops & Automation',
-  budgetMin: 80,
+  categories: ['monitoring', 'Monitoring', 'Ops & Automation', 'web-scraping', 'Web Scraping'],
+  budgetMin: 1,
   budgetMax: 400,
   proposalThreshold: 55,
 };
