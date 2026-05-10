@@ -106,10 +106,7 @@ test('scoreCategory returns 0 for mismatch', () => {
 
 test('scoreCategory returns 40 when gig category matches any entry in the list', () => {
   const gig = makeGig({ category: 'monitoring' });
-  assert.equal(
-    scoreCategory(gig, ['Ops & Automation', 'monitoring', 'web-scraping']),
-    40,
-  );
+  assert.equal(scoreCategory(gig, ['Ops & Automation', 'monitoring', 'web-scraping']), 40);
 });
 
 test('scoreCategory returns 0 for empty list', () => {
