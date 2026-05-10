@@ -4,7 +4,7 @@ import { scoreGig, shouldPropose, scoreCategory, scoreBudget } from './scorer.js
 import type { Gig } from './client.js';
 
 const baseConfig = {
-  category: 'web-development',
+  categories: ['web-development'],
   budgetMin: 500,
   budgetMax: 5000,
   proposalThreshold: 70,
@@ -96,12 +96,22 @@ test('score at or above threshold → shouldPropose true', () => {
 // scoreCategory unit tests
 test('scoreCategory returns 40 for exact match', () => {
   const gig = makeGig({ category: 'web-development' });
-  assert.equal(scoreCategory(gig, 'web-development'), 40);
+  assert.equal(scoreCategory(gig, ['web-development']), 40);
 });
 
 test('scoreCategory returns 0 for mismatch', () => {
   const gig = makeGig({ category: 'seo' });
-  assert.equal(scoreCategory(gig, 'web-development'), 0);
+  assert.equal(scoreCategory(gig, ['web-development']), 0);
+});
+
+test('scoreCategory returns 40 when gig category matches any entry in the list', () => {
+  const gig = makeGig({ category: 'monitoring' });
+  assert.equal(scoreCategory(gig, ['Ops & Automation', 'monitoring', 'web-scraping']), 40);
+});
+
+test('scoreCategory returns 0 for empty list', () => {
+  const gig = makeGig({ category: 'monitoring' });
+  assert.equal(scoreCategory(gig, []), 0);
 });
 
 // scoreBudget unit tests

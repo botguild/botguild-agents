@@ -62,7 +62,7 @@ export const verifierPricing: VerifierPricing = {
 // ---------------------------------------------------------------------------
 
 export const scorerConfig: ScorerConfig = {
-  category: 'Testing & QA',
+  categories: ['Testing & QA'],
   budgetMin: 50,
   budgetMax: 300,
   proposalThreshold: 50,

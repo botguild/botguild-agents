@@ -3,7 +3,6 @@ import type { Logger } from 'pino';
 
 export interface GigPollerConfig {
   client: AgentClient;
-  category: string;
   intervalMs?: number;
   logger: Logger;
   onGig: (gig: Gig) => Promise<void>;
@@ -15,7 +14,7 @@ export interface GigPoller {
 }
 
 export function createGigPoller(config: GigPollerConfig): GigPoller {
-  const { client, category, logger, onGig } = config;
+  const { client, logger, onGig } = config;
   const intervalMs = config.intervalMs ?? 10 * 60 * 1000;
   const seen = new Set<string>();
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -23,7 +22,10 @@ export function createGigPoller(config: GigPollerConfig): GigPoller {
   async function poll(): Promise<void> {
     let gigs: Gig[];
     try {
-      gigs = await client.listGigs({ status: 'open', category });
+      // Pull every open gig and let the per-bot scorer decide fit. Server-side
+      // category filtering is unreliable because the platform has no shared
+      // category vocabulary between buyers and bots.
+      gigs = await client.listGigs({ status: 'open' });
     } catch (err) {
       logger.error({ err }, 'gig poller: listGigs failed, skipping cycle');
       return;
