@@ -93,14 +93,13 @@ async function main(): Promise<void> {
     webhookBaseUrl,
     webhookSecret,
     events: [
-      'gig.created',
-      'gig.updated',
-      'contract.created',
-      'contract.updated',
       'proposal.accepted',
+      'milestone.funded',
+      'milestone.delivered',
       'milestone.accepted',
       'contract.status.changed',
-      'message.created',
+      'acceptance.auto_approved',
+      'dispute.response_submitted',
     ],
     logger,
   });
@@ -438,8 +437,27 @@ async function main(): Promise<void> {
     }
   });
 
+  webhookServer.on('milestone.funded', async (event) => {
+    // TODO(epic-1): consider gating ETL job kickoff on this event instead of
+    // proposal.accepted so the bot never runs unpaid work on draft contracts.
+    logger.info({ payload: event.payload }, 'milestone funded');
+  });
+
+  webhookServer.on('milestone.delivered', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone delivered');
+  });
+
   webhookServer.on('milestone.accepted', async (event) => {
     logger.info({ payload: event.payload }, 'milestone accepted');
+  });
+
+  webhookServer.on('acceptance.auto_approved', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone auto-approved by acceptance window');
+  });
+
+  webhookServer.on('dispute.response_submitted', async (event) => {
+    // Full counter-statement flow lives in story 2.4 (MCP respond_to_dispute).
+    logger.warn({ payload: event.payload }, 'dispute response submitted on this contract');
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
@@ -455,53 +473,11 @@ async function main(): Promise<void> {
     }
   });
 
-  // Pick up source URLs that arrive via the contract thread (e.g. invoice batch attachments).
-  webhookServer.on('message.created', async (event) => {
-    const { contractId, content } = event.payload as { contractId: string; content: string };
-    const job = getJob(contractId);
-    if (!job || job.status !== 'awaiting_input' || !job.standing) return;
-    const url = extractFirstUrl(content);
-    if (!url) return;
-
-    const log = withContext(logger, { gigId: job.gigId, contractId });
-    log.info({ url }, 'received input URL via message.created, resuming invoice batch');
-
-    setJob(contractId, { ...job, status: 'fetching', updatedAt: new Date().toISOString() });
-    try {
-      const pdfResult = await extractPdf(url, job.standing.targetSchema, {
-        apiKey: anthropicApiKey,
-        logger: log,
-      });
-      const normalizeStats = normalizeRows(pdfResult.rows, job.standing.transformRules as never);
-      const milestoneId = job.standing.remainingMilestoneIds[0] ?? '';
-      await deliverOutput(
-        contractId,
-        milestoneId,
-        normalizeStats.rows,
-        {
-          gigId: job.gigId,
-          contractId,
-          inputType: 'pdf',
-          inputSource: url,
-          targetSchema: job.standing.targetSchema as never,
-          transformRules: job.standing.transformRules as never,
-          outputFormat: job.standing.outputFormat,
-          milestoneIds: job.standing.remainingMilestoneIds,
-          confidence: 1,
-        },
-        normalizeStats,
-        { client, apiKey: anthropicApiKey, logger: log },
-      );
-      setJob(contractId, {
-        ...getJob(contractId)!,
-        status: 'complete',
-        updatedAt: new Date().toISOString(),
-      });
-    } catch (err) {
-      log.error({ err }, 'failed to process input URL from message');
-      setJob(contractId, { ...job, status: 'error', updatedAt: new Date().toISOString() });
-    }
-  });
+  // NOTE: the prior `message.created` handler for invoice-batch URL ingestion
+  // is removed in story 1.5. Platform does not dispatch message.* events as
+  // webhooks (Group B: in-app/Telegram only). Reintroducing this needs a
+  // polling pull from /threads/:id/messages or a different ingestion path
+  // (e.g. require the URL in the gig description). Tracked outside this epic.
 
   // Build gig poller
   const poller = createGigPoller({
@@ -574,11 +550,6 @@ async function main(): Promise<void> {
     logger.fatal({ reason }, 'unhandled rejection');
     void alerter?.sendFatalAlert('FlowBot', effectiveBotId, message).finally(() => process.exit(1));
   });
-}
-
-function extractFirstUrl(text: string): string | null {
-  const m = text.match(/https?:\/\/[^\s,)]+/);
-  return m ? m[0] : null;
 }
 
 function scheduleWeeklyDataSync(

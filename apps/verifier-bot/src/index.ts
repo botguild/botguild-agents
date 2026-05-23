@@ -104,13 +104,13 @@ async function main(): Promise<void> {
     webhookBaseUrl,
     webhookSecret,
     events: [
-      'gig.created',
-      'gig.updated',
-      'contract.created',
-      'contract.updated',
       'proposal.accepted',
+      'milestone.funded',
+      'milestone.delivered',
       'milestone.accepted',
       'contract.status.changed',
+      'acceptance.auto_approved',
+      'dispute.response_submitted',
     ],
     logger,
   });
@@ -427,8 +427,27 @@ async function main(): Promise<void> {
     }
   });
 
+  webhookServer.on('milestone.funded', async (event) => {
+    // TODO(epic-1): consider gating check execution on this event instead of
+    // proposal.accepted so the bot never runs unpaid work on draft contracts.
+    logger.info({ payload: event.payload }, 'milestone funded');
+  });
+
+  webhookServer.on('milestone.delivered', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone delivered');
+  });
+
   webhookServer.on('milestone.accepted', async (event) => {
     logger.info({ payload: event.payload }, 'milestone accepted');
+  });
+
+  webhookServer.on('acceptance.auto_approved', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone auto-approved by acceptance window');
+  });
+
+  webhookServer.on('dispute.response_submitted', async (event) => {
+    // Full counter-statement flow lives in story 2.4 (MCP respond_to_dispute).
+    logger.warn({ payload: event.payload }, 'dispute response submitted on this contract');
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
