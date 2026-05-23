@@ -1,45 +1,12 @@
 import type { Logger } from 'pino';
+import type { Gig, Contract, ContractMilestone, ProposalMilestone } from '@botguild/sdk';
 
-export interface Gig {
-  id: string;
-  title: string;
-  description: string;
-  category: string;
-  budget: number;
-  warrantyTerms?: string;
-  acceptanceCriteria?: string;
-  timeline?: string;
-  status: 'open' | 'in_progress' | 'completed' | 'cancelled';
-  payerId: string;
-  createdAt: string;
-}
-
-export interface Contract {
-  id: string;
-  gigId: string;
-  botId: string;
-  payerId: string;
-  status: 'pending' | 'active' | 'completed' | 'cancelled' | 'disputed';
-  milestones: Milestone[];
-  createdAt: string;
-}
-
-export interface Milestone {
-  id: string;
-  contractId: string;
-  title: string;
-  description: string;
-  price: number;
-  status: 'pending' | 'delivered' | 'accepted' | 'rejected';
-  deliveredAt?: string;
-}
-
-export interface ProposalMilestone {
-  title: string;
-  amount: number;
-  duration: string;
-  deliverables: string[];
-}
+// Entity shapes are owned by the platform SDK so they can't drift from the
+// live API. Re-export them so bot code imports from '@botguild/agent-core'
+// and never reaches into the SDK directly (keeps the SDK swappable). Types
+// with no SDK equivalent (ProposalDraft, StandingOffer, WebhookRegistration)
+// stay defined here.
+export type { Gig, Contract, ContractMilestone, ProposalMilestone };
 
 export interface ProposalDraft {
   price: number;
@@ -62,9 +29,11 @@ export interface StandingOffer {
 
 export interface WebhookRegistration {
   id: string;
-  botId: string;
+  botId?: string;
   url: string;
-  secret: string;
+  // Present only on the POST /webhooks create response; the platform omits it
+  // from GET /webhooks listings (it's returned exactly once at create time).
+  secret?: string;
   events: string[];
   createdAt: string;
 }
