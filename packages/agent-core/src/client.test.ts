@@ -272,3 +272,36 @@ test('getContract unwraps the { contract } envelope', async () => {
     mock.restore();
   }
 });
+
+test('responses are normalized snake_case → camelCase (incl. nested + arrays)', async () => {
+  // The platform returns snake_case; our types are camelCase. Without
+  // normalization these fields would be undefined at runtime.
+  const mock = installFetchMock({
+    webhooks: [
+      {
+        id: 'wh_1',
+        url: 'https://x/webhook',
+        events: ['proposal.accepted'],
+        failure_count: 3,
+        created_at: '2026-05-10T00:00:00Z',
+      },
+    ],
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const webhooks = (await client.listWebhooks()) as unknown as Array<Record<string, unknown>>;
+    const w = webhooks[0]!;
+    assert.equal(w.failureCount, 3, 'failure_count → failureCount');
+    assert.equal(w.createdAt, '2026-05-10T00:00:00Z', 'created_at → createdAt');
+    assert.equal('failure_count' in w, false, 'snake_case key removed');
+    // Values (event names) must NOT be altered — only keys are camelized.
+    assert.deepEqual(w.events, ['proposal.accepted']);
+  } finally {
+    mock.restore();
+  }
+});
