@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Persists the platform-issued webhook secret across restarts so HMAC
@@ -52,11 +52,24 @@ export function saveWebhookSecret(
   // Restrictive directory + file mode so the secret isn't world-readable.
   // The file holds the platform's HMAC signing key in plaintext; anyone with
   // it can forge signed webhooks against this bot.
+  //
+  // mkdirSync + writeFileSync mode options only apply on *creation* — if the
+  // file or directory already existed with broader permissions, the mode arg
+  // would be ignored on overwrite. We chmod explicitly afterward to enforce
+  // permissions regardless of pre-existing state.
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    chmodSync(dir, 0o700);
+  } catch (err) {
+    // Some platforms (Windows under WSL with bind mounts) reject chmod;
+    // not worth failing the secret persist over a directory mode tighten.
+    void err;
+  }
   const payload: StoredSecret = {
     secret,
     webhookId,
     capturedAt: new Date().toISOString(),
   };
   writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  chmodSync(file, 0o600);
 }

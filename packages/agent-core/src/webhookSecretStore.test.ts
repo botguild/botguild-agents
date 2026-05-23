@@ -74,6 +74,26 @@ test('saveWebhookSecret writes file with restrictive (0600) permissions', () => 
   }
 });
 
+test('saveWebhookSecret tightens permissions even on a pre-existing world-readable file', async () => {
+  const dataDir = freshTempDir();
+  try {
+    const file = join(dataDir, 'webhook-secret.json');
+    const { writeFileSync, chmodSync } = await import('node:fs');
+    // Pre-create the file with broad permissions, mimicking a value left
+    // behind by an older release.
+    writeFileSync(file, JSON.stringify({ secret: 'pre_existing', webhookId: 'wh_old' }), 'utf-8');
+    chmodSync(file, 0o644);
+    assert.equal(statSync(file).mode & 0o777, 0o644);
+
+    saveWebhookSecret('whsec_new', 'wh_new', { dataDir });
+
+    const perms = statSync(file).mode & 0o777;
+    assert.equal(perms, 0o600, `expected mode tightened to 0o600, got 0o${perms.toString(8)}`);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('loadWebhookSecret returns null when secret field is empty', () => {
   const dataDir = freshTempDir();
   try {

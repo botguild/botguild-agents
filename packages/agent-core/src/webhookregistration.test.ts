@@ -191,6 +191,29 @@ test('onSecretCaptured does not fire when platform returns empty secret', async 
   assert.equal(captured.length, 0, 'must not fire onSecretCaptured for empty secret');
 });
 
+test('hasStoredSecret defaults to true (preserves NOOP-on-match for unaware callers)', async () => {
+  const existing: WebhookRegistration = {
+    id: 'wh_existing',
+    botId: 'bot_x',
+    url: 'https://bot.example.com/webhook',
+    secret: '',
+    events: ['proposal.accepted', 'milestone.funded'],
+    createdAt: new Date().toISOString(),
+  };
+  const { client, calls } = stubClient({ listResponse: [existing] });
+
+  // Caller deliberately omits hasStoredSecret. Behavior must remain NOOP
+  // on event match — defaulting to false would silently churn webhooks
+  // on every restart for callers that don't know about the new flag.
+  await ensureWebhookRegistered({
+    ...baseConfig,
+    client,
+  });
+
+  assert.equal(calls.register.length, 0, 'must not POST when hasStoredSecret defaults true');
+  assert.equal(calls.delete.length, 0, 'must not delete the existing registration');
+});
+
 test('onSecretCaptured throwing does not block registration', async () => {
   const { client, calls } = stubClient({ listResponse: [] });
 

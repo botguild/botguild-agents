@@ -16,9 +16,10 @@ export interface WebhookRegistrationConfig {
   onSecretCaptured?: (secret: string, webhookId: string) => void;
   /**
    * Whether a previously-persisted platform secret is already available on
-   * disk. When false, the function forces a fresh POST /webhooks even if
-   * events already match an existing registration, so the bot can capture
-   * a secret it can verify HMAC signatures against. Defaults to false.
+   * disk. Defaults to **true** (preserves the historical "events match →
+   * NOOP" behavior). Callers that have NO persisted secret should pass
+   * false to force a fresh POST /webhooks even when events already match,
+   * so the bot can capture a secret it can verify HMAC signatures against.
    */
   hasStoredSecret?: boolean;
 }
@@ -45,7 +46,7 @@ export async function ensureWebhookRegistered(
     events,
     logger,
     onSecretCaptured,
-    hasStoredSecret = false,
+    hasStoredSecret = true,
   } = config;
   const webhookUrl = config.webhookBaseUrl.replace(/\/$/, '') + '/webhook';
 
