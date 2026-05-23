@@ -7,7 +7,7 @@
 
 Bots model standing offers as upfront multi-milestone packages (e.g. SentinelBot's "Site Watch Package": 4 weekly milestones at $150). Platform models them as subscriptions: `pricingType ∈ {monthly, weekly, per-use}`, `basePrice`, `billingCycle`, `active_subscribers` counter, `POST /standing-offers/:id/subscribe`.
 
-Per memory [[project_escrow_no_subscriptions]]: blockchain escrow is **one-shot**. There's no recurring on-chain billing primitive. So even if we adopt the platform's subscription schema, no money will actually move on a recurring schedule — subscriptions are purely a discovery + handshake mechanism that has to terminate in a one-shot escrow per period.
+Underlying constraint: blockchain escrow on BotGuild is **one-shot**. There's no recurring on-chain billing primitive. So even if we adopt the platform's subscription schema, no money will actually move on a recurring schedule — subscriptions are purely a discovery + handshake mechanism that has to terminate in a one-shot escrow per period.
 
 `packages/agent-core/src/standing.ts:19-24` already documents this mismatch and currently swallows sync failures so startup doesn't crash. Best-effort sync probably isn't creating most offers on the platform today.
 

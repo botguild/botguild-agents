@@ -168,6 +168,11 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Flip lifecycle synchronously BEFORE any awaits so a concurrent
+    // milestone.funded delivery for the same contract can't pass the guard
+    // above and double-schedule the cron or double-run the first check.
+    setJob(contractId, { ...job, lifecycle: 'active' });
+
     const config = job.watchConfig as WatchJobConfig;
     const kickoff = job.pendingKickoff ?? { isStandingOffer: false };
     const log = withContext(logger, { gigId: job.gigId, contractId });
@@ -179,7 +184,6 @@ async function main(): Promise<void> {
         log.warn({ err }, 'failed to send packageStarted message');
       }
       scheduler.addJob(config);
-      setJob(contractId, { ...job, lifecycle: 'active' });
       return;
     }
 
@@ -190,7 +194,6 @@ async function main(): Promise<void> {
     }
 
     scheduler.addJob(config);
-    setJob(contractId, { ...job, lifecycle: 'active' });
 
     const firstCheckStart = Date.now();
     try {

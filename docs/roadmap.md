@@ -31,7 +31,7 @@ Platform now publishes a typed SDK (`@botguild/sdk@0.1.0`) on npm with REST clie
 
 ## Epic 3 — Reconcile Standing Offers
 
-Bots model upfront multi-milestone packages; platform expects subscription pricing (`monthly | weekly | per-use`). Per memory `project_escrow_no_subscriptions.md`, blockchain escrow is one-shot, so subscriptions can't actually bill recurringly. Decision needed before code change.
+Bots model upfront multi-milestone packages; platform expects subscription pricing (`monthly | weekly | per-use`). Blockchain escrow is one-shot, so even with the platform schema in place, no money will move on a recurring schedule — a subscription period would have to terminate in a fresh one-shot escrow each time. Decision needed before code change.
 
 | Story | Title |
 |-------|-------|

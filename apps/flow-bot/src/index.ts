@@ -487,6 +487,10 @@ async function main(): Promise<void> {
       );
       return;
     }
+    // Flip status synchronously BEFORE the first await so a concurrent
+    // milestone.funded delivery for the same contract can't pass the guard
+    // and double-trigger the pipeline.
+    setJob(contractId, { ...job, status: 'fetching', updatedAt: new Date().toISOString() });
     logger.info({ contractId }, 'milestone funded, executing accepted flow');
     await executeAcceptedFlow(
       job.pendingAcceptance.gig as Gig,
