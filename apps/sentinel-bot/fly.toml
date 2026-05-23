@@ -18,7 +18,12 @@ primary_region = 'iad'
 [http_service]
   internal_port = 3001
   force_https = true
-  auto_stop_machines = 'stop'
+  # Always-on bot: never auto-stop. With 'stop', Fly's rolling deploy can
+  # leave machines in stopped state and min_machines_running doesn't reliably
+  # bring them back, forcing a manual `flyctl machine start` after each
+  # release. The bot listens for webhooks and polls gigs continuously — there
+  # is no idle period worth scaling to zero for.
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
 
