@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import type { Gig, ProposalDraft } from './client.js';
+import type { Gig, ProposalDraft, ProposalMilestone } from './client.js';
 import type { Logger } from 'pino';
 
 export interface BotProfile {
@@ -16,7 +16,7 @@ export interface ProposerConfig {
   pricingCalc: (gig: Gig) => {
     price: number;
     timeline: string;
-    milestones: Array<{ title: string; description: string; price: number }>;
+    milestones: ProposalMilestone[];
   };
   logger: Logger;
 }
@@ -190,7 +190,7 @@ export function createProposer(config: ProposerConfig): Proposer {
         timeline,
         milestones,
         warrantyOffer,
-        coverNote,
+        assumptions: coverNote ? [coverNote] : undefined,
       };
     },
   };

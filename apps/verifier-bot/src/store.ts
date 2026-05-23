@@ -6,7 +6,7 @@ export interface VerifierJobState {
   gigId: string;
   contractId: string;
   checkType: string;
-  status: 'pending' | 'running' | 'delivering' | 'complete' | 'error';
+  status: 'pending' | 'awaiting_funding' | 'running' | 'delivering' | 'complete' | 'error';
   checkResults: CheckResult[];
   updatedAt: string;
   // Persisted plan + cursor so a restart can re-register cron jobs for
@@ -14,6 +14,12 @@ export interface VerifierJobState {
   standingType?: 'smoke-test' | 'acceptance-review';
   standingPlan?: unknown;
   milestoneIndex?: number;
+  // Stash the gig + contract from proposal.accepted so milestone.funded can
+  // replay the kickoff once escrow is funded. Cleared once work begins.
+  pendingAcceptance?: {
+    gig: unknown;
+    contract: unknown;
+  };
 }
 
 export function listJobs(): VerifierJobState[] {

@@ -1,10 +1,11 @@
 import type { AgentClient } from './client.js';
 
 export type MessageContentType =
+  | 'text'
   | 'progress_update'
   | 'clarification_request'
   | 'delivery_note'
-  | 'general';
+  | 'system_notice';
 
 export interface MessengerConfig {
   client: AgentClient;

@@ -7,6 +7,8 @@ import type { Logger } from 'pino';
 export interface WebhookEvent {
   eventType: string;
   payload: unknown;
+  timestamp?: string;
+  deliveryId?: string;
 }
 
 export type WebhookHandler = (event: WebhookEvent) => Promise<void>;
@@ -24,13 +26,71 @@ export interface WebhookServer {
   stop(): Promise<void>;
 }
 
-function verifySignature(rawBody: string, signature: string, secret: string): boolean {
+export function verifySignature(rawBody: string, signature: string, secret: string): boolean {
   const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
   const sig = signature.startsWith('sha256=') ? signature.slice(7) : signature;
   try {
     return timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
   } catch {
     return false;
+  }
+}
+
+export interface ProcessWebhookInput {
+  rawBody: string;
+  signature: string;
+  secret: string;
+  deliveryId?: string;
+  handlers: Map<string, WebhookHandler>;
+  logger: Logger;
+}
+
+export interface ProcessWebhookResult {
+  status: number;
+  body: { status?: 'ok'; error?: string };
+}
+
+export async function processWebhookRequest(
+  input: ProcessWebhookInput,
+): Promise<ProcessWebhookResult> {
+  const { rawBody, signature, secret, deliveryId, handlers, logger } = input;
+
+  if (!signature || !verifySignature(rawBody, signature, secret)) {
+    return { status: 401, body: { error: 'Invalid or missing signature' } };
+  }
+
+  let parsed: { event?: string; data?: unknown; timestamp?: string };
+  try {
+    parsed = JSON.parse(rawBody) as typeof parsed;
+  } catch {
+    return { status: 400, body: { error: 'Invalid JSON body' } };
+  }
+
+  const eventType = parsed.event;
+  if (!eventType) {
+    logger.warn({ rawBody: rawBody.slice(0, 200) }, 'webhook missing event field');
+    return { status: 400, body: { error: 'Missing event field' } };
+  }
+
+  const event: WebhookEvent = {
+    eventType,
+    payload: parsed.data,
+    timestamp: parsed.timestamp,
+    deliveryId,
+  };
+
+  const handler = handlers.get(eventType);
+  if (!handler) {
+    logger.info({ eventType, deliveryId }, 'no handler registered for event type');
+    return { status: 200, body: { status: 'ok' } };
+  }
+
+  try {
+    await handler(event);
+    return { status: 200, body: { status: 'ok' } };
+  } catch (error) {
+    logger.error({ eventType, deliveryId, error }, 'webhook handler error');
+    return { status: 500, body: { error: 'Handler error' } };
   }
 }
 
@@ -42,35 +102,15 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
   const app = new Hono();
 
   app.post('/webhook', async (c) => {
-    const signature = c.req.header('X-Webhook-Signature') ?? '';
-    const rawBody = await c.req.text();
-
-    if (!signature || !verifySignature(rawBody, signature, secret)) {
-      return c.json({ error: 'Invalid or missing signature' }, 401);
-    }
-
-    let event: WebhookEvent;
-    try {
-      event = JSON.parse(rawBody) as WebhookEvent;
-    } catch {
-      return c.json({ error: 'Invalid JSON body' }, 400);
-    }
-
-    const { eventType, payload } = event;
-    const handler = handlers.get(eventType);
-
-    if (!handler) {
-      logger.info({ eventType }, 'no handler registered for event type');
-      return c.json({ status: 'ok' }, 200);
-    }
-
-    try {
-      await handler({ eventType, payload });
-      return c.json({ status: 'ok' }, 200);
-    } catch (error) {
-      logger.error({ eventType, error }, 'webhook handler error');
-      return c.json({ error: 'Handler error' }, 500);
-    }
+    const result = await processWebhookRequest({
+      rawBody: await c.req.text(),
+      signature: c.req.header('X-BotGuild-Signature') ?? '',
+      secret,
+      deliveryId: c.req.header('X-BotGuild-Delivery') ?? undefined,
+      handlers,
+      logger,
+    });
+    return c.json(result.body, result.status as 200 | 400 | 401 | 500);
   });
 
   app.get('/health', (c) => {

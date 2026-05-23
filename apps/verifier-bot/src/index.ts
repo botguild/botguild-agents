@@ -104,13 +104,13 @@ async function main(): Promise<void> {
     webhookBaseUrl,
     webhookSecret,
     events: [
-      'gig.created',
-      'gig.updated',
-      'contract.created',
-      'contract.updated',
       'proposal.accepted',
+      'milestone.funded',
+      'milestone.delivered',
       'milestone.accepted',
       'contract.status.changed',
+      'acceptance.auto_approved',
+      'dispute.response_submitted',
     ],
     logger,
   });
@@ -140,9 +140,11 @@ async function main(): Promise<void> {
     logger,
   });
 
-  // Register webhook event handlers
-  webhookServer.on('proposal.accepted', async (event) => {
-    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+  // The full check + report kickoff pipeline. Called by milestone.funded once
+  // escrow is funded — never directly from proposal.accepted (which only
+  // stashes the gig+contract so the bot doesn't burn unpaid
+  // Claude/Playwright work on a draft contract that may never be funded).
+  async function executeAcceptedFlow(gig: Gig, contract: Contract): Promise<void> {
     const contractId = contract.id;
     const log = withContext(logger, { gigId: gig.id, contractId });
     const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
@@ -425,10 +427,81 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
     }
+  }
+
+  // Register webhook event handlers
+  webhookServer.on('proposal.accepted', async (event) => {
+    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+    const contractId = contract.id;
+    const log = withContext(logger, { gigId: gig.id, contractId });
+
+    // Stash the gig + contract; do not run any checks until escrow is funded.
+    setJob(contractId, {
+      gigId: gig.id,
+      contractId,
+      checkType: 'pending',
+      status: 'awaiting_funding',
+      checkResults: [],
+      updatedAt: new Date().toISOString(),
+      pendingAcceptance: { gig, contract },
+    });
+
+    try {
+      await client.sendMessage(
+        contractId,
+        'Proposal accepted. Verification will begin as soon as escrow is funded.',
+        'progress_update',
+      );
+    } catch (err) {
+      log.warn({ err }, 'failed to send awaiting-funding message');
+    }
+  });
+
+  webhookServer.on('milestone.funded', async (event) => {
+    const payload = event.payload as { contractId?: string };
+    const contractId = payload.contractId;
+    if (!contractId) {
+      logger.warn({ payload }, 'milestone.funded missing contractId');
+      return;
+    }
+    const job = getJob(contractId);
+    if (!job?.pendingAcceptance) {
+      logger.info({ contractId }, 'milestone.funded with no pending acceptance, ignoring');
+      return;
+    }
+    if (job.status !== 'awaiting_funding') {
+      logger.info(
+        { contractId, status: job.status },
+        'milestone.funded received but job already past awaiting_funding',
+      );
+      return;
+    }
+    // Flip status synchronously BEFORE the first await so a concurrent
+    // milestone.funded delivery for the same contract can't pass the guard
+    // and double-trigger the pipeline.
+    setJob(contractId, { ...job, status: 'running', updatedAt: new Date().toISOString() });
+    logger.info({ contractId }, 'milestone funded, executing accepted flow');
+    await executeAcceptedFlow(
+      job.pendingAcceptance.gig as Gig,
+      job.pendingAcceptance.contract as Contract,
+    );
+  });
+
+  webhookServer.on('milestone.delivered', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone delivered');
   });
 
   webhookServer.on('milestone.accepted', async (event) => {
     logger.info({ payload: event.payload }, 'milestone accepted');
+  });
+
+  webhookServer.on('acceptance.auto_approved', async (event) => {
+    logger.info({ payload: event.payload }, 'milestone auto-approved by acceptance window');
+  });
+
+  webhookServer.on('dispute.response_submitted', async (event) => {
+    // Full counter-statement flow lives in story 2.4 (MCP respond_to_dispute).
+    logger.warn({ payload: event.payload }, 'dispute response submitted on this contract');
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
