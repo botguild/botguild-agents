@@ -273,6 +273,64 @@ test('getContract unwraps the { contract } envelope', async () => {
   }
 });
 
+test('listGigs coerces stringified-JSON array fields into real arrays', async () => {
+  // The gigs endpoint returns acceptanceCriteria/deliverables/tags as
+  // stringified JSON; consumers (scorer, parsers) expect real arrays.
+  const mock = installFetchMock({
+    gigs: [
+      {
+        id: 'gig_1',
+        title: 'Watch',
+        acceptanceCriteria: '["7 daily alerts","dedup repeats"]',
+        deliverables: '["report"]',
+        tags: '["monitoring"]',
+      },
+    ],
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const gigs = await client.listGigs({ status: 'open' });
+    const g = gigs[0]!;
+    assert.deepEqual(g.acceptanceCriteria, ['7 daily alerts', 'dedup repeats']);
+    assert.deepEqual(g.deliverables, ['report']);
+    assert.deepEqual(g.tags, ['monitoring']);
+    // The parsed arrays must support array ops (this is what crashed in prod).
+    assert.equal(g.acceptanceCriteria.join('; '), '7 daily alerts; dedup repeats');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('getGig coerces missing/array fields to [] (never a non-array)', async () => {
+  const mock = installFetchMock({
+    gig: {
+      id: 'gig_2',
+      title: 'X',
+      acceptanceCriteria: undefined,
+      deliverables: ['already-array'],
+    },
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const gig = await client.getGig('gig_2');
+    assert.deepEqual(gig.acceptanceCriteria, [], 'undefined → []');
+    assert.deepEqual(gig.deliverables, ['already-array'], 'array passes through');
+    assert.equal(typeof gig.acceptanceCriteria.join, 'function', 'always a real array');
+  } finally {
+    mock.restore();
+  }
+});
+
 test('responses are normalized snake_case → camelCase (incl. nested + arrays)', async () => {
   // The platform returns snake_case; our types are camelCase. Without
   // normalization these fields would be undefined at runtime.
