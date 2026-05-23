@@ -22,6 +22,15 @@ export interface WebhookRegistrationConfig {
    * so the bot can capture a secret it can verify HMAC signatures against.
    */
   hasStoredSecret?: boolean;
+  /**
+   * The id of the webhook this bot previously registered and holds the
+   * secret for (persisted alongside the secret). Used to identify which of
+   * possibly several listed webhooks is "ours" so we can keep it and delete
+   * the rest — without relying on createdAt ordering, which is unreliable
+   * (the platform returns created_at; the camelCase field is undefined, so
+   * any time-based sort is a no-op).
+   */
+  knownWebhookId?: string;
 }
 
 // Best-effort delete. The platform's DELETE /webhooks/:id has been observed to
@@ -47,6 +56,7 @@ export async function ensureWebhookRegistered(
     logger,
     onSecretCaptured,
     hasStoredSecret = true,
+    knownWebhookId,
   } = config;
   const webhookUrl = config.webhookBaseUrl.replace(/\/$/, '') + '/webhook';
 
@@ -66,59 +76,53 @@ export async function ensureWebhookRegistered(
     }
   };
 
+  // Delete every listed webhook except the one whose id is `keepId`.
+  // Best-effort: a failed delete leaves a straggler the next run retries.
+  const deleteAllExcept = async (
+    listed: WebhookRegistration[],
+    keepId: string | undefined,
+  ): Promise<void> => {
+    const stale = listed.filter((r) => r.id !== keepId);
+    if (stale.length === 0) return;
+    const results = await Promise.all(stale.map((r) => tryDelete(client, r.id, logger)));
+    logger.info(
+      { webhookUrl, removed: results.filter(Boolean).length, attempted: stale.length },
+      'cleaned up stale/duplicate webhooks',
+    );
+  };
+
   const all = await client.listWebhooks();
   const matches = all.filter((r: WebhookRegistration) => r.url === webhookUrl);
 
-  if (matches.length === 0) {
-    const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
-    logger.info({ webhookUrl }, 'registered new webhook');
-    captureIfPresent(registration);
-    return registration;
-  }
+  // Identify the webhook we own and can verify against: the one we previously
+  // registered (knownWebhookId) whose event list still matches. We do NOT
+  // sort by createdAt — the platform returns created_at, so the camelCase
+  // field is undefined and any time-based comparison is a no-op (which used
+  // to make us keep the oldest, stale-event webhook and re-register forever).
+  const keeper =
+    knownWebhookId && hasStoredSecret
+      ? matches.find((r) => r.id === knownWebhookId && eventsMatch(r.events, events))
+      : undefined;
 
-  // The platform's GET /webhooks does NOT return the secret field — it's
-  // omitted from the SELECT. So we can never verify the secret matches from
-  // listings. Two signals drive whether we re-register: the event list (must
-  // match) and whether we have a locally-persisted secret (without one we
-  // can't verify HMAC, so we force a fresh POST to capture one).
-  const sorted = [...matches].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-  );
-  const [newest, ...duplicates] = sorted;
-
-  // Best-effort cleanup of duplicate webhooks. Failures are tolerated.
-  if (duplicates.length > 0) {
-    const results = await Promise.all(duplicates.map((r) => tryDelete(client, r.id, logger)));
-    const removed = results.filter(Boolean).length;
-    logger.info({ webhookUrl, removed, attempted: duplicates.length }, 'duplicate webhook cleanup');
-  }
-
-  const eventsAlreadyMatch = eventsMatch(newest.events, events);
-
-  if (eventsAlreadyMatch && hasStoredSecret) {
+  if (keeper) {
+    await deleteAllExcept(matches, keeper.id);
     logger.info(
-      { webhookUrl, webhookId: newest.id },
-      'webhook already registered with matching events and stored secret, no action',
+      { webhookUrl, webhookId: keeper.id },
+      'kept owned webhook with matching events, no re-registration',
     );
-    return newest;
+    return keeper;
   }
 
-  // Either the event list differs OR we have no stored secret yet — register
-  // a fresh webhook so we can capture the platform-issued secret. Try to
-  // delete the stale registration first but tolerate failure (the platform's
-  // DELETE endpoint has been seen to 500; the next startup will retry).
-  const reason = eventsAlreadyMatch
-    ? 'no stored secret, forcing re-registration to capture platform secret'
-    : 'event list differs, re-registering';
-  logger.info({ webhookUrl, webhookId: newest.id, reason }, reason);
-
-  const deleted = await tryDelete(client, newest.id, logger);
+  // No usable existing webhook (none owned-and-matching, or no stored secret).
+  // Register a fresh one, capture its secret, then delete every prior
+  // registration for this URL so we converge on exactly one.
   const registration = await client.registerWebhook(webhookUrl, events, webhookSecret);
-  logger.info(
-    { webhookUrl, webhookId: registration.id, oldDeleted: deleted },
-    're-registered webhook',
-  );
   captureIfPresent(registration);
+  await deleteAllExcept(matches, registration.id);
+  logger.info(
+    { webhookUrl, webhookId: registration.id, replaced: matches.length },
+    'registered fresh webhook and cleaned up prior registrations',
+  );
   return registration;
 }
 

@@ -146,6 +146,7 @@ async function main(): Promise<void> {
     ],
     logger,
     hasStoredSecret: persisted !== null,
+    knownWebhookId: persisted?.webhookId,
     onSecretCaptured: (secret, webhookId) => {
       activeSecret = secret;
       saveWebhookSecret(secret, webhookId);
