@@ -12,7 +12,9 @@ interface CapturedRequest {
   body: unknown;
 }
 
-function installFetchMock(response: unknown): { calls: CapturedRequest[]; restore: () => void } {
+function installFetchMock(
+  responder: unknown | ((req: CapturedRequest) => unknown),
+): { calls: CapturedRequest[]; restore: () => void } {
   const calls: CapturedRequest[] = [];
   const originalFetch = globalThis.fetch;
 
@@ -25,8 +27,10 @@ function installFetchMock(response: unknown): { calls: CapturedRequest[]; restor
       }
     }
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
-    calls.push({ url, method: init?.method ?? 'GET', headers, body });
-    return new Response(JSON.stringify(response), {
+    const req: CapturedRequest = { url, method: init?.method ?? 'GET', headers, body };
+    calls.push(req);
+    const responseBody = typeof responder === 'function' ? responder(req) : responder;
+    return new Response(JSON.stringify(responseBody), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -88,6 +92,119 @@ test('submitProposal POSTs to /proposals with gigId and botId in body', async ()
     assert.deepEqual(milestones[0]!.deliverables, ['First report']);
 
     assert.equal(result.proposalId, 'prop_123');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('sendMessage resolves thread by contract scope then POSTs to /threads/:id/messages', async () => {
+  const mock = installFetchMock((req: CapturedRequest) => {
+    if (req.method === 'GET' && req.url.includes('/threads?')) {
+      return { threads: [{ id: 'thr_abc' }] };
+    }
+    return { message: { id: 'msg_xyz' } };
+  });
+
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_42',
+      logger: silentLogger,
+    });
+
+    await client.sendMessage('contract_99', 'Hello payer', 'progress_update');
+
+    assert.equal(mock.calls.length, 2);
+
+    const lookupCall = mock.calls[0]!;
+    assert.equal(lookupCall.method, 'GET');
+    assert.match(lookupCall.url, /\/threads\?/);
+    assert.match(lookupCall.url, /scope=contract/);
+    assert.match(lookupCall.url, /scopeId=contract_99/);
+
+    const sendCall = mock.calls[1]!;
+    assert.equal(sendCall.method, 'POST');
+    assert.equal(sendCall.url, 'https://api.botguild.test/threads/thr_abc/messages');
+    const body = sendCall.body as Record<string, unknown>;
+    assert.equal(body.content, 'Hello payer');
+    assert.equal(body.contentType, 'progress_update');
+    assert.equal(body.botId, 'bot_42');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('sendMessage caches threadId across calls to the same contract', async () => {
+  const mock = installFetchMock((req: CapturedRequest) => {
+    if (req.method === 'GET' && req.url.includes('/threads?')) {
+      return { threads: [{ id: 'thr_1' }] };
+    }
+    return { message: { id: 'msg' } };
+  });
+
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    await client.sendMessage('c_1', 'first');
+    await client.sendMessage('c_1', 'second');
+
+    const lookups = mock.calls.filter((c) => c.method === 'GET');
+    const sends = mock.calls.filter((c) => c.method === 'POST');
+    assert.equal(lookups.length, 1, 'thread lookup should be cached');
+    assert.equal(sends.length, 2);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('sendMessage defaults contentType to "text" not "text/plain"', async () => {
+  const mock = installFetchMock((req: CapturedRequest) => {
+    if (req.method === 'GET') return { threads: [{ id: 'thr_1' }] };
+    return { message: { id: 'msg' } };
+  });
+
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    await client.sendMessage('c_1', 'hello');
+
+    const send = mock.calls.find((c) => c.method === 'POST')!;
+    const body = send.body as Record<string, unknown>;
+    assert.equal(body.contentType, 'text');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('sendMessage on a contract with no thread logs and returns without posting', async () => {
+  const mock = installFetchMock((req: CapturedRequest) => {
+    if (req.method === 'GET') return { threads: [] };
+    return { message: { id: 'msg' } };
+  });
+
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    await client.sendMessage('c_missing', 'hello');
+
+    const sends = mock.calls.filter((c) => c.method === 'POST');
+    assert.equal(sends.length, 0);
   } finally {
     mock.restore();
   }
