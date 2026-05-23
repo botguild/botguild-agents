@@ -116,7 +116,7 @@ export const standingOffers: LocalStandingOffer[] = [
 type InputType = 'csv' | 'pdf' | 'api' | 'sheet' | 'multi';
 type RowSize = 'small' | 'medium' | 'large';
 
-type MilestoneDraft = { title: string; description: string; price: number };
+type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
 
 function detectInputType(gig: Gig): InputType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
@@ -177,26 +177,32 @@ export function pricingCalc(gig: Gig): {
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Fetch & Validate',
-      description:
+      amount: m1Price,
+      duration: '1 business day',
+      deliverables: [
         'Ingest source data from the provided input (CSV, PDF, API, or sheet). ' +
-        'Validate schema, check for missing fields, encoding issues, and structural anomalies. ' +
-        'Deliver a validation report summarising row counts, detected issues, and a proposed schema map.',
-      price: m1Price,
+          'Validate schema, check for missing fields, encoding issues, and structural anomalies. ' +
+          'Validation report summarising row counts, detected issues, and a proposed schema map.',
+      ],
     },
     {
       title: 'Milestone 2 — Transform',
-      description:
+      amount: m2Price,
+      duration: '2 business days',
+      deliverables: [
         'Apply all configured transformations: field normalization, type coercion, deduplication, ' +
-        'and any enrichment or filtering rules. ' +
-        'Deliver a transformed staging output for client review before final delivery.',
-      price: m2Price,
+          'and any enrichment or filtering rules. ' +
+          'Transformed staging output for client review before final delivery.',
+      ],
     },
     {
       title: 'Milestone 3 — Deliver',
-      description:
+      amount: m3Price,
+      duration: '1 business day',
+      deliverables: [
         'Finalize and deliver the clean output in the agreed format (CSV, JSON, or API payload). ' +
-        'Includes a transformation summary log and any edge-case handling notes.',
-      price: m3Price,
+          'Includes a transformation summary log and any edge-case handling notes.',
+      ],
     },
   ];
 

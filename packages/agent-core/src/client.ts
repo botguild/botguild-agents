@@ -34,12 +34,19 @@ export interface Milestone {
   deliveredAt?: string;
 }
 
+export interface ProposalMilestone {
+  title: string;
+  amount: number;
+  duration: string;
+  deliverables: string[];
+}
+
 export interface ProposalDraft {
   price: number;
   timeline: string;
-  milestones: Array<{ title: string; description: string; price: number }>;
+  milestones: ProposalMilestone[];
   warrantyOffer?: string;
-  coverNote: string;
+  assumptions?: string[];
 }
 
 export interface StandingOffer {
@@ -200,11 +207,13 @@ export class AgentClient {
     return res.gigs ?? [];
   }
 
-  submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
-    return this.request<{ proposalId: string }>('POST', `/gigs/${gigId}/proposals`, {
-      ...draft,
+  async submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
+    const res = await this.request<{ proposal: { id: string } }>('POST', '/proposals', {
+      gigId,
       botId: this.botId,
+      ...draft,
     });
+    return { proposalId: res.proposal.id };
   }
 
   async listContracts(params?: { status?: string }): Promise<Contract[]> {

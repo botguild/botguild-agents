@@ -105,7 +105,7 @@ export const standingOffers: LocalStandingOffer[] = [
 
 type CheckType = 'smoke' | 'dataQuality' | 'apiContract' | 'acceptanceAudit';
 
-type MilestoneDraft = { title: string; description: string; price: number };
+type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
 
 function detectCheckType(gig: Gig): CheckType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
@@ -134,19 +134,23 @@ export function pricingCalc(gig: Gig): {
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Run Checks',
-      description:
+      amount: m1Price,
+      duration: '1 business day',
+      deliverables: [
         'Execute all configured checks against the target deliverable or environment. ' +
-        'Covers automated test runs, schema validation, and structured audit evaluation ' +
-        'depending on the check type. Delivers a raw results payload for review.',
-      price: m1Price,
+          'Covers automated test runs, schema validation, and structured audit evaluation ' +
+          'depending on the check type. Raw results payload for review.',
+      ],
     },
     {
       title: 'Milestone 2 — Deliver Report',
-      description:
+      amount: m2Price,
+      duration: '1 business day',
+      deliverables: [
         'Compile and deliver the final structured pass/fail report. ' +
-        'Includes a summary of all check results, failure details with context, ' +
-        'and recommendations for any items that did not meet acceptance criteria.',
-      price: m2Price,
+          'Includes a summary of all check results, failure details with context, ' +
+          'and recommendations for any items that did not meet acceptance criteria.',
+      ],
     },
   ];
 

@@ -142,7 +142,7 @@ function deriveComplexity(targetCount: number): Complexity {
   return 'complex';
 }
 
-type MilestoneDraft = { title: string; description: string; price: number };
+type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
 
 export function pricingCalc(gig: Gig): {
   price: number;
@@ -169,31 +169,39 @@ export function pricingCalc(gig: Gig): {
   const milestones: MilestoneDraft[] = [
     {
       title: 'Week 1 — Watch Report',
-      description:
+      amount: weeklyPrice,
+      duration: '1 week',
+      deliverables: [
         'Initial monitoring setup and first 7-day watch cycle. ' +
-        'Delivers a structured report covering all targets with baseline metrics.',
-      price: weeklyPrice,
+          'Structured report covering all targets with baseline metrics.',
+      ],
     },
     {
       title: 'Week 2 — Watch Report',
-      description:
-        'Second 7-day watch cycle. Delivers a structured report with change log, ' +
-        'alert history, and trend comparison against Week 1 baseline.',
-      price: weeklyPrice,
+      amount: weeklyPrice,
+      duration: '1 week',
+      deliverables: [
+        'Second 7-day watch cycle. Structured report with change log, ' +
+          'alert history, and trend comparison against Week 1 baseline.',
+      ],
     },
     {
       title: 'Week 3 — Watch Report',
-      description:
-        'Third 7-day watch cycle. Delivers a structured report with cumulative ' +
-        'uptime/change statistics and any recurring anomaly patterns identified.',
-      price: weeklyPrice,
+      amount: weeklyPrice,
+      duration: '1 week',
+      deliverables: [
+        'Third 7-day watch cycle. Structured report with cumulative ' +
+          'uptime/change statistics and any recurring anomaly patterns identified.',
+      ],
     },
     {
       title: 'Week 4 — Watch Report',
-      description:
-        'Final 7-day watch cycle. Delivers a comprehensive end-of-package report ' +
-        'with full 4-week summary, incident timeline, and recommendations.',
-      price: lastWeekPrice,
+      amount: lastWeekPrice,
+      duration: '1 week',
+      deliverables: [
+        'Final 7-day watch cycle. Comprehensive end-of-package report ' +
+          'with full 4-week summary, incident timeline, and recommendations.',
+      ],
     },
   ];
 
