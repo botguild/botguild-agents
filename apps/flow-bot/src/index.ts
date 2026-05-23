@@ -129,9 +129,11 @@ async function main(): Promise<void> {
     logger,
   });
 
-  // Register webhook event handlers
-  webhookServer.on('proposal.accepted', async (event) => {
-    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+  // The full ETL kickoff pipeline. Called by milestone.funded once escrow is
+  // funded — never directly from proposal.accepted (which only stashes the
+  // gig+contract so the bot doesn't burn unpaid Claude/Playwright work on a
+  // draft contract that may never be funded).
+  async function executeAcceptedFlow(gig: Gig, contract: Contract): Promise<void> {
     const contractId = contract.id;
     const log = withContext(logger, { gigId: gig.id, contractId });
     const milestoneIds = contract.milestones.map((m) => m.id);
@@ -435,12 +437,58 @@ async function main(): Promise<void> {
         });
       }
     }
+  }
+
+  // Register webhook event handlers
+  webhookServer.on('proposal.accepted', async (event) => {
+    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
+    const contractId = contract.id;
+    const log = withContext(logger, { gigId: gig.id, contractId });
+
+    // Stash the gig + contract; do not run the ETL pipeline until escrow is
+    // funded. milestone.funded picks this up and calls executeAcceptedFlow.
+    setJob(contractId, {
+      gigId: gig.id,
+      contractId,
+      inputType: 'unknown',
+      status: 'awaiting_funding',
+      currentMilestoneIndex: 0,
+      updatedAt: new Date().toISOString(),
+      pendingAcceptance: { gig, contract },
+    });
+
+    try {
+      await client.sendMessage(
+        contractId,
+        'Proposal accepted. Work will begin as soon as escrow is funded.',
+        'progress_update',
+      );
+    } catch (err) {
+      log.warn({ err }, 'failed to send awaiting-funding message');
+    }
   });
 
   webhookServer.on('milestone.funded', async (event) => {
-    // TODO(epic-1): consider gating ETL job kickoff on this event instead of
-    // proposal.accepted so the bot never runs unpaid work on draft contracts.
-    logger.info({ payload: event.payload }, 'milestone funded');
+    const payload = event.payload as { contractId?: string };
+    const contractId = payload.contractId;
+    if (!contractId) {
+      logger.warn({ payload }, 'milestone.funded missing contractId');
+      return;
+    }
+    const job = getJob(contractId);
+    if (!job?.pendingAcceptance) {
+      logger.info({ contractId }, 'milestone.funded with no pending acceptance, ignoring');
+      return;
+    }
+    if (job.status !== 'awaiting_funding') {
+      logger.info(
+        { contractId, status: job.status },
+        'milestone.funded received but job already past awaiting_funding',
+      );
+      return;
+    }
+    logger.info({ contractId }, 'milestone funded, executing accepted flow');
+    await executeAcceptedFlow(job.pendingAcceptance.gig as Gig, job.pendingAcceptance.contract as Contract);
   });
 
   webhookServer.on('milestone.delivered', async (event) => {

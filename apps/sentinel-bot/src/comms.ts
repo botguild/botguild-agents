@@ -27,6 +27,11 @@ export function createComms(messenger: Messenger) {
       return messenger.send(contractId, text, 'progress_update');
     },
 
+    queuedAwaitingFunding(contractId: string, job: WatchJobConfig): Promise<void> {
+      const text = `Ready to monitor ${job.targets.join(', ')} on schedule ${job.schedule}. Work will begin as soon as escrow is funded.`;
+      return messenger.send(contractId, text, 'progress_update');
+    },
+
     weeklyMilestoneReady(contractId: string, summary: string): Promise<void> {
       const text = `Weekly report ready: ${summary}`;
       return messenger.send(contractId, text, 'progress_update');

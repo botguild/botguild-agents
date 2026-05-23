@@ -19,7 +19,7 @@ import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
 import { handleStandingOfferGig } from './standinghandler.js';
-import { loadStore, listJobs as listStoredJobs } from './store.js';
+import { loadStore, listJobs as listStoredJobs, getJob, setJob, type JobState } from './store.js';
 import type { WatchJobConfig } from './parser.js';
 
 // ---------------------------------------------------------------------------
@@ -133,6 +133,75 @@ async function main(): Promise<void> {
     logger,
   });
 
+  // Persist a parsed plan in the store with lifecycle='awaiting_funding'. The
+  // actual cron schedule + first check don't run until milestone.funded fires.
+  function queueForFunding(
+    gigId: string,
+    contractId: string,
+    config: WatchJobConfig,
+    pendingKickoff: { isStandingOffer: boolean; milestoneDates?: string[] },
+  ): void {
+    const existing = getJob(contractId);
+    setJob(contractId, {
+      ...(existing ?? ({} as Partial<JobState>)),
+      gigId,
+      contractId,
+      status: existing?.status ?? 'unknown',
+      lastCheckedAt: existing?.lastCheckedAt ?? new Date().toISOString(),
+      watchConfig: config,
+      lifecycle: 'awaiting_funding',
+      pendingKickoff,
+    } as JobState);
+  }
+
+  // Execute kickoff: schedule cron + (for non-standing) run first check.
+  // Idempotent: marks the job 'active' so repeated milestone.funded deliveries
+  // don't double-execute.
+  async function startWatchJob(contractId: string): Promise<void> {
+    const job = getJob(contractId);
+    if (!job || !job.watchConfig) {
+      logger.info({ contractId }, 'milestone.funded with no queued plan, ignoring');
+      return;
+    }
+    if (job.lifecycle === 'active') {
+      logger.info({ contractId }, 'milestone.funded received but job already active');
+      return;
+    }
+
+    const config = job.watchConfig as WatchJobConfig;
+    const kickoff = job.pendingKickoff ?? { isStandingOffer: false };
+    const log = withContext(logger, { gigId: job.gigId, contractId });
+
+    if (kickoff.isStandingOffer && kickoff.milestoneDates) {
+      try {
+        await comms.packageStarted(contractId, config, kickoff.milestoneDates);
+      } catch (err) {
+        log.warn({ err }, 'failed to send packageStarted message');
+      }
+      scheduler.addJob(config);
+      setJob(contractId, { ...job, lifecycle: 'active' });
+      return;
+    }
+
+    try {
+      await comms.setupConfirmed(contractId, config);
+    } catch (err) {
+      log.warn({ err }, 'failed to send setupConfirmed message');
+    }
+
+    scheduler.addJob(config);
+    setJob(contractId, { ...job, lifecycle: 'active' });
+
+    const firstCheckStart = Date.now();
+    try {
+      const summary = await scheduler.runOnce(config);
+      log.info({ durationMs: Date.now() - firstCheckStart }, 'first check complete');
+      await comms.firstCheckComplete(contractId, config, summary);
+    } catch (err) {
+      log.warn({ err, durationMs: Date.now() - firstCheckStart }, 'immediate first check failed');
+    }
+  }
+
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
     const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
@@ -156,19 +225,16 @@ async function main(): Promise<void> {
     }
 
     if (standingResult.isStandingOffer && standingResult.config && standingResult.milestoneDates) {
-      log.info('standing offer gig detected, skipping parser');
-
+      log.info('standing offer gig detected, queueing for funding');
+      queueForFunding(gig.id, contract.id, standingResult.config, {
+        isStandingOffer: true,
+        milestoneDates: standingResult.milestoneDates,
+      });
       try {
-        await comms.packageStarted(
-          contract.id,
-          standingResult.config,
-          standingResult.milestoneDates,
-        );
+        await comms.queuedAwaitingFunding(contract.id, standingResult.config);
       } catch (err) {
-        log.warn({ err }, 'failed to send packageStarted message');
+        log.warn({ err }, 'failed to send queuedAwaitingFunding message');
       }
-
-      scheduler.addJob(standingResult.config);
       return;
     }
 
@@ -198,28 +264,23 @@ async function main(): Promise<void> {
       return;
     }
 
+    queueForFunding(gig.id, contract.id, config, { isStandingOffer: false });
     try {
-      await comms.setupConfirmed(contract.id, config);
+      await comms.queuedAwaitingFunding(contract.id, config);
     } catch (err) {
-      log.warn({ err }, 'failed to send setupConfirmed message');
-    }
-
-    scheduler.addJob(config);
-
-    const firstCheckStart = Date.now();
-    try {
-      const summary = await scheduler.runOnce(config);
-      log.info({ durationMs: Date.now() - firstCheckStart }, 'first check complete');
-      await comms.firstCheckComplete(contract.id, config, summary);
-    } catch (err) {
-      log.warn({ err, durationMs: Date.now() - firstCheckStart }, 'immediate first check failed');
+      log.warn({ err }, 'failed to send queuedAwaitingFunding message');
     }
   });
 
   webhookServer.on('milestone.funded', async (event) => {
-    // TODO(epic-1): consider gating job kickoff on this event instead of
-    // proposal.accepted so the bot never runs unpaid work on draft contracts.
-    logger.info({ payload: event.payload }, 'milestone funded');
+    const payload = event.payload as { contractId?: string };
+    const contractId = payload.contractId;
+    if (!contractId) {
+      logger.warn({ payload }, 'milestone.funded missing contractId');
+      return;
+    }
+    logger.info({ contractId }, 'milestone funded, kicking off work');
+    await startWatchJob(contractId);
   });
 
   webhookServer.on('milestone.delivered', async (event) => {
@@ -274,9 +335,18 @@ async function main(): Promise<void> {
   });
 
   // Restore cron schedules for any active watch contracts persisted from a
-  // prior run, so a restart doesn't silently stop monitoring.
+  // prior run, so a restart doesn't silently stop monitoring. Jobs still in
+  // 'awaiting_funding' are deliberately skipped — they'll resume when the
+  // pending milestone.funded webhook arrives.
   for (const persisted of listStoredJobs()) {
     if (!persisted.watchConfig) continue;
+    if (persisted.lifecycle === 'awaiting_funding') {
+      logger.info(
+        { contractId: persisted.contractId },
+        'persisted job still awaiting funding, skipping cron restore',
+      );
+      continue;
+    }
     const cfg = persisted.watchConfig as WatchJobConfig;
     if (!cfg.contractId || !cfg.targets || cfg.targets.length === 0) continue;
     logger.info(
