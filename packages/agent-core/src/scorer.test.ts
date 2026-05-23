@@ -15,15 +15,29 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     id: 'gig-1',
     title: 'Build a website',
     description: 'Need a full-stack web app built.',
-    category: 'web-development',
-    budget: 5000,
-    warrantyTerms: '30 days of bug fixes included',
-    acceptanceCriteria:
-      'All pages load within 2 seconds, mobile-responsive, passes accessibility audit',
-    timeline: '4 weeks',
-    status: 'open',
     payerId: 'payer-1',
-    createdAt: '2026-05-03T00:00:00Z',
+    payerName: 'Acme Co',
+    payerAvatar: '',
+    category: 'web-development',
+    subcategory: '',
+    deliverables: [],
+    acceptanceCriteria: [
+      'All pages load within 2 seconds',
+      'mobile-responsive',
+      'passes accessibility audit',
+    ],
+    budget: 5000,
+    budgetModel: 'fixed',
+    timeline: '4 weeks',
+    urgency: 'medium',
+    warrantyRequired: true,
+    warrantyMinDuration: '30 days',
+    dataConstraints: [],
+    status: 'open',
+    proposalCount: 0,
+    postedDate: '2026-05-03T00:00:00Z',
+    tags: [],
+    gigType: 'standard',
     ...overrides,
   };
 }
@@ -69,8 +83,8 @@ test('budget below min → budget score 0, other factors score normally', () => 
 });
 
 // 4. No acceptance criteria → clarity = 0
-test('no acceptanceCriteria → clarity score 0', () => {
-  const gig = makeGig({ acceptanceCriteria: undefined });
+test('empty acceptanceCriteria → clarity score 0', () => {
+  const gig = makeGig({ acceptanceCriteria: [] });
   const breakdown = scoreGig(gig, baseConfig);
 
   assert.equal(breakdown.clarity, 0);
@@ -81,7 +95,7 @@ test('no acceptanceCriteria → clarity score 0', () => {
 test('score below threshold → shouldPropose false', () => {
   const strictConfig = { ...baseConfig, proposalThreshold: 90 };
   // Remove warranty and timeline to drop score below 90
-  const gig = makeGig({ warrantyTerms: undefined, timeline: undefined });
+  const gig = makeGig({ warrantyRequired: false, timeline: '' });
   const breakdown = scoreGig(gig, strictConfig);
 
   assert.equal(breakdown.total, 75); // 40 + 20 + 0 + 15 + 0
@@ -137,8 +151,8 @@ test('scoreBudget returns linear score for midpoint budget', () => {
 });
 
 // Short acceptanceCriteria scores 8
-test('short acceptanceCriteria (1-50 chars) → clarity score 8', () => {
-  const gig = makeGig({ acceptanceCriteria: 'Must work on mobile' }); // 19 chars
+test('short acceptanceCriteria (≤50 chars total) → clarity score 8', () => {
+  const gig = makeGig({ acceptanceCriteria: ['Must work on mobile'] }); // 19 chars
   const breakdown = scoreGig(gig, baseConfig);
   assert.equal(breakdown.clarity, 8);
 });

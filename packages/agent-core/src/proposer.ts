@@ -117,7 +117,7 @@ function buildUserPrompt(gig: Gig): string {
 **Gig Title**: ${gig.title}
 **Category**: ${gig.category}
 **Budget**: $${gig.budget}
-**Description**: ${gig.description}${gig.acceptanceCriteria ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
+**Description**: ${gig.description}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
 
 Write a cover note of 2-3 sentences that explains specifically how you will approach this gig. Be concrete about your method, not generic. Reference details from the gig description to show you have read and understood the requirements.`;
 }

@@ -471,14 +471,28 @@ async function main(): Promise<void> {
 
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
-    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
-    const contractId = contract.id;
-    const log = withContext(logger, { gigId: gig.id, contractId });
+    // The platform sends a flat ID payload, not nested entities. Fetch the
+    // full gig + contract by id so they can be stashed for the funded run.
+    const { gigId, contractId } = event.payload as { gigId?: string; contractId?: string };
+    if (!gigId || !contractId) {
+      logger.warn({ payload: event.payload }, 'proposal.accepted missing gigId/contractId');
+      return;
+    }
+    const log = withContext(logger, { gigId, contractId });
+
+    let gig: Gig;
+    let contract: Contract;
+    try {
+      [gig, contract] = await Promise.all([client.getGig(gigId), client.getContract(contractId)]);
+    } catch (err) {
+      log.error({ err }, 'failed to fetch gig/contract on proposal.accepted');
+      return;
+    }
 
     // Stash the gig + contract; do not run the ETL pipeline until escrow is
     // funded. milestone.funded picks this up and calls executeAcceptedFlow.
     setJob(contractId, {
-      gigId: gig.id,
+      gigId,
       contractId,
       inputType: 'unknown',
       status: 'awaiting_funding',
@@ -546,14 +560,21 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
-    const { contract } = event.payload as { contract: Contract };
-    logger.info({ contractId: contract.id, status: contract.status }, 'contract status changed');
-    if (contract.status === 'completed' || contract.status === 'cancelled') {
-      const task = weeklyTasks.get(contract.id);
+    const { contractId, newStatus } = event.payload as {
+      contractId?: string;
+      newStatus?: string;
+    };
+    if (!contractId) {
+      logger.warn({ payload: event.payload }, 'contract.status.changed missing contractId');
+      return;
+    }
+    logger.info({ contractId, status: newStatus }, 'contract status changed');
+    if (newStatus === 'completed' || newStatus === 'cancelled') {
+      const task = weeklyTasks.get(contractId);
       if (task) {
         task.stop();
-        weeklyTasks.delete(contract.id);
-        logger.info({ contractId: contract.id }, 'stopped weekly cron for ended contract');
+        weeklyTasks.delete(contractId);
+        logger.info({ contractId }, 'stopped weekly cron for ended contract');
       }
     }
   });

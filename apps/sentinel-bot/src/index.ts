@@ -240,10 +240,25 @@ async function main(): Promise<void> {
 
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
-    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
-    const log = withContext(logger, { gigId: gig.id, contractId: contract.id });
+    // The platform sends a flat ID payload, not nested entities. Fetch the
+    // full gig + contract by id before doing anything that needs their fields.
+    const { gigId, contractId } = event.payload as { gigId?: string; contractId?: string };
+    if (!gigId || !contractId) {
+      logger.warn({ payload: event.payload }, 'proposal.accepted missing gigId/contractId');
+      return;
+    }
+    const log = withContext(logger, { gigId, contractId });
 
-    const milestoneIds = contract.milestones.map((m: { id: string }) => m.id);
+    let gig: Gig;
+    let contract: Contract;
+    try {
+      [gig, contract] = await Promise.all([client.getGig(gigId), client.getContract(contractId)]);
+    } catch (err) {
+      log.error({ err }, 'failed to fetch gig/contract on proposal.accepted');
+      return;
+    }
+
+    const milestoneIds = contract.milestones.map((m) => m.id);
     const standingResult = handleStandingOfferGig(gig, contract.id, milestoneIds);
 
     if (standingResult.isStandingOffer && standingResult.needsClarification) {
@@ -337,13 +352,17 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
-    const { contract } = event.payload as { contract: Contract };
-    if (contract.status === 'cancelled' || contract.status === 'completed') {
-      scheduler.removeJob(contract.id);
-      logger.info(
-        { contractId: contract.id, status: contract.status },
-        'job removed due to contract status change',
-      );
+    const { contractId, newStatus } = event.payload as {
+      contractId?: string;
+      newStatus?: string;
+    };
+    if (!contractId) {
+      logger.warn({ payload: event.payload }, 'contract.status.changed missing contractId');
+      return;
+    }
+    if (newStatus === 'cancelled' || newStatus === 'completed') {
+      scheduler.removeJob(contractId);
+      logger.info({ contractId, status: newStatus }, 'job removed due to contract status change');
     }
   });
 
