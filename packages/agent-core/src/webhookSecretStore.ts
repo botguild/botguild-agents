@@ -49,11 +49,14 @@ export function saveWebhookSecret(
   config: WebhookSecretStoreConfig = {},
 ): void {
   const { dir, file } = resolvePaths(config);
-  mkdirSync(dir, { recursive: true });
+  // Restrictive directory + file mode so the secret isn't world-readable.
+  // The file holds the platform's HMAC signing key in plaintext; anyone with
+  // it can forge signed webhooks against this bot.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
   const payload: StoredSecret = {
     secret,
     webhookId,
     capturedAt: new Date().toISOString(),
   };
-  writeFileSync(file, JSON.stringify(payload, null, 2), 'utf-8');
+  writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf-8', mode: 0o600 });
 }

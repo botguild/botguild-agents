@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadWebhookSecret, saveWebhookSecret } from './webhookSecretStore.js';
@@ -54,6 +54,21 @@ test('loadWebhookSecret returns null on corrupt JSON', () => {
     assert.ok(existsSync(file));
     const result = loadWebhookSecret({ dataDir });
     assert.equal(result, null);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('saveWebhookSecret writes file with restrictive (0600) permissions', () => {
+  const dataDir = freshTempDir();
+  try {
+    saveWebhookSecret('whsec_perm_test', 'wh_1', { dataDir });
+    const file = join(dataDir, 'webhook-secret.json');
+    const stat = statSync(file);
+    // Only the owner should be able to read/write — mode 0o600. The
+    // permission bits live in the low 9 bits of st_mode.
+    const perms = stat.mode & 0o777;
+    assert.equal(perms, 0o600, `expected file mode 0o600, got 0o${perms.toString(8)}`);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

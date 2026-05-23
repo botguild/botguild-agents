@@ -85,8 +85,9 @@ async function main(): Promise<void> {
   // If registerBot / syncStandingOffers / ensureWebhookRegistered hang or
   // throw, Fly's 10s health-check grace period would otherwise expire and
   // the machine never becomes reachable. Handlers are registered later;
-  // until then the server returns 200 with "no handler" for any inbound
-  // webhook, which is safe.
+  // until webhookServer.markReady() is called (after handler registration),
+  // /webhook returns 503 so the platform retries any in-flight deliveries
+  // instead of recording them as successfully delivered to an unprepared bot.
   const webhookServer = createWebhookServer({
     port,
     secret: () => activeSecret,

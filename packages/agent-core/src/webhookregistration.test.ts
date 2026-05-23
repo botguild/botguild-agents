@@ -191,6 +191,22 @@ test('onSecretCaptured does not fire when platform returns empty secret', async 
   assert.equal(captured.length, 0, 'must not fire onSecretCaptured for empty secret');
 });
 
+test('onSecretCaptured throwing does not block registration', async () => {
+  const { client, calls } = stubClient({ listResponse: [] });
+
+  // Must not throw — even if the persistence callback fails (e.g., volume full)
+  // we want webhook registration itself to succeed.
+  await ensureWebhookRegistered({
+    ...baseConfig,
+    client,
+    onSecretCaptured: () => {
+      throw new Error('disk full');
+    },
+  });
+
+  assert.equal(calls.register.length, 1, 'POST happened despite callback throw');
+});
+
 test('duplicate webhooks: keeps newest, attempts to delete others', async () => {
   const olderDate = new Date(Date.now() - 86400_000).toISOString();
   const newerDate = new Date().toISOString();

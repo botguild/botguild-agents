@@ -50,8 +50,18 @@ export async function ensureWebhookRegistered(
   const webhookUrl = config.webhookBaseUrl.replace(/\/$/, '') + '/webhook';
 
   const captureIfPresent = (registration: WebhookRegistration): void => {
-    if (registration.secret && registration.secret.length > 0) {
-      onSecretCaptured?.(registration.secret, registration.id);
+    if (!registration.secret || registration.secret.length === 0) return;
+    if (!onSecretCaptured) return;
+    // Best-effort: the callback typically persists to disk. If that fails
+    // (volume full, permission denied, etc.) we don't want it to crash the
+    // bot — webhook registration itself already succeeded.
+    try {
+      onSecretCaptured(registration.secret, registration.id);
+    } catch (err) {
+      logger.error(
+        { err, webhookId: registration.id },
+        'onSecretCaptured callback threw; secret not persisted but registration succeeded',
+      );
     }
   };
 
