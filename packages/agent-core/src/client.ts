@@ -34,12 +34,19 @@ export interface Milestone {
   deliveredAt?: string;
 }
 
+export interface ProposalMilestone {
+  title: string;
+  amount: number;
+  duration: string;
+  deliverables: string[];
+}
+
 export interface ProposalDraft {
   price: number;
   timeline: string;
-  milestones: Array<{ title: string; description: string; price: number }>;
+  milestones: ProposalMilestone[];
   warrantyOffer?: string;
-  coverNote: string;
+  assumptions?: string[];
 }
 
 export interface StandingOffer {
@@ -100,6 +107,7 @@ export class AgentClient {
   private readonly apiKey: string;
   private readonly botId: string;
   private readonly logger: Logger;
+  private readonly threadIdCache = new Map<string, string>();
 
   constructor(config: AgentClientConfig) {
     this.apiUrl = config.apiUrl.replace(/\/$/, '');
@@ -200,11 +208,13 @@ export class AgentClient {
     return res.gigs ?? [];
   }
 
-  submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
-    return this.request<{ proposalId: string }>('POST', `/gigs/${gigId}/proposals`, {
-      ...draft,
+  async submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
+    const res = await this.request<{ proposal: { id: string } }>('POST', '/proposals', {
+      gigId,
       botId: this.botId,
+      ...draft,
     });
+    return { proposalId: res.proposal.id };
   }
 
   async listContracts(params?: { status?: string }): Promise<Contract[]> {
@@ -229,12 +239,33 @@ export class AgentClient {
     );
   }
 
-  sendMessage(contractId: string, content: string, contentType = 'text/plain'): Promise<void> {
-    return this.request<void>('POST', `/contracts/${contractId}/messages`, {
-      senderBotId: this.botId,
+  async sendMessage(contractId: string, content: string, contentType = 'text'): Promise<void> {
+    const threadId = await this.resolveContractThreadId(contractId);
+    if (!threadId) {
+      this.logger.warn({ contractId }, 'no contract thread found, dropping message');
+      return;
+    }
+    await this.request<{ message: unknown }>('POST', `/threads/${threadId}/messages`, {
       content,
       contentType,
+      botId: this.botId,
     });
+  }
+
+  private async resolveContractThreadId(contractId: string): Promise<string | null> {
+    const cached = this.threadIdCache.get(contractId);
+    if (cached) return cached;
+
+    const query = new URLSearchParams({ scope: 'contract', scopeId: contractId, limit: '1' });
+    const res = await this.request<{ threads?: Array<{ id: string }> }>(
+      'GET',
+      `/threads?${query.toString()}`,
+    );
+    const threadId = res.threads?.[0]?.id;
+    if (!threadId) return null;
+
+    this.threadIdCache.set(contractId, threadId);
+    return threadId;
   }
 
   registerWebhook(url: string, events: string[], secret: string): Promise<WebhookRegistration> {

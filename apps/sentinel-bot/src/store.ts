@@ -24,6 +24,15 @@ export interface JobState {
   // Persisted job config so we can restore cron schedules after a restart.
   watchConfig?: unknown;
   milestoneIndex?: number;
+  // Lifecycle gates work execution on escrow funding. Jobs in
+  // 'awaiting_funding' are parsed + planned but no cron is scheduled and no
+  // first check is run until milestone.funded fires.
+  lifecycle?: 'awaiting_funding' | 'active';
+  // Extra kickoff context preserved across proposal.accepted → milestone.funded.
+  pendingKickoff?: {
+    isStandingOffer: boolean;
+    milestoneDates?: string[];
+  };
 }
 
 export function listJobs(): JobState[] {

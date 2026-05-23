@@ -7,6 +7,7 @@ export interface FlowJobState {
   inputType: string;
   status:
     | 'pending'
+    | 'awaiting_funding'
     | 'fetching'
     | 'transforming'
     | 'delivering'
@@ -25,6 +26,12 @@ export interface FlowJobState {
     targetSchema: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
     transformRules: Record<string, unknown>;
     remainingMilestoneIds: string[];
+  };
+  // Stash the gig + contract from proposal.accepted so milestone.funded can
+  // replay the kickoff once escrow is funded. Cleared once work begins.
+  pendingAcceptance?: {
+    gig: unknown;
+    contract: unknown;
   };
 }
 
