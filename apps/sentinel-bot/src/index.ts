@@ -11,6 +11,8 @@ import {
   createLogger,
   withContext,
   createAlerter,
+  loadWebhookSecret,
+  saveWebhookSecret,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -60,6 +62,22 @@ async function main(): Promise<void> {
 
   loadStore();
 
+  // The platform generates the webhook secret server-side and ignores the one
+  // we send in POST /webhooks. Our env-var BOTGUILD_WEBHOOK_SECRET never
+  // matches the platform's signing secret, so inbound HMAC verification fails
+  // every real delivery. Capture the platform-issued secret from the POST
+  // response and persist it; the webhook server reads it via the getter.
+  const persisted = loadWebhookSecret();
+  let activeSecret = persisted?.secret ?? webhookSecret;
+  if (persisted) {
+    logger.info(
+      { webhookId: persisted.webhookId, capturedAt: persisted.capturedAt },
+      'loaded persisted webhook secret',
+    );
+  } else {
+    logger.info('no persisted webhook secret on disk, will capture from next POST /webhooks');
+  }
+
   // Bind the webhook server (and /health) BEFORE any external API calls.
   // If registerBot / syncStandingOffers / ensureWebhookRegistered hang or
   // throw, Fly's 10s health-check grace period would otherwise expire and
@@ -68,7 +86,7 @@ async function main(): Promise<void> {
   // webhook, which is safe.
   const webhookServer = createWebhookServer({
     port,
-    secret: webhookSecret,
+    secret: () => activeSecret,
     botId: botId || 'pending',
     logger,
   });
@@ -96,7 +114,9 @@ async function main(): Promise<void> {
   // Sync standing offers
   await syncStandingOffers({ client, offers: standingOffers, logger });
 
-  // Ensure webhook registration
+  // Ensure webhook registration. When the platform issues a fresh secret
+  // (i.e. we hit POST /webhooks), capture and persist it so HMAC
+  // verification of inbound deliveries can use the right key.
   await ensureWebhookRegistered({
     client,
     webhookBaseUrl,
@@ -111,6 +131,12 @@ async function main(): Promise<void> {
       'dispute.response_submitted',
     ],
     logger,
+    hasStoredSecret: persisted !== null,
+    onSecretCaptured: (secret, webhookId) => {
+      activeSecret = secret;
+      saveWebhookSecret(secret, webhookId);
+      logger.info({ webhookId }, 'captured + persisted platform-issued webhook secret');
+    },
   });
 
   // Build proposer
