@@ -461,13 +461,27 @@ async function main(): Promise<void> {
 
   // Register webhook event handlers
   webhookServer.on('proposal.accepted', async (event) => {
-    const { gig, contract } = event.payload as { gig: Gig; contract: Contract };
-    const contractId = contract.id;
-    const log = withContext(logger, { gigId: gig.id, contractId });
+    // The platform sends a flat ID payload, not nested entities. Fetch the
+    // full gig + contract by id so they can be stashed for the funded run.
+    const { gigId, contractId } = event.payload as { gigId?: string; contractId?: string };
+    if (!gigId || !contractId) {
+      logger.warn({ payload: event.payload }, 'proposal.accepted missing gigId/contractId');
+      return;
+    }
+    const log = withContext(logger, { gigId, contractId });
+
+    let gig: Gig;
+    let contract: Contract;
+    try {
+      [gig, contract] = await Promise.all([client.getGig(gigId), client.getContract(contractId)]);
+    } catch (err) {
+      log.error({ err }, 'failed to fetch gig/contract on proposal.accepted');
+      return;
+    }
 
     // Stash the gig + contract; do not run any checks until escrow is funded.
     setJob(contractId, {
-      gigId: gig.id,
+      gigId,
       contractId,
       checkType: 'pending',
       status: 'awaiting_funding',
@@ -535,15 +549,22 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
-    const { contract } = event.payload as { contract: Contract };
-    logger.info({ contractId: contract.id, status: contract.status }, 'contract status changed');
-    if (contract.status === 'completed' || contract.status === 'cancelled') {
-      const tasks = nightlyJobs.get(contract.id);
+    const { contractId, newStatus } = event.payload as {
+      contractId?: string;
+      newStatus?: string;
+    };
+    if (!contractId) {
+      logger.warn({ payload: event.payload }, 'contract.status.changed missing contractId');
+      return;
+    }
+    logger.info({ contractId, status: newStatus }, 'contract status changed');
+    if (newStatus === 'completed' || newStatus === 'cancelled') {
+      const tasks = nightlyJobs.get(contractId);
       if (tasks) {
         tasks.checkTask.stop();
         tasks.milestoneTask.stop();
-        nightlyJobs.delete(contract.id);
-        logger.info({ contractId: contract.id }, 'stopped nightly cron tasks for ended contract');
+        nightlyJobs.delete(contractId);
+        logger.info({ contractId }, 'stopped nightly cron tasks for ended contract');
       }
     }
   });

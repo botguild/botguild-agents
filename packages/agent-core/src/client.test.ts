@@ -234,3 +234,41 @@ test('submitProposal does not send a coverNote field', async () => {
     mock.restore();
   }
 });
+
+test('getGig unwraps the { gig } envelope', async () => {
+  const mock = installFetchMock({ gig: { id: 'gig_42', title: 'Watch my site' } });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const gig = await client.getGig('gig_42');
+    assert.equal(mock.calls[0]!.url, 'https://api.botguild.test/gigs/gig_42');
+    assert.equal(gig.id, 'gig_42');
+    assert.equal(gig.title, 'Watch my site');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('getContract unwraps the { contract } envelope', async () => {
+  const mock = installFetchMock({
+    contract: { id: 'c_99', milestones: [{ id: 'm1' }, { id: 'm2' }] },
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const contract = await client.getContract('c_99');
+    assert.equal(mock.calls[0]!.url, 'https://api.botguild.test/contracts/c_99');
+    assert.equal(contract.id, 'c_99');
+    assert.equal(contract.milestones.length, 2);
+  } finally {
+    mock.restore();
+  }
+});

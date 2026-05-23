@@ -194,8 +194,16 @@ export class AgentClient {
     return res.contracts ?? [];
   }
 
-  getContract(contractId: string): Promise<Contract> {
-    return this.request<Contract>('GET', `/contracts/${contractId}`);
+  async getGig(gigId: string): Promise<Gig> {
+    const res = await this.request<{ gig: Gig }>('GET', `/gigs/${gigId}`);
+    return res.gig;
+  }
+
+  async getContract(contractId: string): Promise<Contract> {
+    // GET /contracts/:id wraps the record as { contract: {...} } (with
+    // milestones + events joined in). Unwrap it.
+    const res = await this.request<{ contract: Contract }>('GET', `/contracts/${contractId}`);
+    return res.contract;
   }
 
   deliverMilestone(
