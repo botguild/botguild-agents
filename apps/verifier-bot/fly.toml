@@ -11,6 +11,20 @@ primary_region = 'iad'
   PORT = '3003'
   NODE_ENV = 'production'
 
+# Persistent state lives in /app/data (jobs.json + webhook-secret.json).
+# Without this volume the data dir is ephemeral: the platform-issued webhook
+# secret would be re-captured (and the webhook re-registered) on every
+# restart, and in-progress check jobs would be lost. A mounted volume also
+# structurally enforces the singleton constraint — Fly can't start a second
+# machine because two machines can't share one volume, and these bots hold
+# flat-file state that must not be split.
+#
+# The volume must be created once before the first deploy with this mount:
+#   flyctl volumes create verifier_data -a botguild-verifier-bot -r iad -s 1 -y
+[[mounts]]
+  source = 'verifier_data'
+  destination = '/app/data'
+
 [http_service]
   internal_port = 3003
   force_https = true
