@@ -22,6 +22,13 @@ export interface WebhookServerConfig {
 
 export interface WebhookServer {
   on(eventType: string, handler: WebhookHandler): void;
+  /**
+   * Mark the server as ready to dispatch webhook events. Until called,
+   * `/webhook` returns 503 so the platform retries deliveries instead of
+   * recording them as delivered while handlers are still being wired up.
+   * `/health` is unaffected — it returns 200 from the moment start() resolves.
+   */
+  markReady(): void;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -43,6 +50,12 @@ export interface ProcessWebhookInput {
   deliveryId?: string;
   handlers: Map<string, WebhookHandler>;
   logger: Logger;
+  /**
+   * Whether the server is ready to dispatch events. Defaults to true to
+   * preserve existing test behavior. When false, requests that would
+   * otherwise succeed return 503 (signature + payload checks still run).
+   */
+  ready?: boolean;
 }
 
 export interface ProcessWebhookResult {
@@ -53,7 +66,7 @@ export interface ProcessWebhookResult {
 export async function processWebhookRequest(
   input: ProcessWebhookInput,
 ): Promise<ProcessWebhookResult> {
-  const { rawBody, signature, secret, deliveryId, handlers, logger } = input;
+  const { rawBody, signature, secret, deliveryId, handlers, logger, ready = true } = input;
 
   if (!signature || !verifySignature(rawBody, signature, secret)) {
     return { status: 401, body: { error: 'Invalid or missing signature' } };
@@ -70,6 +83,13 @@ export async function processWebhookRequest(
   if (!eventType) {
     logger.warn({ rawBody: rawBody.slice(0, 200) }, 'webhook missing event field');
     return { status: 400, body: { error: 'Missing event field' } };
+  }
+
+  // Handlers not wired yet — return 503 so the platform retries this delivery
+  // instead of recording it as successfully delivered to an unprepared bot.
+  if (!ready) {
+    logger.info({ eventType, deliveryId }, 'webhook received before server ready, returning 503');
+    return { status: 503, body: { error: 'Server not ready' } };
   }
 
   const event: WebhookEvent = {
@@ -97,6 +117,7 @@ export async function processWebhookRequest(
 export function createWebhookServer(config: WebhookServerConfig): WebhookServer {
   const { port, secret, botId, logger } = config;
   const handlers = new Map<string, WebhookHandler>();
+  let ready = false;
   let serverRef: Server | undefined;
 
   const app = new Hono();
@@ -108,9 +129,10 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
       secret,
       deliveryId: c.req.header('X-BotGuild-Delivery') ?? undefined,
       handlers,
+      ready,
       logger,
     });
-    return c.json(result.body, result.status as 200 | 400 | 401 | 500);
+    return c.json(result.body, result.status as 200 | 400 | 401 | 500 | 503);
   });
 
   app.get('/health', (c) => {
@@ -125,6 +147,12 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
   return {
     on(eventType: string, handler: WebhookHandler): void {
       handlers.set(eventType, handler);
+    },
+
+    markReady(): void {
+      if (ready) return;
+      ready = true;
+      logger.info('webhook server marked ready, accepting webhook deliveries');
     },
 
     start(): Promise<void> {
