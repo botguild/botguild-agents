@@ -58,6 +58,7 @@ async function apiFetch(url: string, apiKey: string, options: RequestInit): Prom
       'Content-Type': 'application/json',
       ...options.headers,
     },
+    signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');

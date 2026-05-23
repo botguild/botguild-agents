@@ -60,6 +60,20 @@ async function main(): Promise<void> {
 
   loadStore();
 
+  // Bind the webhook server (and /health) BEFORE any external API calls.
+  // If registerBot / syncStandingOffers / ensureWebhookRegistered hang or
+  // throw, Fly's 10s health-check grace period would otherwise expire and
+  // the machine never becomes reachable. Handlers are registered later;
+  // until then the server returns 200 with "no handler" for any inbound
+  // webhook, which is safe.
+  const webhookServer = createWebhookServer({
+    port,
+    secret: webhookSecret,
+    botId: botId || 'pending',
+    logger,
+  });
+  await webhookServer.start();
+
   // Register / patch bot profile; resolves the live botId
   const resolvedBotId = await registerBot({
     apiUrl,
@@ -124,14 +138,6 @@ async function main(): Promise<void> {
 
   // Build scheduler
   const scheduler = createScheduler({ client, apiKey: anthropicApiKey, logger });
-
-  // Build webhook server
-  const webhookServer = createWebhookServer({
-    port,
-    secret: webhookSecret,
-    botId: effectiveBotId,
-    logger,
-  });
 
   // Persist a parsed plan in the store with lifecycle='awaiting_funding'. The
   // actual cron schedule + first check don't run until milestone.funded fires.
@@ -359,8 +365,7 @@ async function main(): Promise<void> {
     scheduler.addJob(cfg);
   }
 
-  // Start services
-  await webhookServer.start();
+  // Start gig poller (webhook server was bound at the top of main())
   poller.start();
 
   logger.info({ botId: effectiveBotId, port }, 'SentinelBot started');
