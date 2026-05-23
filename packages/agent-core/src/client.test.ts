@@ -272,3 +272,43 @@ test('getContract unwraps the { contract } envelope', async () => {
     mock.restore();
   }
 });
+
+test('responses are normalized snake_case → camelCase (incl. nested + arrays)', async () => {
+  // The platform returns snake_case; our types are camelCase. Without
+  // normalization these fields would be undefined at runtime.
+  const mock = installFetchMock({
+    webhooks: [
+      {
+        id: 'wh_1',
+        url: 'https://x/webhook',
+        events: ['proposal.accepted'],
+        failure_count: 3,
+        created_at: '2026-05-10T00:00:00Z',
+        // nested object with snake_case keys — must be camelized recursively
+        last_delivery: { status_code: 200, sent_at: '2026-05-11T00:00:00Z' },
+      },
+    ],
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const webhooks = (await client.listWebhooks()) as unknown as Array<Record<string, unknown>>;
+    const w = webhooks[0]!;
+    // top-level key (array element)
+    assert.equal(w.failureCount, 3, 'failure_count → failureCount');
+    assert.equal(w.createdAt, '2026-05-10T00:00:00Z', 'created_at → createdAt');
+    assert.equal('failure_count' in w, false, 'snake_case key removed');
+    // nested object keys camelized recursively
+    const nested = w.lastDelivery as Record<string, unknown>;
+    assert.equal(nested.statusCode, 200, 'nested status_code → statusCode');
+    assert.equal(nested.sentAt, '2026-05-11T00:00:00Z', 'nested sent_at → sentAt');
+    // Values (event names) must NOT be altered — only keys are camelized.
+    assert.deepEqual(w.events, ['proposal.accepted']);
+  } finally {
+    mock.restore();
+  }
+});
