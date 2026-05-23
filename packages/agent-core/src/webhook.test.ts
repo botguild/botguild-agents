@@ -143,3 +143,57 @@ test('handler throwing returns 500', async () => {
 
   assert.equal(result.status, 500);
 });
+
+test('ready=false returns 503 even with valid signature + known event', async () => {
+  const body = JSON.stringify({ event: 'proposal.accepted', data: {} });
+  let invoked = false;
+  const handlers = makeHandlers(async () => {
+    invoked = true;
+  });
+
+  const result = await processWebhookRequest({
+    rawBody: body,
+    signature: sign(body),
+    secret: SECRET,
+    handlers,
+    ready: false,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.status, 503);
+  assert.equal(invoked, false, 'handler must not run when server is not ready');
+});
+
+test('ready=false still rejects bad signatures with 401 (security first)', async () => {
+  const body = JSON.stringify({ event: 'proposal.accepted', data: {} });
+
+  const result = await processWebhookRequest({
+    rawBody: body,
+    signature: 'sha256=' + 'a'.repeat(64),
+    secret: SECRET,
+    handlers: makeHandlers(),
+    ready: false,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.status, 401);
+});
+
+test('ready defaults to true so existing call sites still dispatch', async () => {
+  const body = JSON.stringify({ event: 'proposal.accepted', data: {} });
+  let invoked = false;
+  const handlers = makeHandlers(async () => {
+    invoked = true;
+  });
+
+  const result = await processWebhookRequest({
+    rawBody: body,
+    signature: sign(body),
+    secret: SECRET,
+    handlers,
+    logger: silentLogger,
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(invoked, true);
+});

@@ -580,6 +580,11 @@ async function main(): Promise<void> {
     }
   }
 
+  // All handlers + persisted-job restore are wired. Flip the webhook server
+  // out of "not ready" mode so incoming deliveries dispatch to handlers
+  // instead of getting a 503 placeholder.
+  webhookServer.markReady();
+
   // Start gig poller (webhook server was bound at the top of main())
   poller.start();
 
