@@ -7,6 +7,7 @@ export * from './proposer.js';
 export * from './standing.js';
 export * from './registration.js';
 export * from './webhookregistration.js';
+export * from './webhookSecretStore.js';
 export * from './messenger.js';
 export * from './logger.js';
 export * from './alerting.js';

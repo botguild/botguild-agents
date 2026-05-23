@@ -15,7 +15,14 @@ export type WebhookHandler = (event: WebhookEvent) => Promise<void>;
 
 export interface WebhookServerConfig {
   port: number;
-  secret: string;
+  /**
+   * HMAC secret used to verify inbound webhook signatures. Accepts either a
+   * fixed string or a getter function — the getter is resolved on every
+   * request. Use the getter form when the secret may change at runtime
+   * (e.g. swapped in after capturing the platform-issued secret from POST
+   * /webhooks).
+   */
+  secret: string | (() => string);
   botId: string;
   logger: Logger;
 }
@@ -116,6 +123,7 @@ export async function processWebhookRequest(
 
 export function createWebhookServer(config: WebhookServerConfig): WebhookServer {
   const { port, secret, botId, logger } = config;
+  const resolveSecret = (): string => (typeof secret === 'function' ? secret() : secret);
   const handlers = new Map<string, WebhookHandler>();
   let ready = false;
   let serverRef: Server | undefined;
@@ -126,7 +134,7 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
     const result = await processWebhookRequest({
       rawBody: await c.req.text(),
       signature: c.req.header('X-BotGuild-Signature') ?? '',
-      secret,
+      secret: resolveSecret(),
       deliveryId: c.req.header('X-BotGuild-Delivery') ?? undefined,
       handlers,
       ready,
