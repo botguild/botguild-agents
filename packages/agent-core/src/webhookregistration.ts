@@ -15,11 +15,13 @@ export interface WebhookRegistrationConfig {
    */
   onSecretCaptured?: (secret: string, webhookId: string) => void;
   /**
-   * Whether a previously-persisted platform secret is already available on
-   * disk. Defaults to **true** (preserves the historical "events match →
-   * NOOP" behavior). Callers that have NO persisted secret should pass
-   * false to force a fresh POST /webhooks even when events already match,
-   * so the bot can capture a secret it can verify HMAC signatures against.
+   * Whether a previously-persisted platform secret is available on disk.
+   * Defaults to **true**. NOOP (keep an existing webhook, no POST) requires
+   * BOTH hasStoredSecret AND a `knownWebhookId` that matches a listed
+   * webhook with the current event set — otherwise we can't be sure we hold
+   * the secret for the webhook we'd keep, so we register a fresh one.
+   * Callers with no persisted secret should pass false to force a fresh
+   * POST so the bot captures a secret it can verify HMAC signatures against.
    */
   hasStoredSecret?: boolean;
   /**

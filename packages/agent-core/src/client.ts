@@ -35,7 +35,10 @@ export interface WebhookRegistration {
   // from GET /webhooks listings (it's returned exactly once at create time).
   secret?: string;
   events: string[];
-  createdAt: string;
+  // Optional: the platform sends snake_case `created_at`, so this camelCase
+  // field is undefined at runtime through the hand-rolled client. Don't rely
+  // on it for ordering — registration selection is by id + events instead.
+  createdAt?: string;
 }
 
 export interface AgentClientConfig {

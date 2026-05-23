@@ -70,15 +70,15 @@ test('no existing webhook → POST and captures secret', async () => {
 });
 
 function makeWebhook(id: string, events: string[]): WebhookRegistration {
+  // createdAt intentionally omitted — mirrors the real platform response
+  // (it returns created_at, so the camelCase field is absent). Selection
+  // must NOT depend on this field.
   return {
     id,
     botId: 'bot_x',
     url: 'https://bot.example.com/webhook',
     secret: '', // platform GET omits this
     events,
-    // createdAt intentionally undefined — mirrors the real platform response
-    // (it returns created_at). Selection must NOT depend on this field.
-    createdAt: undefined as unknown as string,
   };
 }
 
