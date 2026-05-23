@@ -76,6 +76,36 @@ function parseRetryAfter(value: string | null): number {
   return 60_000;
 }
 
+// Coerce a value that should be a string[] into one. The gigs endpoint returns
+// its array columns (acceptanceCriteria, deliverables, tags, dataConstraints)
+// as STRINGIFIED JSON — it doesn't JSON.parse them server-side the way the
+// webhooks endpoint parses `events`. mapKeysToCamel only fixes key casing, not
+// stringified-JSON values, so these arrive as strings and break consumers that
+// call .join/.map/.filter. Tolerant: already-array passes through; a JSON
+// string is parsed; anything else (undefined/null/non-JSON) becomes [].
+function toStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value as string[];
+  if (typeof value === 'string' && value.length > 0) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeGig(gig: Gig): Gig {
+  return {
+    ...gig,
+    acceptanceCriteria: toStringArray(gig.acceptanceCriteria),
+    deliverables: toStringArray(gig.deliverables),
+    tags: toStringArray(gig.tags),
+    dataConstraints: toStringArray(gig.dataConstraints),
+  };
+}
+
 export class AgentClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
@@ -187,7 +217,7 @@ export class AgentClient {
         ).toString()
       : '';
     const res = await this.request<{ gigs?: Gig[] }>('GET', `/gigs${query}`);
-    return res.gigs ?? [];
+    return (res.gigs ?? []).map(normalizeGig);
   }
 
   async submitProposal(gigId: string, draft: ProposalDraft): Promise<{ proposalId: string }> {
@@ -207,7 +237,7 @@ export class AgentClient {
 
   async getGig(gigId: string): Promise<Gig> {
     const res = await this.request<{ gig: Gig }>('GET', `/gigs/${gigId}`);
-    return res.gig;
+    return normalizeGig(res.gig);
   }
 
   async getContract(contractId: string): Promise<Contract> {
