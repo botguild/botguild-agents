@@ -88,6 +88,7 @@ export class AgentError extends Error {
 }
 
 const BACKOFF_MS = [1000, 2000, 4000];
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -135,6 +136,7 @@ export class AgentClient {
           method,
           headers,
           body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (err) {
         if (attempt < BACKOFF_MS.length) {
