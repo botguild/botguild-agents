@@ -63,7 +63,7 @@ function buildUserPrompt(gig: Gig): string {
 Title: ${gig.title}
 Description: ${gig.description}
 Budget: ${gig.budget}
-Acceptance Criteria: ${gig.acceptanceCriteria ?? 'Not specified'}
+Acceptance Criteria: ${gig.acceptanceCriteria?.length ? gig.acceptanceCriteria.join('; ') : 'Not specified'}
 
 Return a JSON object with exactly these fields:
 {

@@ -27,12 +27,20 @@ export function scoreBudget(gig: Gig, min: number, max: number): number {
 }
 
 export function scoreWarranty(gig: Gig): number {
-  return gig.warrantyTerms && gig.warrantyTerms.length > 0 ? 15 : 0;
+  // The live API models warranty as a boolean flag (+ optional min duration),
+  // not a free-text `warrantyTerms` field. The old code read a field that
+  // never existed on real gigs, so warranty silently scored 0 for everything.
+  return gig.warrantyRequired ? 15 : 0;
 }
 
 export function scoreClarity(gig: Gig): number {
+  // acceptanceCriteria is a string[] on the live API. Score on the total
+  // text the buyer wrote across all criteria — more detail = clearer spec.
+  // (The old code treated it as a single string and compared its length to a
+  // 50-char threshold, which against an array measured criteria *count*.)
   if (!gig.acceptanceCriteria || gig.acceptanceCriteria.length === 0) return 0;
-  return gig.acceptanceCriteria.length > 50 ? 15 : 8;
+  const totalChars = gig.acceptanceCriteria.join(' ').trim().length;
+  return totalChars > 50 ? 15 : 8;
 }
 
 export function scoreTimeline(gig: Gig): number {
