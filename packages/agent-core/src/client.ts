@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import { mapKeysToCamel } from '@botguild/sdk';
 import type { Gig, Contract, ContractMilestone, ProposalMilestone } from '@botguild/sdk';
 
 // Entity shapes are owned by the platform SDK so they can't drift from the
@@ -126,7 +127,14 @@ export class AgentClient {
 
       if (response.ok) {
         const text = await response.text();
-        return (text ? JSON.parse(text) : undefined) as T;
+        if (!text) return undefined as T;
+        // Normalize snake_case keys → camelCase (recursively) so responses
+        // match the SDK entity types. The platform returns snake_case fields
+        // (created_at, failure_count, standing_offers, ...) that our types
+        // declare camelCase; without this they'd be undefined at runtime —
+        // the root cause of the webhook-churn and scoring bugs. This is the
+        // same normalizer BotGuildREST applies internally (mapKeysToCamel).
+        return mapKeysToCamel(JSON.parse(text)) as T;
       }
 
       if (response.status === 429) {
