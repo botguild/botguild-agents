@@ -488,7 +488,10 @@ async function main(): Promise<void> {
       return;
     }
     logger.info({ contractId }, 'milestone funded, executing accepted flow');
-    await executeAcceptedFlow(job.pendingAcceptance.gig as Gig, job.pendingAcceptance.contract as Contract);
+    await executeAcceptedFlow(
+      job.pendingAcceptance.gig as Gig,
+      job.pendingAcceptance.contract as Contract,
+    );
   });
 
   webhookServer.on('milestone.delivered', async (event) => {

@@ -12,9 +12,10 @@ interface CapturedRequest {
   body: unknown;
 }
 
-function installFetchMock(
-  responder: unknown | ((req: CapturedRequest) => unknown),
-): { calls: CapturedRequest[]; restore: () => void } {
+function installFetchMock(responder: unknown | ((req: CapturedRequest) => unknown)): {
+  calls: CapturedRequest[];
+  restore: () => void;
+} {
   const calls: CapturedRequest[] = [];
   const originalFetch = globalThis.fetch;
 

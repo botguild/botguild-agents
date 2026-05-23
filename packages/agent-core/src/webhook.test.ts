@@ -2,11 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import pino from 'pino';
-import {
-  processWebhookRequest,
-  type WebhookEvent,
-  type WebhookHandler,
-} from './webhook.js';
+import { processWebhookRequest, type WebhookEvent, type WebhookHandler } from './webhook.js';
 
 const silentLogger = pino({ level: 'silent' });
 const SECRET = 'test-secret';
