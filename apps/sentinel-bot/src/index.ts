@@ -13,6 +13,8 @@ import {
   createAlerter,
   loadWebhookSecret,
   saveWebhookSecret,
+  AgentMcpClient,
+  handleDisputedContract,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -111,6 +113,7 @@ async function main(): Promise<void> {
 
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
+  const mcpClient = new AgentMcpClient({ apiUrl, apiKey, logger });
 
   // Sync standing offers
   await syncStandingOffers({ client, offers: standingOffers, logger });
@@ -353,12 +356,24 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('contract.status.changed', async (event) => {
-    const { contractId, newStatus } = event.payload as {
+    const { contractId, newStatus, reason } = event.payload as {
       contractId?: string;
       newStatus?: string;
+      reason?: string;
     };
     if (!contractId) {
       logger.warn({ payload: event.payload }, 'contract.status.changed missing contractId');
+      return;
+    }
+    if (newStatus === 'disputed') {
+      await handleDisputedContract({
+        serviceName: 'SentinelBot',
+        contractId,
+        reason,
+        mcp: mcpClient,
+        alerter,
+        logger,
+      });
       return;
     }
     if (newStatus === 'cancelled' || newStatus === 'completed') {

@@ -9,6 +9,7 @@ export interface TelegramAlerterConfig {
 export interface Alerter {
   sendStartupAlert(serviceName: string, botId: string): Promise<void>;
   sendFatalAlert(serviceName: string, botId: string, errorMessage: string): Promise<void>;
+  sendDisputeAlert(serviceName: string, contractId: string, reason?: string): Promise<void>;
 }
 
 async function sendTelegram(
@@ -44,6 +45,16 @@ export function createAlerter(config: TelegramAlerterConfig): Alerter {
     async sendFatalAlert(serviceName: string, botId: string, errorMessage: string): Promise<void> {
       if (!botToken || !chatId) return;
       const text = `🚨 ${serviceName} fatal error (botId: ${botId}): ${errorMessage} at ${new Date().toISOString()}`;
+      await sendTelegram(botToken, chatId, text, logger);
+    },
+
+    async sendDisputeAlert(
+      serviceName: string,
+      contractId: string,
+      reason?: string,
+    ): Promise<void> {
+      if (!botToken || !chatId) return;
+      const text = `⚖️ ${serviceName}: contract ${contractId} is DISPUTED${reason ? ` — ${reason}` : ''}. Human follow-up needed. ${new Date().toISOString()}`;
       await sendTelegram(botToken, chatId, text, logger);
     },
   };
