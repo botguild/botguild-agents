@@ -127,10 +127,11 @@ export async function handleDisputedContract(input: HandleDisputedContractInput)
       response: DEFAULT_DISPUTE_RESPONSE,
     });
     logger.info({ contractId, responseId }, 'submitted default dispute counter-statement');
-  } catch (err) {
-    logger.error(
-      { err, contractId },
-      'auto dispute response failed; relying on human follow-up from the alert',
-    );
+  } catch {
+    // respondToDispute already logged the error (with the exception) at error
+    // level. Don't re-log the same failure at error here — this path is
+    // intentionally best-effort. A warn records that we're falling back to the
+    // human follow-up the alert triggered, without double error-level noise.
+    logger.warn({ contractId }, 'auto dispute response failed; relying on human follow-up');
   }
 }
