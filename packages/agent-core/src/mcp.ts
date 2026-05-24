@@ -1,5 +1,6 @@
 import { BotGuildMCP } from '@botguild/sdk';
 import type { Logger } from 'pino';
+import type { Alerter } from './alerting.js';
 
 // Minimal surface we need from an MCP transport. BotGuildMCP satisfies this;
 // tests inject a stub so they don't have to construct JSON-RPC envelopes.
@@ -83,5 +84,53 @@ export class AgentMcpClient {
       this.logger.error({ err, claimId }, 'failed to get warranty status');
       throw err;
     }
+  }
+}
+
+// Factual, claim-free boilerplate: points the arbitrator at the recorded
+// evidence and signals that a human will follow up. Deliberately makes no
+// assertions about the merits — humans handle the substantive response.
+export const DEFAULT_DISPUTE_RESPONSE =
+  'Automated acknowledgement: delivery details and progress for this contract are recorded ' +
+  'in its event history and message thread. A human operator has been notified and will ' +
+  'follow up on this dispute.';
+
+export interface HandleDisputedContractInput {
+  serviceName: string;
+  contractId: string;
+  reason?: string;
+  mcp: AgentMcpClient;
+  alerter: Alerter | null;
+  logger: Logger;
+}
+
+// Reaction to a contract entering 'disputed'. Two parts, deliberately split by
+// confidence:
+//   1. Operator alert — the sure thing. High value, zero risk; humans are the
+//      real dispute handlers.
+//   2. Default counter-statement via respond_to_dispute — best-effort and
+//      UNVERIFIED against a live dispute. Failure is tolerated: we log and
+//      lean on the human follow-up the alert triggered.
+export async function handleDisputedContract(input: HandleDisputedContractInput): Promise<void> {
+  const { serviceName, contractId, reason, mcp, alerter, logger } = input;
+  logger.warn({ contractId, reason }, 'contract disputed — operator attention needed');
+
+  try {
+    await alerter?.sendDisputeAlert(serviceName, contractId, reason);
+  } catch (err) {
+    logger.warn({ err, contractId }, 'dispute operator-alert failed');
+  }
+
+  try {
+    const { responseId } = await mcp.respondToDispute({
+      contractId,
+      response: DEFAULT_DISPUTE_RESPONSE,
+    });
+    logger.info({ contractId, responseId }, 'submitted default dispute counter-statement');
+  } catch (err) {
+    logger.error(
+      { err, contractId },
+      'auto dispute response failed; relying on human follow-up from the alert',
+    );
   }
 }
