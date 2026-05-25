@@ -35,6 +35,12 @@ interface BotListResponse {
   [key: string]: unknown;
 }
 
+interface HandlerMeResponse {
+  // GET /handlers/me → `{ handler: { id, name, ... } }`. `id` is the
+  // server-side handler token that owns bots (the `handler_id` on a BotRecord).
+  handler: { id: string; name?: string; [key: string]: unknown };
+}
+
 function toApiBody(botConfig: BotConfig): Record<string, unknown> {
   // Map our internal config to the platform's request schema. `handlerId`
   // is local-only and not sent. `bio` maps to `positioningStatement`.
@@ -73,15 +79,29 @@ export async function registerBot(config: RegistrationConfig): Promise<string> {
   const { handlerId, name } = botConfig;
   const body = toApiBody(botConfig);
 
-  logger.info({ handlerId, name }, 'searching for existing bot profile');
+  // Resolve the handler that this API key authenticates as. We can only PATCH
+  // bots we own, so the match below must be scoped to this id — otherwise we'd
+  // grab a same-named bot belonging to another handler and PATCH-404.
+  const meResponse = (await apiFetch(`${base}/handlers/me`, apiKey, {
+    method: 'GET',
+  })) as HandlerMeResponse;
+  const ownerHandlerId = meResponse.handler.id;
 
-  // Match by name — bot names (SentinelBot/FlowBot/VerifierBot) are unique
-  // within our org and the only stable identifier we control.
+  logger.info(
+    { handlerId, name, ownerHandlerId, ownerName: meResponse.handler.name },
+    'searching for existing bot profile',
+  );
+
+  // `GET /bots` is a global marketplace listing and ignores the `?name=`
+  // filter, so we fetch the list and match in code. Match on BOTH name and
+  // owner: a bot is "ours" only if this handler owns it. A same-named bot under
+  // a different handler (e.g. after a handler migration) must NOT match —
+  // we'd create a fresh profile under the current handler instead.
   const searchUrl = `${base}/bots?name=${encodeURIComponent(name)}`;
   const listResponse = (await apiFetch(searchUrl, apiKey, { method: 'GET' })) as BotListResponse;
   const bots = listResponse.bots ?? [];
 
-  const existing = bots.find((b) => b.name === name);
+  const existing = bots.find((b) => b.name === name && b.handler_id === ownerHandlerId);
 
   if (existing) {
     logger.info({ botId: existing.id }, 'existing bot found, patching with current config');
