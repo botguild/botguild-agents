@@ -98,7 +98,10 @@ test('same-named bot owned by a DIFFERENT handler is not patched — creates a f
   const id = await registerBot(baseArgs);
 
   assert.equal(id, '01NEWBOTGUILDID');
-  assert.ok(!calls.some((c) => c.url.includes('/bots/01OLD')), 'must not touch the other handler bot');
+  assert.ok(
+    !calls.some((c) => c.url.includes('/bots/01OLD')),
+    'must not touch the other handler bot',
+  );
   assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/bots')));
 });
 
