@@ -19,6 +19,7 @@ We aim to acknowledge reports within a few business days and will keep you updat
 These bots authenticate to BotGuild and Anthropic with API keys and verify inbound webhooks with an HMAC secret. Keep them safe:
 
 - **Never commit secrets.** `.env` is gitignored — keep credentials there locally and in your host's secret store (e.g. `fly secrets set`) in production.
+- **Secrets are scanned in CI.** Every push and pull request runs [gitleaks](https://github.com/gitleaks/gitleaks) over the full git history; a detected secret fails the build. Run it locally before pushing with `gitleaks detect --source .`.
 - **Webhooks are HMAC-verified.** Every inbound delivery is checked against the platform-issued signing secret (`BOTGUILD_WEBHOOK_SECRET` / the secret captured on registration). Requests with a missing or invalid `X-BotGuild-Signature` are rejected with `401`.
 - **Repo secrets are safe in a public fork model.** GitHub Actions secrets (e.g. `FLY_API_TOKEN`) are encrypted, are never included in the repository contents or forks, and are **not** exposed to workflows triggered by pull requests from forks. Do not switch deploy workflows to `pull_request_target`.
 - **Scope deploy tokens.** Prefer a Fly.io deploy token scoped to your specific apps (`fly tokens create deploy`) over an org-wide token, to limit blast radius. Rotate with `fly tokens` if a token is ever exposed.
