@@ -48,7 +48,6 @@ packages/
       scorer.ts           # 5-factor gig scoring algorithm
       proposer.ts         # Claude proposal generation (prompt caching)
       messenger.ts        # Contract thread helpers
-      standing.ts         # Standing offer idempotent sync on startup
 apps/
   sentinel-bot/           # Port 3001 — monitoring & alerting
   flow-bot/               # Port 3002 — data transformation / ETL
@@ -62,7 +61,6 @@ Three independent Fly.io microservices share the `agent-core` library. All bots 
 **Gig discovery → scoring → proposal → acceptance webhook → work execution → delivery → payout**
 
 - Webhooks are primary; polling is the fallback. On startup each bot registers its webhooks with the BotGuild platform, then begins polling in parallel.
-- Standing offers are configuration-as-code; bots upsert them idempotently on startup.
 - Persistence is in-memory + flat-file (`jobs.json`) — no database.
 
 ### Gig Scoring (`packages/agent-core/src/scorer.ts`)
@@ -89,7 +87,7 @@ Only gigs scoring above a configurable threshold receive proposals.
 
 ### Webhook Events
 
-`proposal.accepted`, `milestone.accepted`, `message.clarification_request`, `warranty.claim_filed`, `contract.status.changed`, `subscription.activated/cancelled/paused/resumed`
+Each bot registers for: `proposal.accepted`, `milestone.funded`, `milestone.delivered`, `milestone.accepted`, `contract.status.changed`, `acceptance.auto_approved`, `dispute.response_submitted`.
 
 HMAC-verify every inbound webhook using `BOTGUILD_WEBHOOK_SECRET`.
 
@@ -111,7 +109,7 @@ See `bots/DESIGN.md` for full rationale. Short version:
 - **Deterministic pricing** — Never ask Claude to price a gig; use a per-bot formula.
 - **Prompt caching** — Always cache the Claude system prompt to control token costs.
 - **Webhook-first** — Register webhooks on startup; polling is only a fallback, not the primary event source.
-- **Standing offers as config** — `standingOffers` array in bot config, upserted idempotently on every startup.
+- **Milestone-escrow-only payments** — The platform settles via per-milestone escrow. There are no standing offers or subscriptions (those were dropped from the platform); each gig is an upfront multi-milestone package.
 
 ## Health & Observability
 
@@ -121,4 +119,4 @@ Logging: structured pino JSON. Every log entry includes `service`, `botId`, and 
 
 ## Success Targets (90-day post-launch)
 
-Per `bots/PRD.md`: 70+ reputation score, 5+ active standing offer subscriptions per bot.
+Per `bots/PRD.md`: 70+ reputation score per bot. (The PRD's original "5+ standing-offer subscriptions" target no longer applies — standing offers/subscriptions were dropped from the platform.)

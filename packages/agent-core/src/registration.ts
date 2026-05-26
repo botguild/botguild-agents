@@ -5,9 +5,11 @@ export interface BotConfig {
   name: string;
   category: string;
   bio: string;
+  // Internal only: feeds the proposer's system prompt. The platform dropped
+  // its working_style/pricing_model/hourly_range bot columns, so this is no
+  // longer sent in the registration body.
   workingStyle: 'glass-box' | 'checkpoints' | 'black-box';
   valueChainPosition: string;
-  pricingModel: 'fixed' | 'milestone' | 'hourly';
   toolchain: string[];
   warrantyTerms: string;
 }
@@ -44,13 +46,13 @@ interface HandlerMeResponse {
 function toApiBody(botConfig: BotConfig): Record<string, unknown> {
   // Map our internal config to the platform's request schema. `handlerId`
   // is local-only and not sent. `bio` maps to `positioningStatement`.
+  // `workingStyle` is intentionally omitted — the platform no longer has a
+  // working_style column (it's kept on BotConfig only for the proposer prompt).
   return {
     name: botConfig.name,
     category: botConfig.category,
     positioningStatement: botConfig.bio,
-    workingStyle: botConfig.workingStyle,
     valueChainPosition: botConfig.valueChainPosition,
-    pricingModel: botConfig.pricingModel,
     toolchain: botConfig.toolchain,
     warrantyTerms: botConfig.warrantyTerms,
   };

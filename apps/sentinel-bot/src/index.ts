@@ -5,7 +5,6 @@ import {
   createProposer,
   createMessenger,
   registerBot,
-  syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
   createLogger,
@@ -18,11 +17,10 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import { botProfile, scorerConfig, standingOffers, pricingCalc } from './config.js';
+import { botProfile, scorerConfig, pricingCalc } from './config.js';
 import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
-import { handleStandingOfferGig } from './standinghandler.js';
 import { loadStore, listJobs as listStoredJobs, getJob, setJob, type JobState } from './store.js';
 import type { WatchJobConfig } from './parser.js';
 
@@ -81,7 +79,7 @@ async function main(): Promise<void> {
   }
 
   // Bind the webhook server (and /health) BEFORE any external API calls.
-  // If registerBot / syncStandingOffers / ensureWebhookRegistered hang or
+  // If registerBot / ensureWebhookRegistered hang or
   // throw, Fly's 10s health-check grace period would otherwise expire and
   // the machine never becomes reachable. Handlers are registered later;
   // until webhookServer.markReady() is called (after handler registration),
@@ -114,9 +112,6 @@ async function main(): Promise<void> {
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
   const mcpClient = new AgentMcpClient({ apiUrl, apiKey, logger });
-
-  // Sync standing offers
-  await syncStandingOffers({ client, offers: standingOffers, logger });
 
   // Ensure webhook registration. When the platform issues a fresh secret
   // (i.e. we hit POST /webhooks), capture and persist it so HMAC
@@ -172,12 +167,7 @@ async function main(): Promise<void> {
 
   // Persist a parsed plan in the store with lifecycle='awaiting_funding'. The
   // actual cron schedule + first check don't run until milestone.funded fires.
-  function queueForFunding(
-    gigId: string,
-    contractId: string,
-    config: WatchJobConfig,
-    pendingKickoff: { isStandingOffer: boolean; milestoneDates?: string[] },
-  ): void {
+  function queueForFunding(gigId: string, contractId: string, config: WatchJobConfig): void {
     const existing = getJob(contractId);
     setJob(contractId, {
       ...(existing ?? ({} as Partial<JobState>)),
@@ -187,11 +177,10 @@ async function main(): Promise<void> {
       lastCheckedAt: existing?.lastCheckedAt ?? new Date().toISOString(),
       watchConfig: config,
       lifecycle: 'awaiting_funding',
-      pendingKickoff,
     } as JobState);
   }
 
-  // Execute kickoff: schedule cron + (for non-standing) run first check.
+  // Execute kickoff: schedule cron + run first check.
   // Idempotent: marks the job 'active' so repeated milestone.funded deliveries
   // don't double-execute.
   async function startWatchJob(contractId: string): Promise<void> {
@@ -211,18 +200,7 @@ async function main(): Promise<void> {
     setJob(contractId, { ...job, lifecycle: 'active' });
 
     const config = job.watchConfig as WatchJobConfig;
-    const kickoff = job.pendingKickoff ?? { isStandingOffer: false };
     const log = withContext(logger, { gigId: job.gigId, contractId });
-
-    if (kickoff.isStandingOffer && kickoff.milestoneDates) {
-      try {
-        await comms.packageStarted(contractId, config, kickoff.milestoneDates);
-      } catch (err) {
-        log.warn({ err }, 'failed to send packageStarted message');
-      }
-      scheduler.addJob(config);
-      return;
-    }
 
     try {
       await comms.setupConfirmed(contractId, config);
@@ -262,37 +240,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    const milestoneIds = contract.milestones.map((m) => m.id);
-    const standingResult = handleStandingOfferGig(gig, contract.id, milestoneIds);
-
-    if (standingResult.isStandingOffer && standingResult.needsClarification) {
-      log.info('standing offer gig has no target URL — requesting clarification');
-      try {
-        await messenger.send(
-          contract.id,
-          standingResult.clarificationQuestion ?? 'Could you share the URL to monitor?',
-          'clarification_request',
-        );
-      } catch (err) {
-        log.error({ err }, 'failed to send clarification request for standing offer');
-      }
-      return;
-    }
-
-    if (standingResult.isStandingOffer && standingResult.config && standingResult.milestoneDates) {
-      log.info('standing offer gig detected, queueing for funding');
-      queueForFunding(gig.id, contract.id, standingResult.config, {
-        isStandingOffer: true,
-        milestoneDates: standingResult.milestoneDates,
-      });
-      try {
-        await comms.queuedAwaitingFunding(contract.id, standingResult.config);
-      } catch (err) {
-        log.warn({ err }, 'failed to send queuedAwaitingFunding message');
-      }
-      return;
-    }
-
     let parseResult;
     const parseStart = Date.now();
     try {
@@ -319,7 +266,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    queueForFunding(gig.id, contract.id, config, { isStandingOffer: false });
+    queueForFunding(gig.id, contract.id, config);
     try {
       await comms.queuedAwaitingFunding(contract.id, config);
     } catch (err) {

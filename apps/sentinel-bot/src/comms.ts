@@ -18,15 +18,6 @@ export function createComms(messenger: Messenger) {
       return messenger.send(contractId, text, 'progress_update');
     },
 
-    packageStarted(
-      contractId: string,
-      job: WatchJobConfig,
-      milestoneDates: string[],
-    ): Promise<void> {
-      const text = `Package started. Watching: ${job.targets.join(', ')}. Schedule: ${job.schedule}. Milestone delivery dates: ${milestoneDates.join(', ')}.`;
-      return messenger.send(contractId, text, 'progress_update');
-    },
-
     queuedAwaitingFunding(contractId: string, job: WatchJobConfig): Promise<void> {
       const text = `Ready to monitor ${job.targets.join(', ')} on schedule ${job.schedule}. Work will begin as soon as escrow is funded.`;
       return messenger.send(contractId, text, 'progress_update');

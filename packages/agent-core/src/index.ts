@@ -4,7 +4,6 @@ export * from './webhook.js';
 export * from './poller.js';
 export * from './scorer.js';
 export * from './proposer.js';
-export * from './standing.js';
 export * from './registration.js';
 export * from './webhookregistration.js';
 export * from './webhookSecretStore.js';

@@ -5,8 +5,8 @@ import type { Gig, Contract, ContractMilestone, ProposalMilestone } from '@botgu
 // Entity shapes are owned by the platform SDK so they can't drift from the
 // live API. Re-export them so bot code imports from '@botguild/agent-core'
 // and never reaches into the SDK directly (keeps the SDK swappable). Types
-// with no SDK equivalent (ProposalDraft, StandingOffer, WebhookRegistration)
-// stay defined here.
+// with no SDK equivalent (ProposalDraft, WebhookRegistration) stay defined
+// here.
 export type { Gig, Contract, ContractMilestone, ProposalMilestone };
 
 export interface ProposalDraft {
@@ -15,17 +15,6 @@ export interface ProposalDraft {
   milestones: ProposalMilestone[];
   warrantyOffer?: string;
   assumptions?: string[];
-}
-
-export interface StandingOffer {
-  id?: string;
-  botId: string;
-  title: string;
-  description: string;
-  price: number;
-  pricingModel: 'fixed' | 'milestone';
-  milestoneCount?: number;
-  slaTerms?: string;
 }
 
 export interface WebhookRegistration {
@@ -160,7 +149,7 @@ export class AgentClient {
         if (!text) return undefined as T;
         // Normalize snake_case keys → camelCase (recursively) so responses
         // match the SDK entity types. The platform returns snake_case fields
-        // (created_at, failure_count, standing_offers, ...) that our types
+        // (created_at, failure_count, value_chain_position, ...) that our types
         // declare camelCase; without this they'd be undefined at runtime —
         // the root cause of the webhook-churn and scoring bugs. This is the
         // same normalizer BotGuildREST applies internally (mapKeysToCamel).
@@ -299,27 +288,5 @@ export class AgentClient {
 
   deleteWebhook(webhookId: string): Promise<void> {
     return this.request<void>('DELETE', `/webhooks/${webhookId}`);
-  }
-
-  createStandingOffer(offer: Omit<StandingOffer, 'id' | 'botId'>): Promise<StandingOffer> {
-    return this.request<StandingOffer>('POST', '/standing-offers', {
-      ...offer,
-      botId: this.botId,
-    });
-  }
-
-  updateStandingOffer(
-    offerId: string,
-    updates: Partial<Omit<StandingOffer, 'id' | 'botId'>>,
-  ): Promise<StandingOffer> {
-    return this.request<StandingOffer>('PATCH', `/standing-offers/${offerId}`, {
-      ...updates,
-      botId: this.botId,
-    });
-  }
-
-  async listStandingOffers(): Promise<StandingOffer[]> {
-    const res = await this.request<{ standingOffers?: StandingOffer[] }>('GET', '/standing-offers');
-    return res.standingOffers ?? [];
   }
 }

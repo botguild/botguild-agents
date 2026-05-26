@@ -1,6 +1,5 @@
 import type { BotConfig } from '@botguild/agent-core';
 import type { ScorerConfig } from '@botguild/agent-core';
-import type { LocalStandingOffer } from '@botguild/agent-core';
 import type { Gig } from '@botguild/agent-core';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +36,6 @@ export const botProfile: BotConfig = {
     'it delivers structured weekly watch reports so you always know the state of your targets.',
   workingStyle: 'glass-box',
   valueChainPosition: 'verifier',
-  pricingModel: 'fixed',
   toolchain: ['playwright', 'node-cron', 'claude-haiku-4-5'],
   warrantyTerms:
     'Re-run any failed check within 24 hours at no charge. ' +
@@ -74,35 +72,6 @@ export const scorerConfig: ScorerConfig = {
   budgetMax: 400,
   proposalThreshold: 55,
 };
-
-// ---------------------------------------------------------------------------
-// Standing offers
-// ---------------------------------------------------------------------------
-
-export const standingOffers: LocalStandingOffer[] = [
-  {
-    title: 'Site Watch Package',
-    description:
-      '4-week page monitoring package. SentinelBot uses Playwright to load your target URLs ' +
-      'on a scheduled basis, capturing content diffs, screenshot changes, and DOM structure shifts. ' +
-      'Delivers a structured weekly report every 7 days with a full change log and alert timeline.',
-    price: 150,
-    pricingModel: 'fixed',
-    milestoneCount: 4,
-    slaTerms: 'Alert within 15 minutes of detected change',
-  },
-  {
-    title: 'API Health Monitor Package',
-    description:
-      '4-week API uptime monitoring package. SentinelBot polls your endpoints at regular intervals, ' +
-      'validating status codes, response shapes, and latency thresholds. ' +
-      'Delivers a structured weekly report every 7 days with uptime percentage and incident log.',
-    price: 120,
-    pricingModel: 'fixed',
-    milestoneCount: 4,
-    slaTerms: 'Alert within 15 minutes of first failure',
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Pricing calculator
@@ -216,13 +185,11 @@ export const sentinelConfig = {
   botProfile,
   sentinelPricing,
   scorerConfig,
-  standingOffers,
   pricingCalc,
 } satisfies {
   botProfile: BotConfig;
   sentinelPricing: SentinelPricing;
   scorerConfig: ScorerConfig;
-  standingOffers: LocalStandingOffer[];
   pricingCalc: (gig: Gig) => { price: number; timeline: string; milestones: MilestoneDraft[] };
 };
 

@@ -4,7 +4,6 @@ import {
   createWebhookServer,
   createProposer,
   registerBot,
-  syncStandingOffers,
   ensureWebhookRegistered,
   shouldPropose,
   createLogger,
@@ -17,16 +16,14 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import { botProfile, scorerConfig, standingOffers, pricingCalc } from './config.js';
+import { botProfile, scorerConfig, pricingCalc } from './config.js';
 import { createGigParser } from './parser.js';
 import { extractCsv } from './extractors/csv.js';
 import { extractPdf } from './extractors/pdf.js';
 import { extractApi } from './extractors/api.js';
 import { normalizeRows } from './normalizer.js';
 import { deliverOutput } from './delivery.js';
-import { loadStore, setJob, getJob, listJobs } from './store.js';
-import { handleFlowStandingGig } from './standinghandler.js';
-import cron from 'node-cron';
+import { loadStore, setJob, getJob } from './store.js';
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -61,9 +58,6 @@ const telegramChatId = process.env['TELEGRAM_CHAT_ID'];
 // Startup
 // ---------------------------------------------------------------------------
 
-// Active weekly cron tasks for data-sync standing offers, keyed by contractId.
-const weeklyTasks = new Map<string, ReturnType<typeof cron.schedule>>();
-
 async function main(): Promise<void> {
   logger.info('FlowBot starting up');
 
@@ -84,7 +78,7 @@ async function main(): Promise<void> {
   }
 
   // Bind the webhook server (and /health) BEFORE any external API calls.
-  // If registerBot / syncStandingOffers / ensureWebhookRegistered hang or
+  // If registerBot / ensureWebhookRegistered hang or
   // throw, Fly's 10s health-check grace period would otherwise expire and
   // the machine never becomes reachable. Handlers are registered later;
   // until webhookServer.markReady() is called (after handler registration),
@@ -117,9 +111,6 @@ async function main(): Promise<void> {
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
   const mcpClient = new AgentMcpClient({ apiUrl, apiKey, logger });
-
-  // Sync standing offers
-  await syncStandingOffers({ client, offers: standingOffers, logger });
 
   // Ensure webhook registration. When the platform issues a fresh secret
   // (i.e. we hit POST /webhooks), capture and persist it.
@@ -174,157 +165,6 @@ async function main(): Promise<void> {
     const [m1Id, m2Id, m3Id] = milestoneIds;
 
     try {
-      const standingResult = handleFlowStandingGig(gig, contractId, milestoneIds);
-
-      if (standingResult.isStandingOffer && standingResult.config) {
-        const standingConfig = standingResult.config;
-        const isDataSync = standingResult.config.inputType !== 'pdf';
-
-        // Invoice batch with no input URL — wait for thread message instead of running on example.com.
-        if (!isDataSync && standingConfig.inputSource === 'pending') {
-          setJob(contractId, {
-            gigId: gig.id,
-            contractId,
-            inputType: standingConfig.inputType,
-            status: 'awaiting_input',
-            currentMilestoneIndex: 0,
-            updatedAt: new Date().toISOString(),
-            standing: {
-              standingType: 'invoice-batch',
-              inputSource: 'pending',
-              outputFormat: standingConfig.outputFormat as 'csv' | 'json' | 'airtable',
-              targetSchema: standingConfig.targetSchema,
-              transformRules: standingConfig.transformRules as Record<string, unknown>,
-              remainingMilestoneIds: standingConfig.milestoneIds,
-            },
-          });
-          await client.sendMessage(
-            contractId,
-            'Invoice batch ready. Please share the link to the PDF folder or upload the invoices to this thread, and I will start processing.',
-            'clarification_request',
-          );
-          return;
-        }
-
-        await client.sendMessage(
-          contractId,
-          `Standing offer package started: ${standingConfig.inputType} sync. ${standingResult.milestoneLabels?.length ?? 0} milestones scheduled.`,
-          'progress_update',
-        );
-
-        setJob(contractId, {
-          gigId: gig.id,
-          contractId,
-          inputType: standingConfig.inputType,
-          status: 'fetching',
-          currentMilestoneIndex: 0,
-          updatedAt: new Date().toISOString(),
-        });
-
-        if (standingConfig.inputType !== 'pdf') {
-          log.info(
-            { inputType: standingConfig.inputType },
-            'data-sync standing offer: scheduled sync pipeline will run weekly; executing first milestone ETL run now',
-          );
-
-          let extractedRows: Record<string, unknown>[];
-
-          if (standingConfig.inputType === 'csv' || standingConfig.inputType === 'sheet') {
-            const csvResult = await extractCsv(standingConfig.inputSource, { logger: log });
-            extractedRows = csvResult.rows;
-          } else {
-            const apiResult = await extractApi({
-              url: standingConfig.inputSource,
-              paginationStyle: 'offset',
-              logger: log,
-            });
-            extractedRows = apiResult.records;
-          }
-
-          const normalizeStats = normalizeRows(extractedRows, standingConfig.transformRules);
-          const [firstMilestoneId, ...rest] = standingConfig.milestoneIds;
-
-          const deliverStart = Date.now();
-          await deliverOutput(
-            contractId,
-            firstMilestoneId ?? '',
-            normalizeStats.rows,
-            standingConfig,
-            normalizeStats,
-            { client, apiKey: anthropicApiKey, logger: log },
-          );
-
-          if (rest.length > 0) {
-            setJob(contractId, {
-              gigId: gig.id,
-              contractId,
-              inputType: standingConfig.inputType,
-              status: 'recurring',
-              currentMilestoneIndex: 1,
-              updatedAt: new Date().toISOString(),
-              standing: {
-                standingType: 'data-sync',
-                inputSource: standingConfig.inputSource,
-                outputFormat: standingConfig.outputFormat as 'csv' | 'json' | 'airtable',
-                targetSchema: standingConfig.targetSchema,
-                transformRules: standingConfig.transformRules as Record<string, unknown>,
-                remainingMilestoneIds: rest,
-              },
-            });
-            scheduleWeeklyDataSync(contractId, gig.id, client, log);
-            log.info(
-              { durationMs: Date.now() - deliverStart, remaining: rest.length },
-              'data-sync standing offer: first milestone delivered, weekly cron scheduled',
-            );
-          } else {
-            setJob(contractId, {
-              ...getJob(contractId)!,
-              status: 'complete',
-              updatedAt: new Date().toISOString(),
-            });
-            log.info(
-              { durationMs: Date.now() - deliverStart },
-              'data-sync standing offer: complete',
-            );
-          }
-        } else {
-          const pdfResult = await extractPdf(
-            standingConfig.inputSource,
-            standingConfig.targetSchema,
-            {
-              apiKey: anthropicApiKey,
-              logger: log,
-            },
-          );
-
-          const normalizeStats = normalizeRows(pdfResult.rows, standingConfig.transformRules);
-          const firstMilestoneId = standingConfig.milestoneIds[0];
-
-          const deliverStart = Date.now();
-          await deliverOutput(
-            contractId,
-            firstMilestoneId ?? '',
-            normalizeStats.rows,
-            standingConfig,
-            normalizeStats,
-            { client, apiKey: anthropicApiKey, logger: log },
-          );
-
-          setJob(contractId, {
-            ...getJob(contractId)!,
-            status: 'complete',
-            updatedAt: new Date().toISOString(),
-          });
-
-          log.info(
-            { durationMs: Date.now() - deliverStart },
-            'invoice-batch standing offer: extraction pipeline complete',
-          );
-        }
-
-        return;
-      }
-
       const result = await parser.parse(gig, contractId, milestoneIds);
 
       if (result.needsClarification) {
@@ -585,14 +425,6 @@ async function main(): Promise<void> {
       });
       return;
     }
-    if (newStatus === 'completed' || newStatus === 'cancelled') {
-      const task = weeklyTasks.get(contractId);
-      if (task) {
-        task.stop();
-        weeklyTasks.delete(contractId);
-        logger.info({ contractId }, 'stopped weekly cron for ended contract');
-      }
-    }
   });
 
   // NOTE: the prior `message.created` handler for invoice-batch URL ingestion
@@ -624,26 +456,8 @@ async function main(): Promise<void> {
     },
   });
 
-  // Resume weekly cron jobs for any data-sync standing-offer contracts
-  // that were mid-run before this restart.
-  for (const job of listJobs()) {
-    if (
-      job.status === 'recurring' &&
-      job.standing?.standingType === 'data-sync' &&
-      job.standing.remainingMilestoneIds.length > 0
-    ) {
-      const log = withContext(logger, { gigId: job.gigId, contractId: job.contractId });
-      log.info(
-        { remaining: job.standing.remainingMilestoneIds.length },
-        'restoring weekly data-sync cron from persisted store',
-      );
-      scheduleWeeklyDataSync(job.contractId, job.gigId, client, log);
-    }
-  }
-
-  // All handlers + persisted-job restore are wired. Flip the webhook server
-  // out of "not ready" mode so incoming deliveries dispatch to handlers
-  // instead of getting a 503 placeholder.
+  // All handlers are wired. Flip the webhook server out of "not ready" mode so
+  // incoming deliveries dispatch to handlers instead of getting a 503 placeholder.
   webhookServer.markReady();
 
   // Start gig poller (webhook server was bound at the top of main())
@@ -676,83 +490,6 @@ async function main(): Promise<void> {
     logger.fatal({ reason }, 'unhandled rejection');
     void alerter?.sendFatalAlert('FlowBot', effectiveBotId, message).finally(() => process.exit(1));
   });
-}
-
-function scheduleWeeklyDataSync(
-  contractId: string,
-  gigId: string,
-  client: AgentClient,
-  log: ReturnType<typeof withContext>,
-): void {
-  const existing = weeklyTasks.get(contractId);
-  if (existing) existing.stop();
-
-  const task = cron.schedule('0 9 * * 1', async () => {
-    const job = getJob(contractId);
-    if (!job?.standing || job.status !== 'recurring') return;
-    const remaining = job.standing.remainingMilestoneIds;
-    if (remaining.length === 0) {
-      task.stop();
-      weeklyTasks.delete(contractId);
-      return;
-    }
-
-    const [milestoneId, ...rest] = remaining;
-    log.info({ milestoneId, remainingAfter: rest.length }, 'data-sync weekly run starting');
-    try {
-      const inputType = job.inputType as 'csv' | 'sheet' | 'api' | 'json' | 'pdf';
-      let extractedRows: Record<string, unknown>[];
-      if (inputType === 'csv' || inputType === 'sheet') {
-        const r = await extractCsv(job.standing.inputSource, { logger: log });
-        extractedRows = r.rows;
-      } else {
-        const r = await extractApi({
-          url: job.standing.inputSource,
-          paginationStyle: 'offset',
-          logger: log,
-        });
-        extractedRows = r.records;
-      }
-      const normalizeStats = normalizeRows(extractedRows, job.standing.transformRules as never);
-      await deliverOutput(
-        contractId,
-        milestoneId,
-        normalizeStats.rows,
-        {
-          gigId,
-          contractId,
-          inputType: inputType === 'json' ? 'api' : inputType,
-          inputSource: job.standing.inputSource,
-          targetSchema: job.standing.targetSchema as never,
-          transformRules: job.standing.transformRules as never,
-          outputFormat: job.standing.outputFormat,
-          milestoneIds: remaining,
-          confidence: 1,
-        },
-        normalizeStats,
-        { client, apiKey: anthropicApiKey, logger: log },
-      );
-
-      const updated: typeof job = {
-        ...job,
-        status: rest.length === 0 ? 'complete' : 'recurring',
-        currentMilestoneIndex: job.currentMilestoneIndex + 1,
-        updatedAt: new Date().toISOString(),
-        standing: { ...job.standing, remainingMilestoneIds: rest },
-      };
-      setJob(contractId, updated);
-
-      if (rest.length === 0) {
-        task.stop();
-        weeklyTasks.delete(contractId);
-        log.info('data-sync standing offer: all milestones delivered, cron stopped');
-      }
-    } catch (err) {
-      log.error({ err }, 'data-sync weekly run failed; will retry next week');
-    }
-  });
-
-  weeklyTasks.set(contractId, task);
 }
 
 main().catch((err) => {

@@ -1,6 +1,5 @@
 import type { BotConfig } from '@botguild/agent-core';
 import type { ScorerConfig } from '@botguild/agent-core';
-import type { LocalStandingOffer } from '@botguild/agent-core';
 import type { Gig } from '@botguild/agent-core';
 
 // ---------------------------------------------------------------------------
@@ -39,7 +38,6 @@ export const botProfile: BotConfig = {
     'it handles everything from one-off batch jobs to recurring data sync pipelines.',
   workingStyle: 'checkpoints',
   valueChainPosition: 'transformer',
-  pricingModel: 'milestone',
   toolchain: ['papaparse', 'pdf-parse', 'claude-haiku-4-5', 'claude-sonnet-4-6'],
   warrantyTerms:
     'If a delivered output contains data transformation errors traceable to FlowBot processing, ' +
@@ -78,36 +76,6 @@ export const scorerConfig: ScorerConfig = {
   budgetMax: 350,
   proposalThreshold: 50,
 };
-
-// ---------------------------------------------------------------------------
-// Standing offers
-// ---------------------------------------------------------------------------
-
-export const standingOffers: LocalStandingOffer[] = [
-  {
-    title: 'Data Sync Package',
-    description:
-      'Recurring 4-milestone data synchronization package. FlowBot fetches your source data ' +
-      '(CSV, API, or sheet), validates schema integrity, applies configured transformations, ' +
-      'and delivers a clean output file or API payload on each scheduled run. ' +
-      'Ideal for teams that need reliable, repeatable data movement without writing pipelines.',
-    price: 200,
-    pricingModel: 'fixed',
-    milestoneCount: 4,
-    slaTerms: 'Each sync run delivered within 2 hours of scheduled time',
-  },
-  {
-    title: 'Invoice Processing Batch',
-    description:
-      'Single-milestone invoice batch processing job. FlowBot ingests a folder of PDF invoices, ' +
-      'extracts line items, vendor details, and totals using pdf-parse and Claude normalization, ' +
-      'and delivers a consolidated CSV or JSON output ready for import into your accounting system.',
-    price: 90,
-    pricingModel: 'fixed',
-    milestoneCount: 1,
-    slaTerms: 'Delivered within 4 hours of contract acceptance',
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Pricing calculator
@@ -217,13 +185,11 @@ export const flowConfig = {
   botProfile,
   flowPricing,
   scorerConfig,
-  standingOffers,
   pricingCalc,
 } satisfies {
   botProfile: BotConfig;
   flowPricing: FlowPricing;
   scorerConfig: ScorerConfig;
-  standingOffers: LocalStandingOffer[];
   pricingCalc: (gig: Gig) => { price: number; timeline: string; milestones: MilestoneDraft[] };
 };
 

@@ -12,21 +12,9 @@ export interface FlowJobState {
     | 'transforming'
     | 'delivering'
     | 'complete'
-    | 'error'
-    | 'awaiting_input'
-    | 'recurring';
+    | 'error';
   currentMilestoneIndex: number;
   updatedAt: string;
-  // Standing-offer recurring state. Present only on data-sync packages so we can
-  // re-register the weekly cron after a restart.
-  standing?: {
-    standingType: 'data-sync' | 'invoice-batch';
-    inputSource: string;
-    outputFormat: 'csv' | 'json' | 'airtable';
-    targetSchema: Array<{ name: string; type: 'string' | 'number' | 'boolean' | 'date' }>;
-    transformRules: Record<string, unknown>;
-    remainingMilestoneIds: string[];
-  };
   // Stash the gig + contract from proposal.accepted so milestone.funded can
   // replay the kickoff once escrow is funded. Cleared once work begins.
   pendingAcceptance?: {
