@@ -17,7 +17,7 @@
     { route: 'build-your-own-bot.md', title: 'Build Your Own Bot' },
     { route: 'flyio/steps.md', title: 'Deploy to Fly.io' },
     { route: 'cicd/gitflow.md', title: 'Branching & Gitflow' },
-    { route: 'roadmap.md', title: 'Roadmap' }
+    { route: 'roadmap.md', title: 'Roadmap' },
   ];
   // Reference docs that live outside docs/ — linked out to GitHub.
   var REFERENCE = [
@@ -25,7 +25,7 @@
     { url: REPO + '/tree/' + BRANCH + '/apps/starter-bot', title: 'starter-bot' },
     { url: REPO + '/blob/' + BRANCH + '/CONTRIBUTING.md', title: 'Contributing' },
     { url: REPO + '/blob/' + BRANCH + '/SECURITY.md', title: 'Security' },
-    { url: REPO + '/blob/' + BRANCH + '/CODE_OF_CONDUCT.md', title: 'Code of Conduct' }
+    { url: REPO + '/blob/' + BRANCH + '/CODE_OF_CONDUCT.md', title: 'Code of Conduct' },
   ];
   var DEFAULT_ROUTE = GUIDE[0].route;
 
@@ -46,7 +46,9 @@
   }
 
   function slugify(s) {
-    return s.toLowerCase().trim()
+    return s
+      .toLowerCase()
+      .trim()
       .replace(/[^\w\s-]/g, '')
       .replace(/\s+/g, '-')
       .replace(/-+/g, '-');
@@ -55,11 +57,14 @@
   // Resolve a relative href against a repo-relative base directory,
   // collapsing "." and "..".
   function resolveRepoPath(baseDir, href) {
-    var parts = href.charAt(0) === '/' ? [] : (baseDir ? baseDir.split('/') : []);
-    href.replace(/^\//, '').split('/').forEach(function (seg) {
-      if (seg === '..') parts.pop();
-      else if (seg !== '.' && seg !== '') parts.push(seg);
-    });
+    var parts = href.charAt(0) === '/' ? [] : baseDir ? baseDir.split('/') : [];
+    href
+      .replace(/^\//, '')
+      .split('/')
+      .forEach(function (seg) {
+        if (seg === '..') parts.pop();
+        else if (seg !== '.' && seg !== '') parts.push(seg);
+      });
     return parts.join('/');
   }
 
@@ -67,7 +72,9 @@
     for (var i = 0; i < GUIDE.length; i++) if (GUIDE[i].route === route) return GUIDE[i].title;
     // Unlisted in-site doc (e.g. a roadmap story) — derive from filename.
     var base = route.split('/').pop().replace(/\.md$/, '').replace(/[-_]/g, ' ');
-    return base.replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+    return base.replace(/\b\w/g, function (c) {
+      return c.toUpperCase();
+    });
   }
 
   // ---------- link & heading rewriting ----------
@@ -84,14 +91,20 @@
         return;
       }
       if (/^(https?:|mailto:)/.test(href)) {
-        if (/^https?:/.test(href)) { a.target = '_blank'; a.rel = 'noopener'; }
+        if (/^https?:/.test(href)) {
+          a.target = '_blank';
+          a.rel = 'noopener';
+        }
         return;
       }
 
       // Relative link — split off any fragment, resolve to a repo path.
       var hash = '';
       var hi = href.indexOf('#');
-      if (hi !== -1) { hash = href.slice(hi + 1); href = href.slice(0, hi); }
+      if (hi !== -1) {
+        hash = href.slice(hi + 1);
+        href = href.slice(0, hi);
+      }
       var p = resolveRepoPath(baseDir, href);
 
       if (p.indexOf('docs/') === 0 && /\.md$/.test(p)) {
@@ -101,7 +114,10 @@
         // Lives outside docs/ — link to GitHub. File → blob, dir → tree.
         var last = p.split('/').pop();
         var kind = last.indexOf('.') !== -1 ? 'blob' : 'tree';
-        a.setAttribute('href', REPO + '/' + kind + '/' + BRANCH + '/' + p + (hash ? '#' + hash : ''));
+        a.setAttribute(
+          'href',
+          REPO + '/' + kind + '/' + BRANCH + '/' + p + (hash ? '#' + hash : ''),
+        );
         a.target = '_blank';
         a.rel = 'noopener';
       }
@@ -116,7 +132,12 @@
     Array.prototype.forEach.call(heads, function (h) {
       var id = slugify(h.textContent);
       if (!id) return;
-      if (used[id]) { used[id]++; id = id + '-' + used[id]; } else { used[id] = 1; }
+      if (used[id]) {
+        used[id]++;
+        id = id + '-' + used[id];
+      } else {
+        used[id] = 1;
+      }
       h.id = id;
       var anchor = document.createElement('a');
       anchor.className = 'anchor';
@@ -131,63 +152,94 @@
 
   function tocBox(toc, route) {
     if (toc.length < 3) return '';
-    var items = toc.map(function (t) {
-      return '<li><a href="#' + route + '~' + t.id + '">' + esc(t.text) + '</a></li>';
-    }).join('');
-    return '<details class="toc-box" open style="margin:0 0 28px;border:1px solid var(--border-soft);' +
+    var items = toc
+      .map(function (t) {
+        return '<li><a href="#' + route + '~' + t.id + '">' + esc(t.text) + '</a></li>';
+      })
+      .join('');
+    return (
+      '<details class="toc-box" open style="margin:0 0 28px;border:1px solid var(--border-soft);' +
       'border-radius:12px;padding:10px 16px;background:var(--bg-soft)">' +
       '<summary style="cursor:pointer;color:var(--faint);font-size:13px;' +
       'font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase">On this page</summary>' +
-      '<ul style="margin:10px 0 4px;padding-left:18px;font-size:14px">' + items + '</ul></details>';
+      '<ul style="margin:10px 0 4px;padding-left:18px;font-size:14px">' +
+      items +
+      '</ul></details>'
+    );
   }
 
   // ---------- rendering ----------
   function fetchDoc(route) {
     if (cache[route] != null) return Promise.resolve(cache[route]);
-    return fetch(route, { cache: 'no-cache' }).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.text();
-    }).then(function (txt) { cache[route] = txt; return txt; });
+    return fetch(route, { cache: 'no-cache' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (txt) {
+        cache[route] = txt;
+        return txt;
+      });
   }
 
   function renderDoc(route) {
     contentEl.innerHTML = '<p class="loading">Loading…</p>';
-    return fetchDoc(route).then(function (md) {
-      var html = marked.parse(md);
-      contentEl.innerHTML = html;
-      rewriteLinks(contentEl, route);
-      var toc = enhanceHeadings(contentEl, route);
-      // Insert the "On this page" box after the leading <h1> if present.
-      if (toc.length >= 3) {
-        var box = document.createElement('div');
-        box.innerHTML = tocBox(toc, route);
-        var h1 = contentEl.querySelector('h1');
-        if (h1 && h1.nextSibling) contentEl.insertBefore(box.firstChild, h1.nextSibling);
-        else if (h1) contentEl.appendChild(box.firstChild);
-        else contentEl.insertBefore(box.firstChild, contentEl.firstChild);
-      }
-      currentRoute = route;
-      document.title = titleFor(route) + ' — BotGuild Agents';
-      renderFooterNav(route);
-    }).catch(function (err) {
-      contentEl.innerHTML = '<h1>Not found</h1><p class="loading">Could not load <code>' +
-        esc(route) + '</code> (' + esc(err.message) + '). ' +
-        '<a href="#' + DEFAULT_ROUTE + '">Back to the guide →</a></p>';
-      footEl.hidden = true;
-    });
+    return fetchDoc(route)
+      .then(function (md) {
+        var html = marked.parse(md);
+        contentEl.innerHTML = html;
+        rewriteLinks(contentEl, route);
+        var toc = enhanceHeadings(contentEl, route);
+        // Insert the "On this page" box after the leading <h1> if present.
+        if (toc.length >= 3) {
+          var box = document.createElement('div');
+          box.innerHTML = tocBox(toc, route);
+          var h1 = contentEl.querySelector('h1');
+          if (h1 && h1.nextSibling) contentEl.insertBefore(box.firstChild, h1.nextSibling);
+          else if (h1) contentEl.appendChild(box.firstChild);
+          else contentEl.insertBefore(box.firstChild, contentEl.firstChild);
+        }
+        currentRoute = route;
+        document.title = titleFor(route) + ' — BotGuild Agents';
+        renderFooterNav(route);
+      })
+      .catch(function (err) {
+        contentEl.innerHTML =
+          '<h1>Not found</h1><p class="loading">Could not load <code>' +
+          esc(route) +
+          '</code> (' +
+          esc(err.message) +
+          '). ' +
+          '<a href="#' +
+          DEFAULT_ROUTE +
+          '">Back to the guide →</a></p>';
+        footEl.hidden = true;
+      });
   }
 
   function renderFooterNav(route) {
     var idx = -1;
     for (var i = 0; i < GUIDE.length; i++) if (GUIDE[i].route === route) idx = i;
-    if (idx === -1) { footEl.hidden = true; return; }
-    var prev = GUIDE[idx - 1], next = GUIDE[idx + 1];
+    if (idx === -1) {
+      footEl.hidden = true;
+      return;
+    }
+    var prev = GUIDE[idx - 1],
+      next = GUIDE[idx + 1];
     var html = '';
     html += prev
-      ? '<a href="#' + prev.route + '"><span class="dir">← Previous</span><span class="ttl">' + esc(prev.title) + '</span></a>'
+      ? '<a href="#' +
+        prev.route +
+        '"><span class="dir">← Previous</span><span class="ttl">' +
+        esc(prev.title) +
+        '</span></a>'
       : '<span></span>';
     html += next
-      ? '<a class="next" href="#' + next.route + '"><span class="dir">Next →</span><span class="ttl">' + esc(next.title) + '</span></a>'
+      ? '<a class="next" href="#' +
+        next.route +
+        '"><span class="dir">Next →</span><span class="ttl">' +
+        esc(next.title) +
+        '</span></a>'
       : '<span></span>';
     footEl.innerHTML = html;
     footEl.hidden = false;
@@ -201,7 +253,11 @@
     });
     html += '</div><div class="nav-group"><p class="grp-title">Reference</p>';
     REFERENCE.forEach(function (d) {
-      html += '<a href="' + d.url + '" target="_blank" rel="noopener">' + esc(d.title) +
+      html +=
+        '<a href="' +
+        d.url +
+        '" target="_blank" rel="noopener">' +
+        esc(d.title) +
         '<span class="ext">↗</span></a>';
     });
     html += '</div>';
@@ -217,15 +273,25 @@
 
   // ---------- search ----------
   function buildSearchIndex() {
-    return Promise.all(GUIDE.map(function (d) {
-      return fetchDoc(d.route).then(function (md) { return { doc: d, md: md }; });
-    })).then(function (docs) {
+    return Promise.all(
+      GUIDE.map(function (d) {
+        return fetchDoc(d.route).then(function (md) {
+          return { doc: d, md: md };
+        });
+      }),
+    ).then(function (docs) {
       var sections = [];
       docs.forEach(function (entry) {
         var route = entry.doc.route;
         // Split on h2 headings; keep a synthetic intro section for the top.
         var lines = entry.md.split('\n');
-        var cur = { route: route, docTitle: entry.doc.title, heading: entry.doc.title, id: '', body: '' };
+        var cur = {
+          route: route,
+          docTitle: entry.doc.title,
+          heading: entry.doc.title,
+          id: '',
+          body: '',
+        };
         lines.forEach(function (ln) {
           var m = /^##\s+(.*)$/.exec(ln);
           if (m) {
@@ -252,34 +318,61 @@
     var out = esc(raw);
     var eq = esc(q);
     var re = new RegExp(eq.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'ig');
-    return out.replace(re, function (m) { return '<mark>' + m + '</mark>'; });
+    return out.replace(re, function (m) {
+      return '<mark>' + m + '</mark>';
+    });
   }
 
   function runSearch(q) {
-    if (!q || q.length < 2) { buildSidebar(); setActive(currentRoute); return; }
+    if (!q || q.length < 2) {
+      buildSidebar();
+      setActive(currentRoute);
+      return;
+    }
     if (!searchIndex) {
-      navEl.innerHTML = '<div class="nav-group"><p class="grp-title">Search</p>' +
+      navEl.innerHTML =
+        '<div class="nav-group"><p class="grp-title">Search</p>' +
         '<p style="color:var(--faint);font-size:13px;padding:0 10px">Indexing…</p></div>';
       return;
     }
     var lc = q.toLowerCase();
-    var hits = searchIndex.filter(function (s) {
-      return s.heading.toLowerCase().indexOf(lc) !== -1 || s.body.toLowerCase().indexOf(lc) !== -1;
-    }).slice(0, 24);
+    var hits = searchIndex
+      .filter(function (s) {
+        return (
+          s.heading.toLowerCase().indexOf(lc) !== -1 || s.body.toLowerCase().indexOf(lc) !== -1
+        );
+      })
+      .slice(0, 24);
 
     if (!hits.length) {
-      navEl.innerHTML = '<div class="nav-group"><p class="grp-title">Search</p>' +
-        '<p style="color:var(--faint);font-size:13px;padding:0 10px">No results for “' + esc(q) + '”.</p></div>';
+      navEl.innerHTML =
+        '<div class="nav-group"><p class="grp-title">Search</p>' +
+        '<p style="color:var(--faint);font-size:13px;padding:0 10px">No results for “' +
+        esc(q) +
+        '”.</p></div>';
       return;
     }
-    var html = '<div class="nav-group search-results"><p class="grp-title">' + hits.length + ' result' +
-      (hits.length === 1 ? '' : 's') + '</p>';
+    var html =
+      '<div class="nav-group search-results"><p class="grp-title">' +
+      hits.length +
+      ' result' +
+      (hits.length === 1 ? '' : 's') +
+      '</p>';
     hits.forEach(function (s) {
       var href = '#' + s.route + (s.id ? '~' + s.id : '');
-      html += '<a class="search-hit" href="' + href + '">' +
-        '<span class="hit-doc">' + esc(s.docTitle) + '</span><br>' +
-        '<span class="hit-head">' + esc(s.heading) + '</span><br>' +
-        '<span class="hit-snip">' + snippet(s.body, q) + '</span></a>';
+      html +=
+        '<a class="search-hit" href="' +
+        href +
+        '">' +
+        '<span class="hit-doc">' +
+        esc(s.docTitle) +
+        '</span><br>' +
+        '<span class="hit-head">' +
+        esc(s.heading) +
+        '</span><br>' +
+        '<span class="hit-snip">' +
+        snippet(s.body, q) +
+        '</span></a>';
     });
     html += '</div>';
     navEl.innerHTML = html;
@@ -301,14 +394,18 @@
     var p = route === currentRoute ? Promise.resolve() : renderDoc(route);
     p.then(function () {
       setActive(route);
-      if (section) setTimeout(function () { scrollToSection(section); }, 30);
+      if (section)
+        setTimeout(function () {
+          scrollToSection(section);
+        }, 30);
       else window.scrollTo({ top: 0 });
     });
   }
 
   // ---------- init ----------
   if (typeof marked === 'undefined') {
-    contentEl.innerHTML = '<h1>Failed to load</h1><p class="loading">The markdown renderer ' +
+    contentEl.innerHTML =
+      '<h1>Failed to load</h1><p class="loading">The markdown renderer ' +
       'did not load. Try a hard refresh.</p>';
     return;
   }
@@ -319,7 +416,9 @@
   searchEl.addEventListener('input', function () {
     clearTimeout(t);
     var v = searchEl.value;
-    t = setTimeout(function () { runSearch(v); }, 120);
+    t = setTimeout(function () {
+      runSearch(v);
+    }, 120);
   });
   // Build the search index lazily in the background.
   buildSearchIndex().then(function () {

@@ -4,6 +4,9 @@
 **/*.d.ts
 pnpm-lock.yaml
 
+# Vendored third-party library (marked) — keep upstream's minified form as-is.
+docs/assets/marked.min.js
+
 # Prose docs — formatting them would mangle author-chosen line wrapping
 # without improving readability.
 README.md
