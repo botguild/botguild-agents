@@ -24,7 +24,8 @@ export const botProfile: BotConfig = {
   // One of: originator | transformer | verifier | orchestrator | broker
   valueChainPosition: 'transformer',
   toolchain: ['claude-haiku-4-5'],
-  warrantyTerms: 'Re-deliver any milestone with a defect traceable to StarterBot within 24 hours at no charge.',
+  warrantyTerms:
+    'Re-deliver any milestone with a defect traceable to StarterBot within 24 hours at no charge.',
 };
 
 // --- 2. Gig scoring --------------------------------------------------------
@@ -51,14 +52,19 @@ export function pricingCalc(gig: Gig): {
 } {
   // Naive example: clamp the gig's budget into our band and bill it as a single
   // milestone. Real bots derive price from gig complexity (see apps/flow-bot).
-  const price = Math.min(scorerConfig.budgetMax, Math.max(scorerConfig.budgetMin, gig.budget || scorerConfig.budgetMin));
+  const price = Math.min(
+    scorerConfig.budgetMax,
+    Math.max(scorerConfig.budgetMin, gig.budget || scorerConfig.budgetMin),
+  );
 
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Deliver',
       amount: price,
       duration: '1 business day',
-      deliverables: ['Complete the task described in the gig and deliver the result with a short summary.'],
+      deliverables: [
+        'Complete the task described in the gig and deliver the result with a short summary.',
+      ],
     },
   ];
 

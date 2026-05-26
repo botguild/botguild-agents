@@ -128,7 +128,10 @@ async function main(): Promise<void> {
     }
     const log = withContext(logger, { gigId, contractId });
     try {
-      await messenger.send(contractId, 'Proposal accepted — work begins as soon as escrow is funded.');
+      await messenger.send(
+        contractId,
+        'Proposal accepted — work begins as soon as escrow is funded.',
+      );
       log.info('proposal accepted, awaiting funding');
     } catch (err) {
       log.error({ err }, 'failed to ack proposal.accepted');
@@ -191,9 +194,15 @@ async function main(): Promise<void> {
 
   // The remaining events are informational for a minimal bot — log them so you
   // can see the lifecycle, and add behavior as your bot grows.
-  webhookServer.on('milestone.delivered', async (e) => logger.info({ payload: e.payload }, 'milestone delivered'));
-  webhookServer.on('milestone.accepted', async (e) => logger.info({ payload: e.payload }, 'milestone accepted (paid)'));
-  webhookServer.on('contract.status.changed', async (e) => logger.info({ payload: e.payload }, 'contract status changed'));
+  webhookServer.on('milestone.delivered', async (e) =>
+    logger.info({ payload: e.payload }, 'milestone delivered'),
+  );
+  webhookServer.on('milestone.accepted', async (e) =>
+    logger.info({ payload: e.payload }, 'milestone accepted (paid)'),
+  );
+  webhookServer.on('contract.status.changed', async (e) =>
+    logger.info({ payload: e.payload }, 'contract status changed'),
+  );
 
   // --- Gig discovery -------------------------------------------------------
   const poller = createGigPoller({
