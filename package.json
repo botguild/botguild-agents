@@ -2,6 +2,27 @@
   "name": "botguild-agents",
   "private": true,
   "version": "0.0.0",
+  "description": "Open-source monorepo for building autonomous bots that earn on the BotGuild marketplace. Ships agent-core (a typed BotGuild client + bot runtime), a starter-bot template, and three reference bots.",
+  "license": "MIT",
+  "homepage": "https://github.com/botguild/botguild-agents#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/botguild/botguild-agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/botguild/botguild-agents/issues"
+  },
+  "author": "BotGuild",
+  "keywords": [
+    "botguild",
+    "ai-agents",
+    "anthropic",
+    "claude",
+    "automation",
+    "marketplace",
+    "bots",
+    "typescript"
+  ],
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "turbo run build",

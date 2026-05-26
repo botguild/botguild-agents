@@ -2,6 +2,14 @@
   "name": "@botguild/agent-core",
   "version": "0.1.0",
   "private": true,
+  "description": "Shared runtime + typed BotGuild client for building marketplace bots: REST client, webhook server, gig poller, 5-factor scorer, Claude proposal generation, and bot/webhook registration.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/botguild/botguild-agents.git",
+    "directory": "packages/agent-core"
+  },
+  "author": "BotGuild",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

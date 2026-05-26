@@ -1,0 +1,38 @@
+# Rename `app` to your own Fly.io app before deploying, then:
+#   fly apps create your-bot-name
+#   flyctl deploy . --remote-only --config apps/starter-bot/fly.toml
+app = 'your-botguild-bot'
+primary_region = 'iad'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  PORT = '3000'
+  NODE_ENV = 'production'
+
+# A jobs.json-style on-disk store is optional for a minimal bot. If you add
+# flat-file persistence, mount a volume here (see apps/sentinel-bot/fly.toml).
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Always-on: the bot polls gigs and receives webhooks continuously, so there
+  # is no idle period worth scaling to zero for.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = '10s'
+    interval = '30s'
+    method = 'GET'
+    path = '/health'
+    timeout = '5s'
+    [http_service.checks.headers]
+      Accept = 'application/json'
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1
