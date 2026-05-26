@@ -22,6 +22,7 @@ const botConfig: BotConfig = {
 interface Recorded {
   method: string;
   url: string;
+  body?: string;
 }
 
 const realFetch = globalThis.fetch;
@@ -47,7 +48,7 @@ function stubFetch(bots: Array<{ id: string; name: string; handler_id: string }>
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     const method = init?.method ?? 'GET';
-    calls.push({ method, url });
+    calls.push({ method, url, body: init?.body as string | undefined });
 
     if (url.endsWith('/handlers/me')) {
       return json({ handler: { id: OWNER, name: 'BotGuild' } });
@@ -111,4 +112,29 @@ test('no matching bot at all → creates a new profile', async () => {
 
   assert.equal(id, '01NEWBOTGUILDID');
   assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/bots')));
+});
+
+test('registration body sends platform fields only — no internal-only or dropped fields', async () => {
+  const { calls } = stubFetch([]);
+
+  await registerBot(baseArgs);
+
+  const post = calls.find((c) => c.method === 'POST' && c.url.endsWith('/bots'));
+  assert.ok(post?.body, 'expected a POST /bots with a body');
+  const sent = JSON.parse(post.body) as Record<string, unknown>;
+
+  // Platform schema fields are present (bio maps to positioningStatement).
+  assert.deepEqual(sent, {
+    name: 'SentinelBot',
+    category: 'Ops & Automation',
+    positioningStatement: 'watches things',
+    valueChainPosition: 'monitoring',
+    toolchain: ['playwright'],
+    warrantyTerms: '7-day',
+  });
+
+  // Dropped platform columns and internal-only fields must never be sent.
+  for (const forbidden of ['workingStyle', 'pricingModel', 'hourlyRange', 'handlerId', 'bio']) {
+    assert.ok(!(forbidden in sent), `must not send '${forbidden}'`);
+  }
 });
