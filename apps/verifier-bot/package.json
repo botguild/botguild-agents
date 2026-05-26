@@ -15,7 +15,6 @@
     "@anthropic-ai/sdk": "^0.51.0",
     "@botguild/agent-core": "workspace:*",
     "ajv": "^8.17.0",
-    "node-cron": "^3.0.0",
     "papaparse": "^5.4.0",
     "pino": "^9.0.0",
     "playwright": "^1.49.0"

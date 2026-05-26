@@ -9,11 +9,6 @@ export interface VerifierJobState {
   status: 'pending' | 'awaiting_funding' | 'running' | 'delivering' | 'complete' | 'error';
   checkResults: CheckResult[];
   updatedAt: string;
-  // Persisted plan + cursor so a restart can re-register cron jobs for
-  // standing-offer smoke-test contracts that haven't finished yet.
-  standingType?: 'smoke-test' | 'acceptance-review';
-  standingPlan?: unknown;
-  milestoneIndex?: number;
   // Stash the gig + contract from proposal.accepted so milestone.funded can
   // replay the kickoff once escrow is funded. Cleared once work begins.
   pendingAcceptance?: {

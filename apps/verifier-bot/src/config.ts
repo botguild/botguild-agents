@@ -1,6 +1,5 @@
 import type { BotConfig } from '@botguild/agent-core';
 import type { ScorerConfig } from '@botguild/agent-core';
-import type { LocalStandingOffer } from '@botguild/agent-core';
 import type { Gig } from '@botguild/agent-core';
 
 // ---------------------------------------------------------------------------
@@ -34,7 +33,6 @@ export const botProfile: BotConfig = {
     'pass/fail reports so you know exactly what meets criteria and what needs attention.',
   workingStyle: 'glass-box',
   valueChainPosition: 'verifier',
-  pricingModel: 'fixed',
   toolchain: ['playwright', 'ajv', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   warrantyTerms:
     'If a delivered check report contains a verifiable false result traceable to VerifierBot ' +
@@ -67,37 +65,6 @@ export const scorerConfig: ScorerConfig = {
   budgetMax: 300,
   proposalThreshold: 50,
 };
-
-// ---------------------------------------------------------------------------
-// Standing offers
-// ---------------------------------------------------------------------------
-
-export const standingOffers: LocalStandingOffer[] = [
-  {
-    title: 'Nightly Smoke Test Package',
-    description:
-      '4-week nightly smoke test suite. VerifierBot runs your configured smoke checks each night ' +
-      'using Playwright, validating critical paths, endpoint availability, and key UI flows. ' +
-      'Delivers a structured nightly report with pass/fail breakdown and any failure details, ' +
-      'with critical failures escalated immediately upon run completion.',
-    price: 180,
-    pricingModel: 'fixed',
-    milestoneCount: 4,
-    slaTerms: 'Critical failure alert within 15 minutes of run completion',
-  },
-  {
-    title: 'Acceptance Review',
-    description:
-      'Single-milestone deliverable review against stated acceptance criteria. VerifierBot ' +
-      'evaluates the provided deliverable using AJV schema validation, Playwright checks, and ' +
-      'Claude-powered audit reasoning to produce a structured pass/fail report aligned to your ' +
-      'stated criteria. Ideal for sign-off gates before release or handover.',
-    price: 60,
-    pricingModel: 'fixed',
-    milestoneCount: 1,
-    slaTerms: 'Report delivered within 4 hours of contract acceptance',
-  },
-];
 
 // ---------------------------------------------------------------------------
 // Pricing calculator
@@ -165,13 +132,11 @@ export const verifierConfig = {
   botProfile,
   verifierPricing,
   scorerConfig,
-  standingOffers,
   pricingCalc,
 } satisfies {
   botProfile: BotConfig;
   verifierPricing: VerifierPricing;
   scorerConfig: ScorerConfig;
-  standingOffers: LocalStandingOffer[];
   pricingCalc: (gig: Gig) => { price: number; timeline: string; milestones: MilestoneDraft[] };
 };
 
