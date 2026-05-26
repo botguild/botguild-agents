@@ -113,11 +113,19 @@ async function main(): Promise<void> {
 
   // --- Webhook handlers ----------------------------------------------------
 
+  // In-process de-dupe: prevents double-delivery when the platform retries a
+  // funded webhook while the first delivery is still in-flight. Keys are
+  // contractIds; cleared on failure so legitimate retries can proceed.
+  const inFlight = new Set<string>();
+
   // A proposal we submitted was accepted. The payload is flat ids — fetch the
   // full gig + contract. We don't start work yet: wait for escrow funding.
   webhookServer.on('proposal.accepted', async (event) => {
     const { gigId, contractId } = event.payload as { gigId?: string; contractId?: string };
-    if (!gigId || !contractId) return;
+    if (!gigId || !contractId) {
+      logger.warn({ payload: event.payload }, 'proposal.accepted missing gigId or contractId');
+      return;
+    }
     const log = withContext(logger, { gigId, contractId });
     try {
       await messenger.send(contractId, 'Proposal accepted — work begins as soon as escrow is funded.');
@@ -130,8 +138,18 @@ async function main(): Promise<void> {
   // Escrow for a milestone was funded — now it's safe to do (paid) work.
   webhookServer.on('milestone.funded', async (event) => {
     const { contractId } = event.payload as { contractId?: string };
-    if (!contractId) return;
+    if (!contractId) {
+      logger.warn({ payload: event.payload }, 'milestone.funded missing contractId');
+      return;
+    }
     const log = withContext(logger, { contractId });
+
+    // Guard against concurrent / retried deliveries synchronously, before any await.
+    if (inFlight.has(contractId)) {
+      log.info('milestone.funded already in-flight, skipping duplicate');
+      return;
+    }
+    inFlight.add(contractId);
 
     let gig: Gig;
     let contract: Contract;
@@ -139,13 +157,18 @@ async function main(): Promise<void> {
       contract = await client.getContract(contractId);
       gig = await client.getGig(contract.gigId);
     } catch (err) {
+      inFlight.delete(contractId); // allow the platform's retry to re-run
       log.error({ err }, 'failed to load gig/contract on milestone.funded');
       return;
     }
 
-    const milestone = contract.milestones[0];
+    // Find the funded milestone rather than blindly taking index 0 — a contract
+    // can have multiple milestones and a later funded event must deliver the
+    // correct one.
+    const milestone = contract.milestones.find((m) => m.status === 'funded');
     if (!milestone) {
-      log.warn('funded contract has no milestones');
+      inFlight.delete(contractId);
+      log.warn('no funded milestone found on contract');
       return;
     }
 
@@ -153,9 +176,16 @@ async function main(): Promise<void> {
       const note = await doWork(gig);
       await client.deliverMilestone(contractId, milestone.id, { note });
       log.info({ milestoneId: milestone.id }, 'milestone delivered');
+      // Delivery confirmed — keep the contractId in inFlight to suppress
+      // any late-arriving retries for the same milestone.
     } catch (err) {
+      inFlight.delete(contractId); // let the platform retry
       log.error({ err }, 'work/delivery failed');
-      await messenger.send(contractId, 'Hit a snag delivering this milestone — investigating.');
+      try {
+        await messenger.send(contractId, 'Hit a snag delivering this milestone — investigating.');
+      } catch (msgErr) {
+        log.warn({ err: msgErr }, 'failed to send error notification to buyer');
+      }
     }
   });
 
