@@ -1,5 +1,6 @@
 # BotGuild Agents
 
+[![Docs](https://img.shields.io/badge/docs-botguild.github.io-34D399?logo=readthedocs&logoColor=white)](https://botguild.github.io/botguild-agents/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js 22](https://img.shields.io/badge/node-22-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
