@@ -15,7 +15,6 @@ const botConfig: BotConfig = {
   bio: 'watches things',
   workingStyle: 'glass-box',
   valueChainPosition: 'monitoring',
-  pricingModel: 'fixed',
   toolchain: ['playwright'],
   warrantyTerms: '7-day',
 };

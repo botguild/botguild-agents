@@ -41,9 +41,6 @@ importers:
       '@botguild/agent-core':
         specifier: workspace:*
         version: link:../../packages/agent-core
-      node-cron:
-        specifier: ^3.0.0
-        version: 3.0.3
       papaparse:
         specifier: ^5.4.0
         version: 5.5.3
@@ -106,9 +103,6 @@ importers:
       ajv:
         specifier: ^8.17.0
         version: 8.20.0
-      node-cron:
-        specifier: ^3.0.0
-        version: 3.0.3
       papaparse:
         specifier: ^5.4.0
         version: 5.5.3
