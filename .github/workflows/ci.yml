@@ -44,6 +44,31 @@ jobs:
 
       - run: pnpm test
 
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so gitleaks scans every commit, not just the tip —
+          # a secret committed and later "removed" still lives in the history.
+          fetch-depth: 0
+
+      # Use the gitleaks CLI directly (MIT-licensed) rather than the
+      # gitleaks GitHub Action, which requires a paid GITLEAKS_LICENSE for
+      # organization-owned repos. Pinned for reproducible, supply-chain-safe runs.
+      - name: Install gitleaks
+        run: |
+          VERSION=8.18.4
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # --redact keeps any finding out of the public log; --exit-code 1 fails
+      # the job when a secret is detected.
+      - name: Scan git history for secrets
+        run: gitleaks detect --source . --redact --verbose --exit-code 1
+
   docker-build:
     name: Docker build (${{ matrix.bot }})
     runs-on: ubuntu-latest
@@ -84,7 +109,7 @@ jobs:
   ci-success:
     name: CI
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test, docker-build]
+    needs: [lint, typecheck, test, secret-scan, docker-build]
     if: always()
     steps:
       - name: Verify upstream jobs
@@ -92,11 +117,13 @@ jobs:
           if [[ "${{ needs.lint.result }}"         != "success" ]] \
           || [[ "${{ needs.typecheck.result }}"    != "success" ]] \
           || [[ "${{ needs.test.result }}"         != "success" ]] \
+          || [[ "${{ needs.secret-scan.result }}"  != "success" ]] \
           || [[ "${{ needs.docker-build.result }}" != "success" ]]; then
             echo "Upstream job results:"
             echo "  lint=${{ needs.lint.result }}"
             echo "  typecheck=${{ needs.typecheck.result }}"
             echo "  test=${{ needs.test.result }}"
+            echo "  secret-scan=${{ needs.secret-scan.result }}"
             echo "  docker-build=${{ needs.docker-build.result }}"
             exit 1
           fi
