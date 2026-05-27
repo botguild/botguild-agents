@@ -198,6 +198,7 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       // Hard completeness gate — score_gig is lenient so it can critique early
       // drafts, but a gig this incomplete should never reach the marketplace.
       const missing: string[] = [];
+      if (!draft.category.trim()) missing.push('category');
       if (!draft.timeline.trim()) missing.push('timeline');
       if (draft.acceptanceCriteria.length === 0) missing.push('acceptanceCriteria');
       if (draft.deliverables.length === 0) missing.push('deliverables');
@@ -294,5 +295,5 @@ function toErr(action: string, e: unknown): string {
   if (e instanceof PayerError) {
     return `Failed to ${action}: HTTP ${e.status} on ${e.path} — ${e.message}`;
   }
-  return `Failed to ${action}: ${(e as Error).message}`;
+  return `Failed to ${action}: ${e instanceof Error ? e.message : String(e)}`;
 }

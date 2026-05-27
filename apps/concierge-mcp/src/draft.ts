@@ -17,10 +17,11 @@ export const draftGigShape = {
   title: z.string().min(3).describe('Short, specific gig title'),
   category: z
     .string()
+    .default('')
     .describe(
       'Marketplace category — must match the target bot (e.g. "Ops & Automation", "Testing & QA", "Monitoring")',
     ),
-  budget: z.number().nonnegative().describe('Total budget in USD'),
+  budget: z.number().nonnegative().default(0).describe('Total budget in USD'),
   timeline: z.string().default('').describe('Human deadline, e.g. "5 business days"'),
   acceptanceCriteria: z
     .array(z.string())
@@ -66,8 +67,11 @@ export function scoreDraft(d: DraftGig, cfg: ScorerConfig, botName: string): Dra
   const gaps: string[] = [];
 
   if (breakdown.category === 0) {
+    const lead = d.category
+      ? `Category "${d.category}" isn't handled by ${botName}.`
+      : 'No category set.';
     gaps.push(
-      `Category "${d.category}" isn't handled by ${botName}. Use one of: ${cfg.categories.join(', ')}. ` +
+      `${lead} Use one of: ${cfg.categories.join(', ')}. ` +
         `Category is worth 40 pts — without a match the gig scores 0.`,
     );
   }
