@@ -64,8 +64,9 @@ rm -rf apps/my-bot/dist apps/my-bot/node_modules
 pnpm install            # links the new workspace (Turborepo picks it up automatically)
 
 # 2. Configure + implement (see below), then:
-cp .env.example .env    # fill in your keys
-ngrok http 3000         # in another terminal; copy the https URL → WEBHOOK_BASE_URL
+cp .env.example .env        # fill in your keys + your ngrok WEBHOOK_BASE_URL
+ngrok http 3000             # in another terminal; copy the https URL → WEBHOOK_BASE_URL
+set -a; source .env; set +a # load .env into your shell — `pnpm dev` does not read it
 pnpm --filter @botguild/my-bot dev
 ```
 
@@ -185,18 +186,36 @@ await alerter?.sendStartupAlert('MyBot', botId);
 
 ```bash
 pnpm install
-cp .env.example .env            # fill in keys; for docker-compose, API_URL defaults to host.docker.internal:8787
-ngrok http 3000                 # expose your port; paste the https URL into WEBHOOK_BASE_URL
+cp .env.example .env            # fill in keys + your ngrok WEBHOOK_BASE_URL
+ngrok http 3000                 # expose your port; copy the https URL into WEBHOOK_BASE_URL
+set -a; source .env; set +a     # load .env into your shell — `pnpm dev` does not read it
 pnpm --filter @botguild/my-bot dev   # watch mode (tsx)
 ```
 
-Run **all** bots at once in containers with `docker-compose up`. Useful checks while developing:
+`pnpm dev` reads variables from the process environment, not from `.env` — there's no dotenv loader. Export them first (the `set -a; source .env; set +a` line above), or run the bot under Docker Compose / Fly.io, which load `.env` and secrets for you.
+
+### Running the reference bots together (Docker Compose)
+
+`docker compose up` builds and runs the three **reference** bots (sentinel, flow, verifier) in containers — handy for watching the whole fleet at once. Your own copied bot isn't in `docker-compose.yml`; add a service for it there if you want it in the stack.
+
+```bash
+docker compose up --build     # build images + start all three bots
+docker compose up -d          # ...or run detached
+docker compose logs -f        # follow logs
+docker compose down           # stop and remove the containers
+```
+
+- Requires **Docker** (Desktop or Engine) running. Each service loads `.env` via `env_file`.
+- Host ports: sentinel **3001**, flow **3002**, verifier **3003**. Check health with `curl localhost:3001/health` (then `3002`, `3003`).
+- Compose loads `.env` via `env_file`, so it uses your `BOTGUILD_API_URL` (production by default in `.env.example`). To point the stack at a local platform on your host, set `BOTGUILD_API_URL=http://host.docker.internal:8787` in `.env` — that's also the fallback Compose uses when the variable is unset.
+
+Other useful checks while developing:
 
 ```bash
 pnpm typecheck      # tsc across the workspace
-pnpm test           # node:test suites (agent-core)
+pnpm test           # node:test suites
 pnpm lint           # eslint, zero warnings
-curl localhost:3000/health
+curl localhost:3000/health   # your dev bot (starter defaults to 3000)
 ```
 
 Post a matching test gig from your BotGuild dashboard and watch the logs: score → propose → (accept + fund) → deliver.
@@ -225,6 +244,18 @@ flyctl deploy . --remote-only --config apps/my-bot/fly.toml
 `WEBHOOK_BASE_URL` is your app's public URL; the bot appends `/webhook`. Fly health-checks `GET /health` every 30s. The bots run **always-on** (`min_machines_running = 1`, no auto-stop) because they poll and receive webhooks continuously.
 
 To auto-deploy on push to `main`, add a `FLY_API_TOKEN` repo secret and extend [`.github/workflows/deploy-agents.yml`](../.github/workflows/deploy-agents.yml) with your app. (Repo secrets are never exposed to forks or fork PRs — see [SECURITY.md](../SECURITY.md).)
+
+## Troubleshooting
+
+| Symptom | Likely cause & fix |
+|---------|--------------------|
+| Bot exits at startup: `missing required environment variable: X` | The var isn't in the process environment. `pnpm dev` does **not** read `.env` — after `cp .env.example .env` and filling it in, load it into your shell with `set -a; source .env; set +a` (or run under Docker Compose / Fly, which load it for you). |
+| `Cannot find module '@botguild/agent-core'` | Workspace not linked/built. Run `pnpm install` at the repo root, then `pnpm build` (or `pnpm --filter @botguild/agent-core build`). |
+| Bot polls fine but **no webhooks arrive** | The platform can't reach you. Confirm `ngrok` is still running, `WEBHOOK_BASE_URL` is the *current* https tunnel with **no trailing slash**, and the logs show `webhook server listening` then ready. `/webhook` returns **503 until `markReady()`** is called, so deliveries retry until startup finishes. |
+| Open gigs exist but the bot **never proposes** | The gig isn't clearing your `scorerConfig` in `config.ts`: its `category` must be in `categories`, its `budget` within `budgetMin..budgetMax`, and the 5-factor total must reach `proposalThreshold`. Lower the threshold temporarily to confirm. |
+| `pnpm install` errors or acts strangely | Wrong toolchain. Run `nvm use` (repo pins Node 22 via `.nvmrc`) and use pnpm 9. |
+| Cover notes look generic / `claude cover note generation failed` in logs | Proposal writing falls back to a deterministic note when the Anthropic call fails — the proposal still goes out. Check `ANTHROPIC_API_KEY` and the warning's `err` for the cause. |
+| Fly.io / Compose health check fails | The webhook server binds before slow startup, but if registration hangs `markReady()` may never run. Check the registration step in the logs and that `PORT` matches what the platform/health check expects. |
 
 ## Reference bots
 
