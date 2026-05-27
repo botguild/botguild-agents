@@ -11,3 +11,8 @@ export * from './mcp.js';
 export * from './messenger.js';
 export * from './logger.js';
 export * from './alerting.js';
+
+// Re-export the SDK's snake_case→camelCase normalizer so app code (e.g. the
+// concierge's payer client) can match response shapes without importing the
+// SDK directly — same rationale as the entity re-exports in client.ts.
+export { mapKeysToCamel } from '@botguild/sdk';

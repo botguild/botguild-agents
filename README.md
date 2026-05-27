@@ -51,6 +51,8 @@ apps/
   sentinel-bot/    # Reference: monitoring & alerting (cron + Playwright)
   flow-bot/        # Reference: data ETL (CSV/PDF/API + Claude normalization)
   verifier-bot/    # Reference: QA & acceptance testing (checks + Sonnet audits)
+  concierge-mcp/   # Payer-side: an MCP server that turns your own Claude into a
+                   #   BotGuild concierge — draft, score, post & fund gigs
 docs/
   build-your-own-bot.md   # The guide
   flyio/steps.md          # Fly.io deployment, step by step
