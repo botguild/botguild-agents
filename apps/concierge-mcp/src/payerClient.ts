@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Logger } from 'pino';
+import { mapKeysToCamel } from '@botguild/agent-core';
 import type { DraftGig } from './draft.js';
 
 export interface PayerClientConfig {
@@ -40,8 +41,21 @@ export interface GigSummary {
   budget?: number;
 }
 
-const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+// 429 is handled separately via Retry-After (see request()); these are the
+// server errors we retry on a fixed backoff.
+const RETRYABLE = new Set([500, 502, 503, 504]);
 const BACKOFF_MS = [500, 1500, 3000];
+
+// Mirror AgentClient.parseRetryAfter: honor a numeric (seconds) or HTTP-date
+// Retry-After; fall back to 60s when absent/unparseable.
+function parseRetryAfter(value: string | null): number {
+  if (!value) return 60_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+  return 60_000;
+}
 
 export class PayerClient {
   private readonly apiUrl: string;
@@ -61,7 +75,8 @@ export class PayerClient {
       'Content-Type': 'application/json',
     };
 
-    for (let attempt = 0; ; attempt++) {
+    let attempt = 0;
+    for (;;) {
       const started = Date.now();
       let response: Response;
       try {
@@ -74,30 +89,54 @@ export class PayerClient {
       } catch (err) {
         if (attempt < BACKOFF_MS.length) {
           await sleep(BACKOFF_MS[attempt]);
+          attempt++;
           continue;
         }
-        throw new PayerError(0, `network error: ${(err as Error).message}`, path);
+        throw new PayerError(
+          0,
+          `network error: ${err instanceof Error ? err.message : String(err)}`,
+          path,
+        );
       }
 
       const durationMs = Date.now() - started;
       this.logger.debug({ method, path, status: response.status, durationMs }, 'payer api call');
 
-      if (RETRYABLE.has(response.status) && attempt < BACKOFF_MS.length) {
-        await sleep(BACKOFF_MS[attempt]);
+      if (response.ok) {
+        // Tolerate empty bodies (201/202/204 often have none) instead of letting
+        // response.json() throw, and normalize snake_case → camelCase so shapes
+        // match our types — the same approach as agent-core's AgentClient.
+        const text = await response.text();
+        if (!text) return undefined as T;
+        return mapKeysToCamel(JSON.parse(text)) as T;
+      }
+
+      // Honor the server's Retry-After on 429 rather than a fixed backoff, so we
+      // don't immediately re-hit the rate limit (matches AgentClient).
+      if (response.status === 429) {
+        const delayMs = parseRetryAfter(response.headers.get('Retry-After'));
+        this.logger.warn({ method, path, delayMs }, 'rate limited, retrying after delay');
+        await sleep(delayMs);
         continue;
       }
-      if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new PayerError(response.status, text || response.statusText, path);
+      if (RETRYABLE.has(response.status) && attempt < BACKOFF_MS.length) {
+        await sleep(BACKOFF_MS[attempt]);
+        attempt++;
+        continue;
       }
-      if (response.status === 204) return undefined as T;
-      return (await response.json()) as T;
+
+      const text = await response.text().catch(() => '');
+      throw new PayerError(response.status, text || response.statusText, path);
     }
   }
 
-  /** Create (post) a gig. ASSUMPTION: POST /gigs. */
-  createGig(draft: DraftGig): Promise<CreatedGig> {
-    return this.request<CreatedGig>('POST', '/gigs', {
+  // BotGuild REST endpoints wrap entities/lists as `{ gig: {...} }` /
+  // `{ gigs: [...] }` (see AgentClient). Unwrap the matching key so callers get
+  // the entity, not the envelope — otherwise e.g. `created.id` is undefined.
+
+  /** Create (post) a gig. ASSUMPTION: POST /gigs → { gig }. */
+  async createGig(draft: DraftGig): Promise<CreatedGig> {
+    const res = await this.request<{ gig?: CreatedGig }>('POST', '/gigs', {
       title: draft.title,
       description: draft.description ?? '',
       category: draft.category,
@@ -107,16 +146,28 @@ export class PayerClient {
       deliverables: draft.deliverables,
       warrantyRequired: draft.warrantyRequired ?? false,
     });
+    // A create must echo back the gig (with an id); an empty/odd body means the
+    // post didn't take effect as expected — surface that clearly rather than
+    // returning an id-less gig the caller would then mis-report as "posted".
+    if (!res?.gig?.id) {
+      throw new PayerError(502, 'gig was not created (empty or unexpected API response)', '/gigs');
+    }
+    return res.gig;
   }
 
-  /** List gigs the authenticated payer has posted. ASSUMPTION: GET /gigs?mine=true. */
-  listMyGigs(): Promise<GigSummary[]> {
-    return this.request<GigSummary[]>('GET', '/gigs?mine=true');
+  /** List gigs the authenticated payer has posted. ASSUMPTION: GET /gigs?mine=true → { gigs }. */
+  async listMyGigs(): Promise<GigSummary[]> {
+    const res = await this.request<{ gigs?: GigSummary[] }>('GET', '/gigs?mine=true');
+    return res.gigs ?? [];
   }
 
-  /** Fetch one gig (proposals/contract status live under it). ASSUMPTION: GET /gigs/:id. */
-  getGig(gigId: string): Promise<GigSummary> {
-    return this.request<GigSummary>('GET', `/gigs/${encodeURIComponent(gigId)}`);
+  /** Fetch one gig (proposals/contract status live under it). ASSUMPTION: GET /gigs/:id → { gig }. */
+  async getGig(gigId: string): Promise<GigSummary> {
+    const res = await this.request<{ gig: GigSummary }>(
+      'GET',
+      `/gigs/${encodeURIComponent(gigId)}`,
+    );
+    return res.gig;
   }
 
   /** Fund a milestone's escrow — releases the bot to start that stage.
