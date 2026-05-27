@@ -4,11 +4,11 @@ description: Checkout, install pnpm + Node, and run a frozen-lockfile install wi
 runs:
   using: composite
   steps:
-    - uses: pnpm/action-setup@v4
+    - uses: pnpm/action-setup@v6
       with:
         version: 9.15.0
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v6
       with:
         node-version: 22
         cache: pnpm
