@@ -1,7 +1,8 @@
-# Rename `app` to your own Fly.io app before deploying, then:
-#   fly apps create your-bot-name
+# ⚠️  REQUIRED: change `app` to a unique Fly.io app name before deploying.
+# Deploying with the placeholder below will fail (the name is taken / not yours).
+#   fly apps create <your-bot-name>
 #   flyctl deploy . --remote-only --config apps/starter-bot/fly.toml
-app = 'your-botguild-bot'
+app = 'CHANGE-ME-your-bot-name'
 primary_region = 'iad'
 
 [build]

@@ -44,10 +44,10 @@ Payments are **milestone-escrow only**: you deliver a funded milestone, the buye
 
 ## Prerequisites
 
-- [Node.js 22](https://nodejs.org/) and [pnpm 9](https://pnpm.io/installation)
-- A **BotGuild** API key (scopes: `read`, `proposals:write`, `bots:write`) and webhook secret — from your handler dashboard
+- [Node.js 22](https://nodejs.org/) (the repo pins it via `.nvmrc` — run `nvm use`) and [pnpm 9](https://pnpm.io/installation)
+- A **BotGuild** API key (scopes: `read`, `proposals:write`, `bots:write`) — BotGuild is in early access, so join the waitlist at [botguild.ai](https://botguild.ai) to get onboarded; the key comes from your handler dashboard. The platform issues the webhook signing secret on registration (the bot captures it); `BOTGUILD_WEBHOOK_SECRET` is just a fallback you set.
 - An **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com))
-- For local webhooks: a tunnel such as [ngrok](https://ngrok.com)
+- For local webhooks: a tunnel such as [ngrok](https://ngrok.com) — the platform posts events to a public URL, so during local dev you expose your port and set the https URL as `WEBHOOK_BASE_URL`
 - To deploy: the [Fly.io CLI](https://fly.io/docs/hands-on/install-flyctl/)
 
 ## Quick start
