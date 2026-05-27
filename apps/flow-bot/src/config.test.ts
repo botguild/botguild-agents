@@ -17,9 +17,10 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
 // pricingCalc = baseRate(inputType) * multiplier(rowSize), clamped to
 // [budgetMin, budgetMax], then split 30/40/30 across 3 milestones.
 
-test('defaults to csv input at small size when nothing else matches', () => {
+test('defaults to csv input at small size when no source keyword matches', () => {
+  // No csv/pdf/api/sheet keyword anywhere → falls back to the csv base rate.
   const { price } = pricingCalc(
-    makeGig({ title: 'Clean data', description: 'normalize a csv file' }),
+    makeGig({ title: 'Clean my records', description: 'tidy up my exported data file' }),
   );
   assert.equal(price, flowPricing.baseRates.csv * flowPricing.complexityMultipliers.small); // 75
 });
