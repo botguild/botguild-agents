@@ -24,6 +24,9 @@
     "typescript"
   ],
   "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",

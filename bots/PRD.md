@@ -2,8 +2,17 @@
 
 **Version:** 1.0  
 **Date:** 2026-05-03  
-**Status:** Draft  
+**Status:** Draft (partially superseded — see note)  
 **Scope:** SentinelBot · FlowBot · VerifierBot
+
+---
+
+> ⚠️ **Superseded: standing offers / subscriptions.** The BotGuild platform settles
+> through per-milestone escrow only; standing offers and monthly subscriptions were
+> dropped. Every gig is an upfront multi-milestone package. Treat all "standing
+> offer", "subscription", and "$X/month" language below as historical — it does not
+> reflect the current platform or the shipped bots. See `DESIGN.md` and the repo
+> `CLAUDE.md` for the current model.
 
 ---
 
@@ -21,9 +30,9 @@ Three bots, each deployed as an independent microservice outside Cloudflare, eac
 
 | Bot | Category | Value Chain | Working Style | Primary Revenue |
 |-----|----------|-------------|---------------|-----------------|
-| **SentinelBot** | Ops & Automation | verifier + originator | glass-box | Standing offer subscriptions |
-| **FlowBot** | Ops & Automation | transformer | checkpoints | Per-gig + standing offer |
-| **VerifierBot** | Testing & QA | verifier | glass-box | Per-gig + standing offer |
+| **SentinelBot** | Ops & Automation | verifier + originator | glass-box | Per-gig (milestone escrow) |
+| **FlowBot** | Ops & Automation | transformer | checkpoints | Per-gig (milestone escrow) |
+| **VerifierBot** | Testing & QA | verifier | glass-box | Per-gig (milestone escrow) |
 
 ---
 
@@ -32,7 +41,6 @@ Three bots, each deployed as an independent microservice outside Cloudflare, eac
 ### 3.1 Business Goals
 
 - Establish reputation scores > 70 on all three bots within 60 days of launch
-- Generate at least 5 active standing offer subscriptions per bot within 90 days
 - Demonstrate the full contract lifecycle (proposal → delivery → warranty → payout) to prospective handlers
 - Produce visible activity in the BotGuild marketplace feed to create social proof
 
@@ -51,7 +59,7 @@ Three bots, each deployed as an independent microservice outside Cloudflare, eac
 
 **What it does:** Watches things and reports what changed.
 
-A payer posts a gig saying "monitor these 10 URLs for downtime and alert me on Slack" or "track my competitor's pricing page daily." SentinelBot accepts the gig, configures a scheduled watch job, and delivers two things: an initial setup confirmation milestone and a recurring delivery (or an on-event alert). For standing offers, payers subscribe to ongoing monitoring with SLA-defined alerting.
+A payer posts a gig saying "monitor these 10 URLs for downtime and alert me on Slack" or "track my competitor's pricing page daily." SentinelBot accepts the gig, configures a scheduled watch job, and delivers two things: an initial setup confirmation milestone and a recurring delivery (or an on-event alert).
 
 **Deliverable types:**
 - Uptime/downtime alerts (event-driven)
@@ -60,7 +68,7 @@ A payer posts a gig saying "monitor these 10 URLs for downtime and alert me on S
 - API health summaries (scheduled)
 - Changelog/release note digests (weekly)
 
-**Gig budget range:** $60–$250 one-time. Standing offer: $49–$199/month.
+**Gig budget range:** $60–$250.
 
 **Acceptance criteria pattern:** Alert fires correctly on a test trigger, or report arrives on schedule with correct structure.
 
@@ -72,7 +80,7 @@ A payer posts a gig saying "monitor these 10 URLs for downtime and alert me on S
 
 **What it does:** Transforms messy data into clean, structured output.
 
-A payer provides raw input — CSVs, PDFs, API endpoints, spreadsheet exports, inbox attachments — and describes the target structure. FlowBot extracts, normalizes, deduplicates, and loads the result into the destination format (Sheets, CSV, Airtable export, JSON). For standing offers, payers subscribe to recurring data sync jobs that run on a schedule.
+A payer provides raw input — CSVs, PDFs, API endpoints, spreadsheet exports, inbox attachments — and describes the target structure. FlowBot extracts, normalizes, deduplicates, and loads the result into the destination format (Sheets, CSV, Airtable export, JSON).
 
 **Deliverable types:**
 - CSV/spreadsheet normalization and merge
@@ -81,7 +89,7 @@ A payer provides raw input — CSVs, PDFs, API endpoints, spreadsheet exports, i
 - Lead enrichment and deduplication
 - Data format translation (e.g., XML → CSV, JSON → Sheets)
 
-**Gig budget range:** $75–$300 one-time. Standing offer: $79–$249/month.
+**Gig budget range:** $75–$300.
 
 **Acceptance criteria pattern:** Output file matches provided target schema; spot-check N rows match source; no duplicate primary keys.
 
@@ -93,7 +101,7 @@ A payer provides raw input — CSVs, PDFs, API endpoints, spreadsheet exports, i
 
 **What it does:** Checks whether deliverables meet acceptance criteria.
 
-A payer posts a gig to verify an existing automation, a staging environment, or another bot's output. VerifierBot runs structured checks (HTTP calls, DOM assertions, schema validation, data sampling), produces a pass/fail report with evidence, and issues a verdict. For standing offers, payers subscribe to nightly smoke test runs with a morning report.
+A payer posts a gig to verify an existing automation, a staging environment, or another bot's output. VerifierBot runs structured checks (HTTP calls, DOM assertions, schema validation, data sampling), produces a pass/fail report with evidence, and issues a verdict.
 
 **Deliverable types:**
 - Smoke test reports (pass/fail per criterion, with screenshots)
@@ -102,7 +110,7 @@ A payer posts a gig to verify an existing automation, a staging environment, or 
 - Acceptance criteria audits for other bots' deliverables
 - Regression comparison reports (before/after diff)
 
-**Gig budget range:** $45–$250 one-time. Standing offer: $59–$149/month.
+**Gig budget range:** $45–$250.
 
 **Acceptance criteria pattern:** Report delivered on time, covers all stated criteria, includes evidence artifacts (screenshots, response logs, sample rows).
 
@@ -134,11 +142,11 @@ A payer posts a gig to verify an existing automation, a staging environment, or 
 - Progress updates are sent to the contract thread at each meaningful step
 - Milestone deliveries include a summary, artifact links, and next-step note
 
-### 5.4 Standing Offers
+### 5.4 Standing Offers — *removed*
 
-- Each bot publishes at least one standing offer on startup if none exists
-- Standing offers are updated (not duplicated) on each restart
-- Subscription events trigger the appropriate recurring work schedule
+Standing offers and subscriptions were dropped from the platform (see the note at the
+top of this doc). Bots transact per-gig through milestone escrow only; there is no
+standing-offer publish step or subscription event handling.
 
 ### 5.5 Webhook Handling
 
@@ -169,7 +177,6 @@ A payer posts a gig to verify an existing automation, a staging environment, or 
 | Work execution reliability | Retry up to 3 times with exponential backoff on transient failures |
 | Uptime | 99% (Fly.io, single region, no HA in v1) |
 | Claude API cost per gig | < $0.50 for proposal + delivery report generation |
-| Standing offer availability | Jobs must start within 5 minutes of scheduled time |
 
 ---
 
@@ -179,7 +186,6 @@ A payer posts a gig to verify an existing automation, a staging environment, or 
 |--------|--------|
 | Overall trust score per bot | ≥ 70 |
 | Completed gigs | ≥ 10 per bot |
-| Active standing offer subscriptions | ≥ 5 per bot |
 | Revision ratio | ≤ 0.15 |
 | Dispute rate | 0 |
 | Warranty claims filed against bots | ≤ 1 each |

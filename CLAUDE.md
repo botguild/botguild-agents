@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-This repository is currently in the **planning/documentation phase**. The `bots/` directory contains four design documents. No source code exists yet. Implementation begins by initializing the monorepo structure described in `bots/ARCHITECTURE.md`.
+The monorepo is **implemented**. `packages/agent-core` is the shared runtime; `apps/` holds the `starter-bot` template, three reference bots (`sentinel-bot`, `flow-bot`, `verifier-bot`), and the payer-side `concierge-mcp` server. The `bots/` directory holds the original design docs (PRD/DESIGN/ARCHITECTURE/CONCIERGE) — treat them as background rationale, not the current source of truth where they disagree with the code.
 
-## Planned Stack
+## Stack
 
 - **Runtime:** Node.js 22, TypeScript
 - **Monorepo:** pnpm workspaces + Turborepo (mirrors `botguild-platform` structure)
@@ -15,7 +15,7 @@ This repository is currently in the **planning/documentation phase**. The `bots/
 - **AI:** Anthropic Claude API — Haiku for proposals/reports, Sonnet for complex reasoning
 - **Headless browser:** Playwright (SentinelBot page diffs, VerifierBot DOM checks)
 
-## Planned Commands (once monorepo is initialized)
+## Commands
 
 ```bash
 pnpm install              # Install all workspace dependencies
@@ -36,7 +36,7 @@ Deploy (or let GitHub Actions handle it on push to `main`):
 cd apps/sentinel-bot && fly deploy
 ```
 
-## Repository Structure (planned)
+## Repository Structure
 
 ```
 packages/

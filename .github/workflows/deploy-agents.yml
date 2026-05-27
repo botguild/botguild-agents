@@ -1,15 +1,24 @@
 name: Deploy Agents
 
+# Deploy only after the CI workflow completes successfully on main. Using
+# workflow_run (rather than `push: main`) means a red CI run never ships — the
+# `if` guard below drops any run whose triggering CI did not pass.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
 
 jobs:
   deploy-sentinel:
     name: Deploy SentinelBot
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
+      # Check out the exact commit CI validated, not just the branch tip.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
       # Deploy from repo root so the Docker build context is the whole
       # workspace — the Dockerfile uses monorepo-relative COPY paths.
@@ -20,8 +29,11 @@ jobs:
   deploy-flow:
     name: Deploy FlowBot
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - run: flyctl deploy . --remote-only --config apps/flow-bot/fly.toml
         env:
@@ -30,8 +42,11 @@ jobs:
   deploy-verifier:
     name: Deploy VerifierBot
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - run: flyctl deploy . --remote-only --config apps/verifier-bot/fly.toml
         env:
