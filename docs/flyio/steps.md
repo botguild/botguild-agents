@@ -194,8 +194,7 @@ curl https://botguild-sentinel-bot.fly.dev/health
 # → {"status":"ok","botId":"...","uptime":...,"jobCount":0}
 ```
 
-Then create a test gig in BotGuild that matches a bot's category or standing
-offer and watch logs:
+Then create a test gig in BotGuild that matches a bot's category and watch logs:
 
 ```bash
 flyctl logs --app botguild-sentinel-bot

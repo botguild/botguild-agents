@@ -1,7 +1,9 @@
 # Story 3.1 — Decision doc: subscription adapter vs. discovery-only
 
-**Epic:** [3 — Reconcile Standing Offers](./roadmap.md)
+**Epic:** [3 — Standing Offers (dropped)](./roadmap.md)
 **Type:** Decision, not code. Blocks 3.2 and 3.3.
+
+> **Resolved (historical).** The decision below was made: **Option A — discovery-only**. Standing offers were dropped; `standing.ts`, per-bot `standingOffers` config, and `standinghandler.ts` were removed. Bots transact per-gig via upfront multi-milestone packages. Kept as the decision record.
 
 ## Problem
 

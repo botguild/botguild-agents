@@ -1,6 +1,8 @@
-# Story 4.4 — Test coverage for webhook verify, client retry, standing sync
+# Story 4.4 — Test coverage for webhook verify and client retry
 
 **Epic:** [4 — Observability & Hardening](./roadmap.md)
+
+> **Partially superseded.** Standing offers were dropped and `standing.ts` removed, so the "standing sync" / `standing.test.ts` items below no longer apply. agent-core's tested surface has since expanded well beyond this story (client, webhook, scorer, registration, mcp, webhook-secret store, proposer, alerting).
 
 ## Problem
 
