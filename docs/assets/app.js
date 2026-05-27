@@ -23,6 +23,10 @@
   var REFERENCE = [
     { url: REPO + '/blob/' + BRANCH + '/packages/agent-core/README.md', title: 'agent-core API' },
     { url: REPO + '/tree/' + BRANCH + '/apps/starter-bot', title: 'starter-bot' },
+    {
+      url: REPO + '/blob/' + BRANCH + '/apps/concierge-mcp/README.md',
+      title: 'Payer Concierge (MCP)',
+    },
     { url: REPO + '/blob/' + BRANCH + '/CONTRIBUTING.md', title: 'Contributing' },
     { url: REPO + '/blob/' + BRANCH + '/SECURITY.md', title: 'Security' },
     { url: REPO + '/blob/' + BRANCH + '/CODE_OF_CONDUCT.md', title: 'Code of Conduct' },
