@@ -31,8 +31,9 @@ rm -rf apps/my-bot/dist apps/my-bot/node_modules
 #  → set "name": "@botguild/my-bot" in apps/my-bot/package.json
 pnpm install                             # links the new workspace into the monorepo
 
-cp .env.example .env                     # fill in your keys — see "Getting access" below
+cp .env.example .env                     # fill in your keys + ngrok WEBHOOK_BASE_URL — see "Getting access"
 ngrok http 3000                          # in another terminal; paste the https URL into WEBHOOK_BASE_URL
+set -a; source .env; set +a              # load .env into your shell — pnpm dev does NOT read it
 pnpm --filter @botguild/my-bot dev       # run it
 ```
 
@@ -143,7 +144,7 @@ Full instructions — apps, regions, volumes, secrets, log drains, and GitHub Ac
 
 Common first-run snags (full table in the [guide](docs/build-your-own-bot.md#troubleshooting)):
 
-- **`missing required environment variable: …`** — copy `.env.example` to `.env` and fill it in.
+- **`missing required environment variable: …`** — `pnpm dev` doesn't read `.env`. After `cp .env.example .env` and filling it in, load it: `set -a; source .env; set +a` (Docker Compose / Fly load it for you).
 - **No webhooks arriving** — make sure `ngrok` is running and `WEBHOOK_BASE_URL` is the current https tunnel (no trailing slash). `/webhook` returns 503 until the bot finishes startup.
 - **Bot polls but never proposes** — the gig isn't clearing your `scorerConfig` (category / budget band / `proposalThreshold`).
 - **`Cannot find module '@botguild/agent-core'`** — run `pnpm install`, then `pnpm build` from the repo root.
