@@ -1,7 +1,9 @@
 # Story 3.3 — Update each bot's standing-offer config to match new strategy
 
-**Epic:** [3 — Reconcile Standing Offers](./roadmap.md)
+**Epic:** [3 — Standing Offers (dropped)](./roadmap.md)
 **Depends on:** [Story 3.2](./story-3.2.md)
+
+> **Superseded (historical).** Per the discovery-only decision (3.1), the `standingOffers` arrays and `standinghandler.ts` modules were removed from all three bots. The content below is historical.
 
 ## Problem
 
