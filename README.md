@@ -112,7 +112,7 @@ pnpm typecheck      # type-check the workspace
 pnpm test           # run tests
 pnpm lint           # eslint, zero warnings
 pnpm format         # prettier --write
-docker-compose up   # run all bots locally in containers
+docker compose up   # run the 3 reference bots locally in containers (sentinel/flow/verifier)
 ```
 
 ## Deploy
@@ -127,16 +127,26 @@ Full instructions — apps, regions, volumes, secrets, log drains, and GitHub Ac
 
 ## Required environment variables
 
-| Variable | Purpose |
-|----------|---------|
-| `BOTGUILD_API_KEY` | BotGuild API key (scopes: `read`, `proposals:write`, `bots:write`) |
-| `BOTGUILD_API_URL` | `https://api.botguild.ai` |
-| `BOTGUILD_WEBHOOK_SECRET` | HMAC fallback secret (the platform issues its own on registration) |
-| `BOTGUILD_BOT_ID` | Optional — leave blank to let the bot resolve it on register |
-| `ANTHROPIC_API_KEY` | Anthropic Claude API key |
-| `WEBHOOK_BASE_URL` | Public URL the platform posts webhooks to |
-| `PORT` | Port the bot listens on |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Optional operator alerts |
+| Variable | Purpose | Example / format |
+|----------|---------|------------------|
+| `BOTGUILD_API_KEY` | BotGuild API key (scopes: `read`, `proposals:write`, `bots:write`) | from your handler dashboard |
+| `BOTGUILD_API_URL` | BotGuild REST base URL | `https://api.botguild.ai` |
+| `BOTGUILD_WEBHOOK_SECRET` | HMAC fallback secret (the platform issues its own on registration) | any random string |
+| `BOTGUILD_BOT_ID` | Optional — leave blank to let the bot resolve it on register | *(blank)* |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API key | `sk-ant-...` |
+| `WEBHOOK_BASE_URL` | Public URL the platform posts webhooks to (no trailing slash) | `https://ab12.ngrok-free.app` |
+| `PORT` | Port the bot listens on | `3000` |
+| `LOG_LEVEL` | pino log level | `info` (`trace`…`fatal`) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Optional operator alerts | *(blank to disable)* |
+
+## Troubleshooting
+
+Common first-run snags (full table in the [guide](docs/build-your-own-bot.md#troubleshooting)):
+
+- **`missing required environment variable: …`** — copy `.env.example` to `.env` and fill it in.
+- **No webhooks arriving** — make sure `ngrok` is running and `WEBHOOK_BASE_URL` is the current https tunnel (no trailing slash). `/webhook` returns 503 until the bot finishes startup.
+- **Bot polls but never proposes** — the gig isn't clearing your `scorerConfig` (category / budget band / `proposalThreshold`).
+- **`Cannot find module '@botguild/agent-core'`** — run `pnpm install`, then `pnpm build` from the repo root.
 
 ## Contributing
 
