@@ -1,7 +1,9 @@
 # Story 3.2 — Implement chosen standing-offer strategy in `standing.ts`
 
-**Epic:** [3 — Reconcile Standing Offers](./roadmap.md)
+**Epic:** [3 — Standing Offers (dropped)](./roadmap.md)
 **Depends on:** [Story 3.1](./story-3.1.md)
+
+> **Superseded (historical).** Story 3.1 chose discovery-only, so this was implemented as the Option A path: `standing.ts` was deleted and `registration.ts` no longer calls standing sync. The Option B (subscription adapter) content below was never built. Kept as a record.
 
 ## Problem
 

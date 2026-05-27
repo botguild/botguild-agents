@@ -29,15 +29,15 @@ Platform now publishes a typed SDK (`@botguild/sdk@0.1.0`) on npm with REST clie
 | [2.3](./story-2.3.md) | Replace `webhook.ts` with SDK's `handleWebhookRequest` |
 | [2.4](./story-2.4.md) | Add MCP client wrapper for warranty + dispute flows |
 
-## Epic 3 — Reconcile Standing Offers
+## Epic 3 — Standing Offers (resolved: dropped)
 
-Bots model upfront multi-milestone packages; platform expects subscription pricing (`monthly | weekly | per-use`). Blockchain escrow is one-shot, so even with the platform schema in place, no money will move on a recurring schedule — a subscription period would have to terminate in a fresh one-shot escrow each time. Decision needed before code change.
+**Resolved — standing offers were dropped.** Blockchain escrow on BotGuild is one-shot, so money cannot move on a recurring schedule. Story 3.1 chose **discovery-only** (Option A): bots advertise solely by posting and responding to gigs, transacting per-gig as upfront multi-milestone packages. `standing.ts`, the per-bot `standingOffers` config, and the `standinghandler.ts` modules were removed; there is no subscription handling. The stories below are kept as the decision record.
 
-| Story | Title |
-|-------|-------|
-| [3.1](./story-3.1.md) | Decision doc: subscription adapter vs. discovery-only |
-| [3.2](./story-3.2.md) | Implement chosen standing-offer strategy in `standing.ts` |
-| [3.3](./story-3.3.md) | Update each bot's standing-offer config to match new strategy |
+| Story | Title | Outcome |
+|-------|-------|---------|
+| [3.1](./story-3.1.md) | Decision doc: subscription adapter vs. discovery-only | Chose discovery-only |
+| [3.2](./story-3.2.md) | Strategy in `standing.ts` | `standing.ts` removed |
+| [3.3](./story-3.3.md) | Per-bot standing-offer config | Configs + handlers removed |
 
 ## Epic 4 — Observability & Hardening
 
@@ -48,7 +48,7 @@ Once compatibility is restored, close gaps that make production debugging hard.
 | [4.1](./story-4.1.md) | Add `jobCount` and last-webhook timestamp to `/health` |
 | [4.2](./story-4.2.md) | Surface bot reputation in startup alerts |
 | [4.3](./story-4.3.md) | Monitor webhook deliveries and alert on dead-letters |
-| [4.4](./story-4.4.md) | Test coverage for webhook verify, client retry, standing sync |
+| [4.4](./story-4.4.md) | Test coverage for webhook verify and client retry |
 
 ---
 
@@ -56,5 +56,5 @@ Once compatibility is restored, close gaps that make production debugging hard.
 
 - **Epic 1 must land before Epic 2.** Otherwise we don't know whether breakage came from the SDK swap or from preexisting drift.
 - **Epic 2 can land incrementally** (one story per PR), with the hand-rolled client kept until story 2.2 replaces it.
-- **Epic 3 is blocked on a product decision** (story 3.1), not on engineering. Park it until the decision is made.
+- **Epic 3 is resolved** — the product decision (story 3.1) was discovery-only, and the standing-offer code has been removed. Kept as a record.
 - **Epic 4 is independent** and can be picked up in parallel by anyone.
