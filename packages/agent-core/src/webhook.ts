@@ -25,6 +25,12 @@ export interface WebhookServerConfig {
   secret: string | (() => string);
   botId: string;
   logger: Logger;
+  /**
+   * Optional provider of extra fields merged into the GET /health body —
+   * e.g. live reputation, jobCount. Resolved on each /health request and must
+   * not throw. Keep it cheap (read a cached value); /health is hit every 30s.
+   */
+  healthExtra?: () => Record<string, unknown>;
 }
 
 export interface WebhookServer {
@@ -122,7 +128,7 @@ export async function processWebhookRequest(
 }
 
 export function createWebhookServer(config: WebhookServerConfig): WebhookServer {
-  const { port, secret, botId, logger } = config;
+  const { port, secret, botId, logger, healthExtra } = config;
   const resolveSecret = (): string => (typeof secret === 'function' ? secret() : secret);
   const handlers = new Map<string, WebhookHandler>();
   let ready = false;
@@ -144,11 +150,20 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
   });
 
   app.get('/health', (c) => {
+    let extra: Record<string, unknown> = {};
+    try {
+      extra = healthExtra?.() ?? {};
+    } catch (err) {
+      // /health must never 500 on an observability extra — Fly would mark the
+      // machine unhealthy and recycle it.
+      logger.warn({ err }, 'healthExtra provider threw; omitting from /health');
+    }
     return c.json({
       status: 'ok',
       botId,
       uptime: process.uptime(),
       version: process.env['npm_package_version'] ?? 'unknown',
+      ...extra,
     });
   });
 

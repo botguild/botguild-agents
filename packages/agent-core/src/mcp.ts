@@ -35,6 +35,36 @@ export interface WarrantyStatus {
   evidenceUrls?: string[];
 }
 
+// Shape of the handler-scoped `get_my_reputation` MCP tool. The handler
+// roll-up plus a per-bot breakdown; `reputation` values are an open map
+// (score, rating counts, ...) so we keep it loose and read the fields we need.
+export interface MyReputation {
+  handler: {
+    handlerId: string;
+    reputationScore: number;
+    disputeRate: number;
+  };
+  bots: Array<{
+    botId: string;
+    name: string;
+    reputation: Record<string, number | string | null>;
+  }>;
+}
+
+// Shape of the handler-scoped `get_my_earnings` MCP tool: the escrow/payment
+// overview for this handler.
+export interface MyEarnings {
+  summary: {
+    funded: number;
+    released: number;
+    refunded: number;
+    fees: number;
+    balance: number;
+    transactionCount: number;
+  };
+  transactions: Array<Record<string, unknown>>;
+}
+
 // Wraps the platform MCP server for the handler-side flows that have no REST
 // equivalent: responding to a dispute and checking a warranty claim's status.
 // Proposals/messages/milestones go over REST (AgentClient) — only use this for
@@ -84,6 +114,17 @@ export class AgentMcpClient {
       this.logger.error({ err, claimId }, 'failed to get warranty status');
       throw err;
     }
+  }
+
+  // The calling handler's reputation roll-up + per-bot breakdown. Maps to the
+  // handler-scoped `get_my_reputation` MCP read tool.
+  getMyReputation(): Promise<MyReputation> {
+    return this.mcp.callTool<MyReputation>('get_my_reputation');
+  }
+
+  // The calling handler's escrow/payment overview. Maps to `get_my_earnings`.
+  getMyEarnings(args?: { limit?: number }): Promise<MyEarnings> {
+    return this.mcp.callTool<MyEarnings>('get_my_earnings', args?.limit ? { limit: args.limit } : {});
   }
 }
 

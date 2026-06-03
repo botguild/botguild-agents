@@ -13,6 +13,11 @@ import {
   saveWebhookSecret,
   AgentMcpClient,
   handleDisputedContract,
+  createReputationMonitor,
+  createNegotiationMemory,
+  createNegotiationPoller,
+  logContractReview,
+  type ReputationMonitor,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -84,11 +89,19 @@ async function main(): Promise<void> {
   // until webhookServer.markReady() is called (after handler registration),
   // /webhook returns 503 so the platform retries any in-flight deliveries
   // instead of recording them as successfully delivered to an unprepared bot.
+  // Reputation is surfaced on /health once the monitor is wired (after the MCP
+  // client exists). healthExtra is resolved per-request, so this getter reads
+  // whatever the monitor has cached — null until the first refresh.
+  let repMonitor: ReputationMonitor | null = null;
   const webhookServer = createWebhookServer({
     port,
     secret: () => activeSecret,
     botId: botId || 'pending',
     logger,
+    healthExtra: () => {
+      const snap = repMonitor?.snapshot();
+      return snap ? { reputation: snap } : {};
+    },
   });
   await webhookServer.start();
 
@@ -111,6 +124,21 @@ async function main(): Promise<void> {
   // Build the API client
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
   const mcpClient = new AgentMcpClient({ apiUrl, apiKey, logger });
+
+  // Periodically pull handler reputation/earnings; reputation feeds /health,
+  // earnings go to logs. Reputation (70+) is a launch success target.
+  repMonitor = createReputationMonitor({ source: mcpClient, logger });
+
+  // Counter-offers have no webhook event, so poll pending proposals and respond
+  // per policy: accept at/above our deterministic floor, else counter back once
+  // at our firm price, else decline. The memory file makes "counter once" stick
+  // across restarts.
+  const negotiationPoller = createNegotiationPoller({
+    client,
+    pricingCalc,
+    memory: createNegotiationMemory(),
+    logger,
+  });
 
   // Ensure webhook registration. When the platform issues a fresh secret
   // (i.e. we hit POST /webhooks), capture and persist it.
@@ -391,7 +419,13 @@ async function main(): Promise<void> {
   });
 
   webhookServer.on('milestone.accepted', async (event) => {
+    const { contractId } = event.payload as { contractId?: string };
     logger.info({ payload: event.payload }, 'milestone accepted');
+    // A payer may leave a review once the contract reaches acceptance. Log the
+    // reputation signal we received (read-only; payers write reviews).
+    if (contractId) {
+      await logContractReview({ client, contractId, logger });
+    }
   });
 
   webhookServer.on('acceptance.auto_approved', async (event) => {
@@ -462,6 +496,8 @@ async function main(): Promise<void> {
 
   // Start gig poller (webhook server was bound at the top of main())
   poller.start();
+  negotiationPoller.start();
+  repMonitor.start();
 
   logger.info({ botId: effectiveBotId, port }, 'FlowBot started');
   await alerter?.sendStartupAlert('FlowBot', effectiveBotId);
@@ -470,6 +506,8 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'shutdown signal received');
     poller.stop();
+    negotiationPoller.stop();
+    repMonitor?.stop();
     await webhookServer.stop();
     logger.info('FlowBot stopped');
     process.exit(0);
