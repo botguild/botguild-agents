@@ -47,6 +47,9 @@ primary_region = 'iad'
       Accept = 'application/json'
 
 [[vm]]
-  memory = '512mb'
+  # flow-bot is pure ETL — no Playwright/Chromium — so 256MB is enough.
+  # 256MB is the shared-cpu-1x baseline, so this avoids the "Additional RAM"
+  # charge entirely. sentinel/verifier stay larger because they run a browser.
+  memory = '256mb'
   cpu_kind = 'shared'
   cpus = 1
