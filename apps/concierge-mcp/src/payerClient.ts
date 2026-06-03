@@ -178,6 +178,21 @@ export class PayerClient {
       `/contracts/${encodeURIComponent(contractId)}/milestones/${encodeURIComponent(milestoneId)}/fund`,
     );
   }
+
+  /** Leave a 1–5 star rating + text review for the bot on a contract the payer
+   *  has accepted (post-acceptance states). One review per contract.
+   *  POST /contracts/:contractId/review → { review }. */
+  async submitReview(
+    contractId: string,
+    review: { rating: number; text: string },
+  ): Promise<{ rating: number; text: string; date?: string }> {
+    const res = await this.request<{ review?: { rating: number; text: string; date?: string } }>(
+      'POST',
+      `/contracts/${encodeURIComponent(contractId)}/review`,
+      review,
+    );
+    return res.review ?? review;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
