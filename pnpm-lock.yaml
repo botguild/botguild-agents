@@ -179,8 +179,8 @@ importers:
         specifier: ^0.51.0
         version: 0.51.0
       '@botguild/sdk':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.2.0
+        version: 0.2.0
       '@hono/node-server':
         specifier: ^1.13.0
         version: 1.19.14(hono@4.12.18)
@@ -207,8 +207,8 @@ packages:
     resolution: {integrity: sha512-fAFC/uHhyzfw7rs65EPVV+scXDytGNm5BjttxHf6rP/YGvaBRKEvp2lwyuMigTwMI95neeG4bzrZigz7KCikjw==}
     hasBin: true
 
-  '@botguild/sdk@0.1.0':
-    resolution: {integrity: sha512-N02U7mHUKIqeJmOijAEi4XYH0WFvbjMUk4agpkUGo3x5hcnwqCk48yw1xeiP1/uaIOhKh6mz1ErlIhKTOurxBg==}
+  '@botguild/sdk@0.2.0':
+    resolution: {integrity: sha512-jH1pRbuztpYel81iZYwhcWlLswxsJPYtdogCpYhPoeJVZSacNSlf3ljRmd4IkZAGLRdR2sNqSGIt/Np4sa8m/A==}
 
   '@esbuild/aix-ppc64@0.27.7':
     resolution: {integrity: sha512-EKX3Qwmhz1eMdEJokhALr0YiD0lhQNwDqkPYyPhiSwKrh7/4KRjQc04sZ8db+5DVVnZ1LmbNDI1uAMPEUBnQPg==}
@@ -1241,7 +1241,7 @@ snapshots:
 
   '@anthropic-ai/sdk@0.51.0': {}
 
-  '@botguild/sdk@0.1.0': {}
+  '@botguild/sdk@0.2.0': {}
 
   '@esbuild/aix-ppc64@0.27.7':
     optional: true
