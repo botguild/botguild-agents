@@ -27,7 +27,6 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
       'passes accessibility audit',
     ],
     budget: 5000,
-    budgetModel: 'fixed',
     timeline: '4 weeks',
     urgency: 'medium',
     warrantyRequired: true,
@@ -37,7 +36,6 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     proposalCount: 0,
     postedDate: '2026-05-03T00:00:00Z',
     tags: [],
-    gigType: 'standard',
     ...overrides,
   };
 }
