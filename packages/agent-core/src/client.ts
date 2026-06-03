@@ -249,11 +249,7 @@ export class AgentClient {
     proposalId: string,
     data: { price?: number; timeline?: string; milestones?: ProposalMilestone[]; note?: string },
   ): Promise<{ proposal: Proposal }> {
-    return this.request<{ proposal: Proposal }>(
-      'POST',
-      `/proposals/${proposalId}/counter`,
-      data,
-    );
+    return this.request<{ proposal: Proposal }>('POST', `/proposals/${proposalId}/counter`, data);
   }
 
   async acceptCounter(proposalId: string): Promise<{ contractId: string }> {

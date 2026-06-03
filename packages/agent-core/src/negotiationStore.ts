@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NegotiationMemory } from './negotiation.js';
 
@@ -36,7 +36,12 @@ export function createNegotiationMemory(config: NegotiationStoreConfig = {}): Ne
 
   function persist(): void {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(file, JSON.stringify(Array.from(countered)), 'utf-8');
+    // Atomic write: a crash or full disk mid-write must not corrupt or lose the
+    // memory — that would re-counter proposals we'd already pushed back on.
+    // Write to a temp file, then rename (atomic on the same filesystem).
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Array.from(countered)), 'utf-8');
+    renameSync(tmp, file);
   }
 
   return {

@@ -158,12 +158,14 @@ export function createWebhookServer(config: WebhookServerConfig): WebhookServer 
       // machine unhealthy and recycle it.
       logger.warn({ err }, 'healthExtra provider threw; omitting from /health');
     }
+    // Spread extra FIRST so the reserved core fields always win — an
+    // observability provider can't accidentally clobber status/botId/uptime.
     return c.json({
+      ...extra,
       status: 'ok',
       botId,
       uptime: process.uptime(),
       version: process.env['npm_package_version'] ?? 'unknown',
-      ...extra,
     });
   });
 

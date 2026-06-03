@@ -14,19 +14,31 @@ const silentLogger = pino({ level: 'silent' });
 // --- decideCounter (pure policy) -------------------------------------------
 
 test('decideCounter accepts a counter at the floor', () => {
-  assert.equal(decideCounter({ counterPrice: 1000, floorPrice: 1000, alreadyCountered: false }), 'accept');
+  assert.equal(
+    decideCounter({ counterPrice: 1000, floorPrice: 1000, alreadyCountered: false }),
+    'accept',
+  );
 });
 
 test('decideCounter accepts a counter above the floor', () => {
-  assert.equal(decideCounter({ counterPrice: 1200, floorPrice: 1000, alreadyCountered: false }), 'accept');
+  assert.equal(
+    decideCounter({ counterPrice: 1200, floorPrice: 1000, alreadyCountered: false }),
+    'accept',
+  );
 });
 
 test('decideCounter counters back once when below floor and not yet countered', () => {
-  assert.equal(decideCounter({ counterPrice: 800, floorPrice: 1000, alreadyCountered: false }), 'counter');
+  assert.equal(
+    decideCounter({ counterPrice: 800, floorPrice: 1000, alreadyCountered: false }),
+    'counter',
+  );
 });
 
 test('decideCounter declines a repeat below-floor counter once we already countered', () => {
-  assert.equal(decideCounter({ counterPrice: 800, floorPrice: 1000, alreadyCountered: true }), 'decline');
+  assert.equal(
+    decideCounter({ counterPrice: 800, floorPrice: 1000, alreadyCountered: true }),
+    'decline',
+  );
 });
 
 // --- handleCounterOffers (orchestration over a stub client) -----------------
@@ -50,10 +62,7 @@ interface Recorder {
   declined: string[];
 }
 
-function stubClient(
-  proposals: Proposal[],
-  rec: Recorder,
-): HandleCounterOffersConfig['client'] {
+function stubClient(proposals: Proposal[], rec: Recorder): HandleCounterOffersConfig['client'] {
   return {
     async listProposals() {
       return proposals;

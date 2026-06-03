@@ -124,7 +124,10 @@ export class AgentMcpClient {
 
   // The calling handler's escrow/payment overview. Maps to `get_my_earnings`.
   getMyEarnings(args?: { limit?: number }): Promise<MyEarnings> {
-    return this.mcp.callTool<MyEarnings>('get_my_earnings', args?.limit ? { limit: args.limit } : {});
+    return this.mcp.callTool<MyEarnings>(
+      'get_my_earnings',
+      args?.limit !== undefined ? { limit: args.limit } : {},
+    );
   }
 }
 

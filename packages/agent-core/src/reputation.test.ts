@@ -71,5 +71,9 @@ test('refresh never throws when earnings read fails', async () => {
     logger: silentLogger,
   });
   await monitor.refresh();
-  assert.equal(monitor.snapshot()?.reputationScore, 72, 'reputation still captured despite earnings failure');
+  assert.equal(
+    monitor.snapshot()?.reputationScore,
+    72,
+    'reputation still captured despite earnings failure',
+  );
 });

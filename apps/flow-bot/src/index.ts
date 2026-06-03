@@ -422,9 +422,11 @@ async function main(): Promise<void> {
     const { contractId } = event.payload as { contractId?: string };
     logger.info({ payload: event.payload }, 'milestone accepted');
     // A payer may leave a review once the contract reaches acceptance. Log the
-    // reputation signal we received (read-only; payers write reviews).
+    // reputation signal we received (read-only; payers write reviews). Fire and
+    // forget — it's best-effort observability and never throws, so don't hold
+    // the webhook response open on a REST round-trip.
     if (contractId) {
-      await logContractReview({ client, contractId, logger });
+      void logContractReview({ client, contractId, logger });
     }
   });
 

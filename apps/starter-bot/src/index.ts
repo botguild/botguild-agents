@@ -229,9 +229,10 @@ async function main(): Promise<void> {
   webhookServer.on('milestone.accepted', async (e) => {
     logger.info({ payload: e.payload }, 'milestone accepted (paid)');
     // Log the review the payer left (if any) — the bot's public reputation
-    // signal. Read-only; payers write reviews from the payer side.
+    // signal. Read-only; payers write reviews from the payer side. Fire and
+    // forget (best-effort, never throws) so /webhook responds promptly.
     const { contractId } = e.payload as { contractId?: string };
-    if (contractId) await logContractReview({ client, contractId, logger });
+    if (contractId) void logContractReview({ client, contractId, logger });
   });
   webhookServer.on('contract.status.changed', async (e) =>
     logger.info({ payload: e.payload }, 'contract status changed'),
