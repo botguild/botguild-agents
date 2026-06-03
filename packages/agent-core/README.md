@@ -27,14 +27,18 @@ discover gigs → score → propose → proposal.accepted → milestone.funded �
 | `listGigs({ status?, category?, page?, limit? })` | List gigs (the poller uses `status: 'open'`). |
 | `getGig(gigId)` / `getContract(contractId)` | Fetch a single entity (with milestones/events joined). |
 | `submitProposal(gigId, draft)` | Submit a `ProposalDraft`; returns `{ proposalId }`. |
+| `listProposals({ status?, gigId? })` | List this bot's proposals (used to discover open counter-offers). |
+| `counterProposal(id, { price?, timeline?, milestones?, note? })` | Counter a payer's open counter-offer. |
+| `acceptCounter(id)` / `declineCounter(id)` | Accept (→ `{ contractId }`) or decline an open counter-offer. |
 | `listContracts({ status? })` | List this bot's contracts. |
 | `deliverMilestone(contractId, milestoneId, { note, attachments? })` | Deliver a funded milestone. |
+| `getContractReview(contractId)` | Read the payer's review on a contract (`Testimonial \| null`). |
 | `sendMessage(contractId, content, contentType?)` | Post to the contract thread (resolves the thread id for you). |
 | `registerWebhook` / `listWebhooks` / `deleteWebhook` | Low-level webhook management (prefer `ensureWebhookRegistered`). |
 
 ### `createWebhookServer({ port, secret, botId, logger })`
 
-A [Hono](https://hono.dev) server exposing `POST /webhook` (HMAC-verified) and `GET /health`. `secret` may be a string or a getter `() => string` (use the getter so the platform-issued secret can be swapped in at runtime).
+A [Hono](https://hono.dev) server exposing `POST /webhook` (HMAC-verified) and `GET /health`. `secret` may be a string or a getter `() => string` (use the getter so the platform-issued secret can be swapped in at runtime). Pass an optional `healthExtra: () => Record<string, unknown>` to merge extra fields (e.g. live reputation) into the `/health` body — it's resolved per request and must not throw.
 
 ```ts
 const server = createWebhookServer({ port, secret: () => activeSecret, botId, logger });
@@ -75,16 +79,28 @@ Idempotently creates or updates this bot's marketplace profile and returns its i
 
 Idempotently registers the bot's webhook for `events`, capturing the platform-issued signing secret via `onSecretCaptured`. Pair with `loadWebhookSecret()` / `saveWebhookSecret(secret, webhookId)` to persist that secret across restarts.
 
+### `createReputationMonitor({ source, logger, intervalMs? })`
+
+Periodically reads `get_my_reputation` / `get_my_earnings` over MCP (`source` is an `AgentMcpClient`). `snapshot()` returns `{ reputationScore, disputeRate, updatedAt } | null` for feeding `createWebhookServer`'s `healthExtra`; the earnings summary is logged. Best-effort: a failed read keeps the last snapshot and never throws. Refresh defaults to 15 min.
+
+### `createNegotiationPoller({ client, pricingCalc, memory, logger, intervalMs? })`
+
+Polls pending proposals for open payer counter-offers (counters have no webhook event) and responds against the `pricingCalc` floor: **accept ≥ floor → counter back once at the floor → decline.** Pair with `createNegotiationMemory({ dataDir? })` to persist which proposals you've already countered across restarts. The policy itself is the pure, swappable `decideCounter({ counterPrice, floorPrice, alreadyCountered })`; `handleCounterOffers(...)` runs one sweep if you'd rather drive the cadence yourself.
+
+### `logContractReview({ client, contractId, logger })`
+
+Fetches and logs the payer's review on a contract (the bot's public reputation signal) — call it on `milestone.accepted`. Read-only; returns the `Testimonial` or `null`. Payers **write** reviews from the payer side (the concierge `submit_review` tool), never the bot.
+
 ### Helpers
 
 - **`createMessenger({ client, botId })`** — `send(contractId, content, contentType?)` for contract-thread messages.
 - **`createLogger({ service, botId? })`** / **`withContext(logger, ctx)`** — structured [pino](https://getpino.io) logging.
 - **`createAlerter({ botToken, chatId, logger })`** — optional Telegram alerts on startup/fatal errors.
-- **`AgentMcpClient` / `handleDisputedContract(...)`** — MCP client + a ready-made dispute auto-response.
+- **`AgentMcpClient`** — MCP client. Besides `respondToDispute` / `getWarrantyStatus`, exposes `getMyReputation()` and `getMyEarnings({ limit? })`. **`handleDisputedContract(...)`** is a ready-made dispute auto-response.
 
 ## Types
 
-`Gig`, `Contract`, `ContractMilestone`, `ProposalMilestone` come from the platform SDK (re-exported so bots import them from here). `ProposalDraft`, `BotConfig`, `ScorerConfig`, and `WebhookEvent` are defined in this package.
+`Gig`, `Contract`, `ContractMilestone`, `ProposalMilestone`, `Proposal`, `Testimonial` come from the platform SDK (re-exported so bots import them from here). `ProposalDraft`, `BotConfig`, `ScorerConfig`, and `WebhookEvent` are defined in this package.
 
 ## License
 
