@@ -1,13 +1,20 @@
 import type { Logger } from 'pino';
 import { mapKeysToCamel } from '@botguild/sdk';
-import type { Gig, Contract, ContractMilestone, ProposalMilestone } from '@botguild/sdk';
+import type {
+  Gig,
+  Contract,
+  ContractMilestone,
+  ProposalMilestone,
+  Proposal,
+  Testimonial,
+} from '@botguild/sdk';
 
 // Entity shapes are owned by the platform SDK so they can't drift from the
 // live API. Re-export them so bot code imports from '@botguild/agent-core'
 // and never reaches into the SDK directly (keeps the SDK swappable). Types
 // with no SDK equivalent (ProposalDraft, WebhookRegistration) stay defined
 // here.
-export type { Gig, Contract, ContractMilestone, ProposalMilestone };
+export type { Gig, Contract, ContractMilestone, ProposalMilestone, Proposal, Testimonial };
 
 export interface ProposalDraft {
   price: number;
@@ -216,6 +223,58 @@ export class AgentClient {
       ...draft,
     });
     return { proposalId: res.proposal.id };
+  }
+
+  // List this bot's proposals. Scoped to our own botId server-side; pass a
+  // status to narrow (e.g. 'pending' to surface open counter-offers). Used by
+  // the negotiation poller — counter-offers have no webhook event, so they're
+  // discovered by polling pending proposals for negotiationStatus==='countered'.
+  async listProposals(params?: { status?: string; gigId?: string }): Promise<Proposal[]> {
+    const query = new URLSearchParams({ botId: this.botId });
+    if (params?.status) query.set('status', params.status);
+    if (params?.gigId) query.set('gigId', params.gigId);
+    const res = await this.request<{ proposals?: Proposal[] }>(
+      'GET',
+      `/proposals?${query.toString()}`,
+    );
+    return res.proposals ?? [];
+  }
+
+  // Respond to a payer's open counter-offer. Turn-based: only the side that did
+  // NOT make the open offer may act. counter() makes a fresh counter-offer back
+  // (flips the turn to the payer); accept() takes the payer's terms and creates
+  // a draft contract; decline() clears the counter and leaves the original
+  // proposal pending.
+  counterProposal(
+    proposalId: string,
+    data: { price?: number; timeline?: string; milestones?: ProposalMilestone[]; note?: string },
+  ): Promise<{ proposal: Proposal }> {
+    return this.request<{ proposal: Proposal }>('POST', `/proposals/${proposalId}/counter`, data);
+  }
+
+  async acceptCounter(proposalId: string): Promise<{ contractId: string }> {
+    const res = await this.request<{ contractId: string }>(
+      'POST',
+      `/proposals/${proposalId}/counter/accept`,
+      {},
+    );
+    return { contractId: res.contractId };
+  }
+
+  declineCounter(proposalId: string): Promise<void> {
+    return this.request<void>('POST', `/proposals/${proposalId}/counter/decline`, {});
+  }
+
+  // Read the review a payer left on a contract (1–5 stars + text), once the
+  // contract reaches a post-acceptance state. Returns null when no review has
+  // been left yet. Payers WRITE reviews via the concierge (payer-side); bots
+  // only read the reputation signal they received.
+  async getContractReview(contractId: string): Promise<Testimonial | null> {
+    const res = await this.request<{ review?: Testimonial | null }>(
+      'GET',
+      `/contracts/${contractId}/review`,
+    );
+    return res.review ?? null;
   }
 
   async listContracts(params?: { status?: string }): Promise<Contract[]> {

@@ -261,6 +261,43 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
     },
   );
 
+  // --- submit_review (write — gated) ---------------------------------------
+  server.registerTool(
+    'submit_review',
+    {
+      title: 'Review a bot',
+      description:
+        'Leave a 1–5 star rating and short written review for the bot on a contract the payer has accepted. This is public reputation that other payers see, so it only posts when confirm=true. Preview first (confirm omitted), show the payer the rating + text, then confirm. One review per contract.',
+      inputSchema: {
+        contractId: z.string().describe('Contract id the payer accepted'),
+        rating: z.number().int().min(1).max(5).describe('Star rating, 1 (worst) to 5 (best)'),
+        text: z.string().min(1).describe('Short written review the payer wants to leave'),
+        confirm: z
+          .boolean()
+          .optional()
+          .describe('Must be true to actually post the review. Omit/false = preview only.'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async ({ contractId, rating, text, confirm }): Promise<ToolResult> => {
+      if (!confirm) {
+        return ok(
+          `PREVIEW — nothing posted yet.\n\n` +
+            `Would post on contract ${contractId}:\n  Rating: ${'★'.repeat(rating)}${'☆'.repeat(5 - rating)} (${rating}/5)\n  Review: ${text}\n\n` +
+            `This is public reputation. → Confirm with the payer, then call again with confirm: true.`,
+        );
+      }
+      if (!ctx.payer) return fail('Cannot review: no BOTGUILD_API_KEY configured.');
+      try {
+        const res = await ctx.payer.submitReview(contractId, { rating, text });
+        ctx.logger.info({ contractId, rating: res.rating }, 'review submitted');
+        return ok(`Review posted ✅ ${res.rating}/5 on contract ${contractId}.`);
+      } catch (e) {
+        return fail(toErr('submit the review', e));
+      }
+    },
+  );
+
   // --- list_my_gigs --------------------------------------------------------
   server.registerTool(
     'list_my_gigs',

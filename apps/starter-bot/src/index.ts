@@ -12,10 +12,15 @@
 
 import {
   AgentClient,
+  AgentMcpClient,
   createGigPoller,
   createWebhookServer,
   createProposer,
   createMessenger,
+  createReputationMonitor,
+  createNegotiationMemory,
+  createNegotiationPoller,
+  logContractReview,
   registerBot,
   ensureWebhookRegistered,
   shouldPropose,
@@ -23,6 +28,7 @@ import {
   withContext,
   loadWebhookSecret,
   saveWebhookSecret,
+  type ReputationMonitor,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
@@ -60,11 +66,18 @@ async function main(): Promise<void> {
   // Bind the webhook server (and /health) BEFORE any external API calls so the
   // platform/Fly health checks succeed immediately. Handlers dispatch only
   // after markReady() — until then /webhook returns 503 and deliveries retry.
+  // repMonitor is wired after the MCP client exists; healthExtra resolves it
+  // per /health request and surfaces the bot's live reputation score.
+  let repMonitor: ReputationMonitor | null = null;
   const webhookServer = createWebhookServer({
     port,
     secret: () => activeSecret,
     botId: botId || 'pending',
     logger,
+    healthExtra: () => {
+      const snap = repMonitor?.snapshot();
+      return snap ? { reputation: snap } : {};
+    },
   });
   await webhookServer.start();
 
@@ -75,6 +88,22 @@ async function main(): Promise<void> {
 
   const client = new AgentClient({ apiUrl, apiKey, botId: effectiveBotId, logger });
   const messenger = createMessenger({ client, botId: effectiveBotId });
+  const mcpClient = new AgentMcpClient({ apiUrl, apiKey, logger });
+
+  // Reputation/earnings observability — reputation (70+ is a launch target)
+  // feeds /health; earnings go to logs.
+  repMonitor = createReputationMonitor({ source: mcpClient, logger });
+
+  // Counter-offers have no webhook event, so poll pending proposals and respond
+  // per policy: accept at/above our deterministic floor price, else counter
+  // back once at our firm price, else decline. The memory file makes "counter
+  // once" survive restarts.
+  const negotiationPoller = createNegotiationPoller({
+    client,
+    pricingCalc,
+    memory: createNegotiationMemory(),
+    logger,
+  });
 
   // Subscribe to the contract-lifecycle webhooks this bot reacts to.
   await ensureWebhookRegistered({
@@ -197,9 +226,14 @@ async function main(): Promise<void> {
   webhookServer.on('milestone.delivered', async (e) =>
     logger.info({ payload: e.payload }, 'milestone delivered'),
   );
-  webhookServer.on('milestone.accepted', async (e) =>
-    logger.info({ payload: e.payload }, 'milestone accepted (paid)'),
-  );
+  webhookServer.on('milestone.accepted', async (e) => {
+    logger.info({ payload: e.payload }, 'milestone accepted (paid)');
+    // Log the review the payer left (if any) — the bot's public reputation
+    // signal. Read-only; payers write reviews from the payer side. Fire and
+    // forget (best-effort, never throws) so /webhook responds promptly.
+    const { contractId } = e.payload as { contractId?: string };
+    if (contractId) void logContractReview({ client, contractId, logger });
+  });
   webhookServer.on('contract.status.changed', async (e) =>
     logger.info({ payload: e.payload }, 'contract status changed'),
   );
@@ -222,11 +256,15 @@ async function main(): Promise<void> {
 
   webhookServer.markReady(); // handlers wired — start dispatching deliveries
   poller.start();
+  negotiationPoller.start();
+  repMonitor.start();
   logger.info({ botId: effectiveBotId, port }, 'StarterBot started');
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'shutting down');
     poller.stop();
+    negotiationPoller.stop();
+    repMonitor?.stop();
     await webhookServer.stop();
     process.exit(0);
   };
