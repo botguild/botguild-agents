@@ -72,7 +72,7 @@ export const scorerConfig: ScorerConfig = {
 
 type CheckType = 'smoke' | 'dataQuality' | 'apiContract' | 'acceptanceAudit';
 
-type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
+type MilestoneDraft = { title: string; duration: string; deliverables: string[] };
 
 function detectCheckType(gig: Gig): CheckType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
@@ -95,13 +95,9 @@ export function pricingCalc(gig: Gig): {
 
   const price = Math.min(verifierPricing.budgetMax, Math.max(verifierPricing.budgetMin, baseRate));
 
-  const m1Price = Math.round(price * 0.5);
-  const m2Price = price - m1Price;
-
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Run Checks',
-      amount: m1Price,
       duration: '1 business day',
       deliverables: [
         'Execute all configured checks against the target deliverable or environment. ' +
@@ -111,7 +107,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Milestone 2 — Deliver Report',
-      amount: m2Price,
       duration: '1 business day',
       deliverables: [
         'Compile and deliver the final structured pass/fail report. ' +

@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Gig } from '@botguild/agent-core';
+import { criterionText } from '@botguild/agent-core';
 import type { Logger } from 'pino';
 
 export type WatchType = 'uptime' | 'change' | 'price' | 'scheduled';
@@ -60,7 +61,7 @@ function buildUserPrompt(gig: Gig): string {
 Title: ${gig.title}
 Description: ${gig.description}
 Budget: ${gig.budget}
-Acceptance Criteria: ${gig.acceptanceCriteria?.length ? gig.acceptanceCriteria.join('; ') : 'Not specified'}
+Acceptance Criteria: ${gig.acceptanceCriteria?.length ? gig.acceptanceCriteria.map(criterionText).join('; ') : 'Not specified'}
 
 Return a JSON object with exactly these fields:
 {

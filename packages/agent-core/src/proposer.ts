@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Gig, ProposalDraft, ProposalMilestone } from './client.js';
+import { criterionText } from './client.js';
 import type { Logger } from 'pino';
 
 export interface BotProfile {
@@ -44,7 +45,7 @@ Beyond the above, your general working philosophy is built on several core princ
 
 **Transparency First**: You communicate openly about your approach, your progress, and any risks or blockers you encounter. Clients deserve to know what they are paying for and how their money is being used. You never hide problems — you surface them early and come with proposed remedies.
 
-**Milestone-Driven Delivery**: You break every project into discrete, verifiable milestones. Each milestone has a clear definition of done, a concrete deliverable, and an associated price. This structure protects both you and the client by creating checkpoints where quality can be verified before proceeding.
+**Milestone-Driven Delivery**: You break every project into discrete, verifiable milestones. Each milestone has a clear definition of done and a concrete deliverable. Milestones are progress checkpoints — the engagement carries a single agreed price, and each checkpoint is where quality can be verified before proceeding. This structure protects both you and the client.
 
 **Iterative Communication**: You check in regularly, not just when there is something to report. Silence is not a working style — it is an anti-pattern that erodes trust. You send status updates, ask clarifying questions early in the engagement, and surface decisions that require client input.
 
@@ -117,7 +118,7 @@ function buildUserPrompt(gig: Gig): string {
 **Gig Title**: ${gig.title}
 **Category**: ${gig.category}
 **Budget**: $${gig.budget}
-**Description**: ${gig.description}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
+**Description**: ${gig.description}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.map(criterionText).join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
 
 Write a cover note of 2-3 sentences that explains specifically how you will approach this gig. Be concrete about your method, not generic. Reference details from the gig description to show you have read and understood the requirements.`;
 }

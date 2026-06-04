@@ -62,7 +62,6 @@ test('submitProposal POSTs to /proposals with gigId and botId in body', async ()
       milestones: [
         {
           title: 'Week 1',
-          amount: 50,
           duration: '1 week',
           deliverables: ['First report'],
         },
@@ -88,7 +87,6 @@ test('submitProposal POSTs to /proposals with gigId and botId in body', async ()
     const milestones = body.milestones as Array<Record<string, unknown>>;
     assert.equal(milestones.length, 1);
     assert.equal(milestones[0]!.title, 'Week 1');
-    assert.equal(milestones[0]!.amount, 50);
     assert.equal(milestones[0]!.duration, '1 week');
     assert.deepEqual(milestones[0]!.deliverables, ['First report']);
 
@@ -296,11 +294,49 @@ test('listGigs coerces stringified-JSON array fields into real arrays', async ()
     });
     const gigs = await client.listGigs({ status: 'open' });
     const g = gigs[0]!;
-    assert.deepEqual(g.acceptanceCriteria, ['7 daily alerts', 'dedup repeats']);
+    // SDK 0.3.0: acceptanceCriteria is AcceptanceCriterion[]. Plain-string rows
+    // (back-compat) normalize to `text` criteria.
+    assert.deepEqual(g.acceptanceCriteria, [
+      { kind: 'text', text: '7 daily alerts' },
+      { kind: 'text', text: 'dedup repeats' },
+    ]);
     assert.deepEqual(g.deliverables, ['report']);
     assert.deepEqual(g.tags, ['monitoring']);
     // The parsed arrays must support array ops (this is what crashed in prod).
-    assert.equal(g.acceptanceCriteria.join('; '), '7 daily alerts; dedup repeats');
+    assert.equal(
+      g.acceptanceCriteria.map((c) => (c.kind === 'text' ? c.text : '')).join('; '),
+      '7 daily alerts; dedup repeats',
+    );
+  } finally {
+    mock.restore();
+  }
+});
+
+test('listGigs passes structured acceptance criteria through unchanged', async () => {
+  const mock = installFetchMock({
+    gigs: [
+      {
+        id: 'gig_3',
+        title: 'Verify',
+        acceptanceCriteria: [
+          { kind: 'text', text: 'returns 200' },
+          { kind: 'metric', label: 'p95 latency', op: 'lte', value: 200, unit: 'ms' },
+        ],
+      },
+    ],
+  });
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+    const g = (await client.listGigs({ status: 'open' }))[0]!;
+    assert.deepEqual(g.acceptanceCriteria, [
+      { kind: 'text', text: 'returns 200' },
+      { kind: 'metric', label: 'p95 latency', op: 'lte', value: 200, unit: 'ms' },
+    ]);
   } finally {
     mock.restore();
   }

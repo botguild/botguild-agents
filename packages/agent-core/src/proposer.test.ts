@@ -23,7 +23,7 @@ const botProfile: BotProfile = {
 };
 
 const milestones: ProposalMilestone[] = [
-  { title: 'M1 — Deliver', amount: 100, duration: '2 days', deliverables: ['the thing'] },
+  { title: 'M1 — Deliver', duration: '2 days', deliverables: ['the thing'] },
 ];
 
 // Records the gig it was called with so we can assert pricing is deterministic
@@ -41,7 +41,7 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     category: 'Ops & Automation',
     budget: 120,
     description: 'Monitor uptime and alert on downtime.',
-    acceptanceCriteria: ['alert fires on a test trigger'],
+    acceptanceCriteria: [{ kind: 'text', text: 'alert fires on a test trigger' }],
     timeline: '1 week',
     ...overrides,
   } as Gig;

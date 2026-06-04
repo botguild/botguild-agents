@@ -43,9 +43,7 @@ test('decideCounter declines a repeat below-floor counter once we already counte
 
 // --- handleCounterOffers (orchestration over a stub client) -----------------
 
-const MS: ProposalMilestone[] = [
-  { title: 'All', amount: 1000, duration: '7 days', deliverables: ['x'] } as ProposalMilestone,
-];
+const MS: ProposalMilestone[] = [{ title: 'All', duration: '7 days', deliverables: ['x'] }];
 
 function memory(seed: string[] = []): NegotiationMemory {
   const set = new Set(seed);

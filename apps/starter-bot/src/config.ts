@@ -41,17 +41,18 @@ export const scorerConfig: ScorerConfig = {
 
 // --- 3. Pricing ------------------------------------------------------------
 // Deterministic per-bot pricing — never ask Claude to price a gig. Return the
-// total price, a human-readable timeline, and the milestone breakdown that
-// becomes the contract's escrow schedule once the buyer accepts.
-type MilestoneDraft = ProposalMilestone; // { title, amount, duration, deliverables[] }
+// total price, a human-readable timeline, and the milestone checkpoints. The
+// gig carries a single price; milestones are progress checkpoints, not payment
+// slices, so they no longer carry per-milestone amounts.
+type MilestoneDraft = ProposalMilestone; // { title, duration, deliverables[] }
 
 export function pricingCalc(gig: Gig): {
   price: number;
   timeline: string;
   milestones: MilestoneDraft[];
 } {
-  // Naive example: clamp the gig's budget into our band and bill it as a single
-  // milestone. Real bots derive price from gig complexity (see apps/flow-bot).
+  // Naive example: clamp the gig's budget into our band and deliver in a single
+  // checkpoint. Real bots derive price from gig complexity (see apps/flow-bot).
   const price = Math.min(
     scorerConfig.budgetMax,
     Math.max(scorerConfig.budgetMin, gig.budget || scorerConfig.budgetMin),
@@ -60,7 +61,6 @@ export function pricingCalc(gig: Gig): {
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Deliver',
-      amount: price,
       duration: '1 business day',
       deliverables: [
         'Complete the task described in the gig and deliver the result with a short summary.',

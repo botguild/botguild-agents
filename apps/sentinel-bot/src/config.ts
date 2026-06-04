@@ -111,7 +111,7 @@ function deriveComplexity(targetCount: number): Complexity {
   return 'complex';
 }
 
-type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
+type MilestoneDraft = { title: string; duration: string; deliverables: string[] };
 
 export function pricingCalc(gig: Gig): {
   price: number;
@@ -131,14 +131,9 @@ export function pricingCalc(gig: Gig): {
     Math.max(sentinelPricing.budgetMin, Math.round(rawPrice)),
   );
 
-  const weeklyPrice = Math.round(price / 4);
-  // Distribute any rounding remainder into the last milestone
-  const lastWeekPrice = price - weeklyPrice * 3;
-
   const milestones: MilestoneDraft[] = [
     {
       title: 'Week 1 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Initial monitoring setup and first 7-day watch cycle. ' +
@@ -147,7 +142,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 2 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Second 7-day watch cycle. Structured report with change log, ' +
@@ -156,7 +150,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 3 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Third 7-day watch cycle. Structured report with cumulative ' +
@@ -165,7 +158,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 4 — Watch Report',
-      amount: lastWeekPrice,
       duration: '1 week',
       deliverables: [
         'Final 7-day watch cycle. Comprehensive end-of-package report ' +

@@ -9,6 +9,10 @@ import type {
   Testimonial,
 } from '@botguild/sdk';
 
+// SDK 0.3.0 models acceptanceCriteria as a discriminated union but doesn't
+// export the element type. Derive it from Gig so it tracks the SDK exactly.
+export type AcceptanceCriterion = Gig['acceptanceCriteria'][number];
+
 // Entity shapes are owned by the platform SDK so they can't drift from the
 // live API. Re-export them so bot code imports from '@botguild/agent-core'
 // and never reaches into the SDK directly (keeps the SDK swappable). Types
@@ -92,10 +96,56 @@ function toStringArray(value: unknown): string[] {
   return [];
 }
 
+// Render a structured acceptance criterion as a single human-readable line —
+// for scoring (total text length), proposal prompts, and parser summaries that
+// want a flat string view of what "done" means.
+export function criterionText(c: AcceptanceCriterion): string {
+  switch (c.kind) {
+    case 'text':
+      return c.text;
+    case 'metric':
+      return `${c.label} ${c.op} ${c.value}${c.unit ? ` ${c.unit}` : ''}`;
+    case 'http':
+      return `${c.url} → ${c.status}`;
+    default:
+      // Unknown criterion kind from a newer API — fall back to its JSON so the
+      // text still contributes to scoring/prompts rather than vanishing.
+      return JSON.stringify(c);
+  }
+}
+
+// SDK 0.3.0 models acceptanceCriteria as structured AcceptanceCriterion objects
+// rather than plain strings. The live gigs endpoint still hands us its array
+// columns as STRINGIFIED JSON (it doesn't parse them server-side), so parse
+// first, then coerce each element: a bare string becomes a `text` criterion
+// (back-compat with older rows) and an object carrying a `kind` passes through.
+function toAcceptanceCriteria(value: unknown): AcceptanceCriterion[] {
+  let arr: unknown[] = [];
+  if (Array.isArray(value)) {
+    arr = value;
+  } else if (typeof value === 'string' && value.length > 0) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      arr = [];
+    }
+  }
+  const out: AcceptanceCriterion[] = [];
+  for (const el of arr) {
+    if (typeof el === 'string') {
+      out.push({ kind: 'text', text: el });
+    } else if (el && typeof el === 'object' && 'kind' in el) {
+      out.push(el as AcceptanceCriterion);
+    }
+  }
+  return out;
+}
+
 function normalizeGig(gig: Gig): Gig {
   return {
     ...gig,
-    acceptanceCriteria: toStringArray(gig.acceptanceCriteria),
+    acceptanceCriteria: toAcceptanceCriteria(gig.acceptanceCriteria),
     deliverables: toStringArray(gig.deliverables),
     tags: toStringArray(gig.tags),
     dataConstraints: toStringArray(gig.dataConstraints),

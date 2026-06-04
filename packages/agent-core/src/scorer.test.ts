@@ -22,9 +22,9 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     subcategory: '',
     deliverables: [],
     acceptanceCriteria: [
-      'All pages load within 2 seconds',
-      'mobile-responsive',
-      'passes accessibility audit',
+      { kind: 'text', text: 'All pages load within 2 seconds' },
+      { kind: 'text', text: 'mobile-responsive' },
+      { kind: 'text', text: 'passes accessibility audit' },
     ],
     budget: 5000,
     timeline: '4 weeks',
@@ -150,7 +150,7 @@ test('scoreBudget returns linear score for midpoint budget', () => {
 
 // Short acceptanceCriteria scores 8
 test('short acceptanceCriteria (≤50 chars total) → clarity score 8', () => {
-  const gig = makeGig({ acceptanceCriteria: ['Must work on mobile'] }); // 19 chars
+  const gig = makeGig({ acceptanceCriteria: [{ kind: 'text', text: 'Must work on mobile' }] }); // 19 chars
   const breakdown = scoreGig(gig, baseConfig);
   assert.equal(breakdown.clarity, 8);
 });

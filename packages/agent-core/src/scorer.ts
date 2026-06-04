@@ -1,4 +1,5 @@
 import type { Gig } from './client.js';
+import { criterionText } from './client.js';
 
 export interface ScorerConfig {
   categories: string[]; // category strings this bot handles; gig matches if its category is in the list
@@ -34,12 +35,13 @@ export function scoreWarranty(gig: Gig): number {
 }
 
 export function scoreClarity(gig: Gig): number {
-  // acceptanceCriteria is a string[] on the live API. Score on the total
-  // text the buyer wrote across all criteria — more detail = clearer spec.
-  // (The old code treated it as a single string and compared its length to a
-  // 50-char threshold, which against an array measured criteria *count*.)
+  // acceptanceCriteria is a structured AcceptanceCriterion[] (SDK 0.3.0). Score
+  // on the total text the buyer wrote across all criteria — more detail =
+  // clearer spec. (The old code treated it as a single string and compared its
+  // length to a 50-char threshold, which against an array measured criteria
+  // *count*.)
   if (!gig.acceptanceCriteria || gig.acceptanceCriteria.length === 0) return 0;
-  const totalChars = gig.acceptanceCriteria.join(' ').trim().length;
+  const totalChars = gig.acceptanceCriteria.map(criterionText).join(' ').trim().length;
   return totalChars > 50 ? 15 : 8;
 }
 

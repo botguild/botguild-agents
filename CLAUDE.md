@@ -109,7 +109,7 @@ See `bots/DESIGN.md` for full rationale. Short version:
 - **Deterministic pricing** — Never ask Claude to price a gig; use a per-bot formula.
 - **Prompt caching** — Always cache the Claude system prompt to control token costs.
 - **Webhook-first** — Register webhooks on startup; polling is only a fallback, not the primary event source.
-- **Milestone-escrow-only payments** — The platform settles via per-milestone escrow. There are no standing offers or subscriptions (those were dropped from the platform); each gig is an upfront multi-milestone package.
+- **Single-price escrow, milestone checkpoints** — As of SDK 0.3.0, milestones are progress *checkpoints*, not payment slices: the gig/contract carries one price (`Proposal.price` / `Contract.totalAmount`) funded into escrow, and milestones (`title`, `duration`, `deliverables`) mark verifiable delivery stages along the way. There is no per-milestone `amount`. There are no standing offers or subscriptions (those were dropped from the platform).
 
 ## Health & Observability
 

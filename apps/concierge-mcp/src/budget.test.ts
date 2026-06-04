@@ -21,30 +21,23 @@ test('positions the total within the band and scales with scope', () => {
   assert.equal(suggestBudget(bot, 'large').total, 190);
 });
 
-test('small/medium scopes split into two milestones that sum to the total', () => {
+test('small/medium scopes return two milestone checkpoints', () => {
   for (const scope of ['small', 'medium'] as const) {
     const s = suggestBudget(bot, scope);
     assert.equal(s.milestones.length, 2);
-    assert.equal(
-      s.milestones.reduce((sum, m) => sum + m.amount, 0),
-      s.total,
-    );
   }
 });
 
-test('large scope splits into three milestones that sum to the total', () => {
+test('large scope returns three milestone checkpoints', () => {
   const s = suggestBudget(bot, 'large');
   assert.equal(s.milestones.length, 3);
-  assert.equal(
-    s.milestones.reduce((sum, m) => sum + m.amount, 0),
-    s.total,
-  );
 });
 
-test('milestone amounts are rounded to the nearest 5', () => {
+test('milestone checkpoints carry titles but no payment amounts', () => {
   const s = suggestBudget(bot, 'large');
-  for (const m of s.milestones.slice(0, -1)) {
-    assert.equal(m.amount % 5, 0, `${m.title} should be a multiple of 5`);
+  for (const m of s.milestones) {
+    assert.ok(m.title, 'each checkpoint has a title');
+    assert.equal('amount' in m, false, 'milestones are checkpoints, not payment slices');
   }
 });
 

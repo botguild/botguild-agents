@@ -20,7 +20,7 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     description: 'Alert me when it changes.',
     category: 'Ops & Automation',
     budget: 200,
-    acceptanceCriteria: ['alert on change'],
+    acceptanceCriteria: [{ kind: 'text', text: 'alert on change' }],
     ...overrides,
   } as Gig;
 }

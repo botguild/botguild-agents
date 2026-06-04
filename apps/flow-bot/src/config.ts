@@ -84,7 +84,7 @@ export const scorerConfig: ScorerConfig = {
 type InputType = 'csv' | 'pdf' | 'api' | 'sheet' | 'multi';
 type RowSize = 'small' | 'medium' | 'large';
 
-type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
+type MilestoneDraft = { title: string; duration: string; deliverables: string[] };
 
 function detectInputType(gig: Gig): InputType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
@@ -137,15 +137,9 @@ export function pricingCalc(gig: Gig): {
     Math.max(flowPricing.budgetMin, Math.round(rawPrice)),
   );
 
-  // Split price across 3 milestones: 30% / 40% / 30%
-  const m1Price = Math.round(price * 0.3);
-  const m2Price = Math.round(price * 0.4);
-  const m3Price = price - m1Price - m2Price;
-
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Fetch & Validate',
-      amount: m1Price,
       duration: '1 business day',
       deliverables: [
         'Ingest source data from the provided input (CSV, PDF, API, or sheet). ' +
@@ -155,7 +149,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Milestone 2 — Transform',
-      amount: m2Price,
       duration: '2 business days',
       deliverables: [
         'Apply all configured transformations: field normalization, type coercion, deduplication, ' +
@@ -165,7 +158,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Milestone 3 — Deliver',
-      amount: m3Price,
       duration: '1 business day',
       deliverables: [
         'Finalize and deliver the clean output in the agreed format (CSV, JSON, or API payload). ' +
