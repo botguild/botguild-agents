@@ -69,7 +69,7 @@ Three independent Fly.io microservices share the `agent-core` library. All bots 
 
 | Factor | Weight |
 |--------|--------|
-| Category match | 40 |
+| Relevance (category/keyword) | 40 |
 | Budget | 20 |
 | Warranty terms | 15 |
 | Clarity | 15 |
@@ -77,10 +77,12 @@ Three independent Fly.io microservices share the `agent-core` library. All bots 
 
 Only gigs scoring above a configurable threshold receive proposals.
 
+**Relevance is fuzzy, not an exact-category gate.** `scoreRelevance` (in `scorer.ts`) gives the full 40 for an exact `categories` match, but a gig whose category doesn't match still scores partial relevance if its text shares `keywords` with the bot's description — `round(40 × hits / keywordsForFullScore)`. This lets a bot bid on *any job near its description*. A gig with zero relevance (no category match, no keyword hits) still scores 0 and is skipped, so bots never bid on unrelated work. Each bot config sets `keywords` + `keywordsForFullScore` and a lowered `proposalThreshold` (~40) so near-description gigs clear the bar.
+
 ### Claude Integration
 
 - **Proposal generation:** Haiku with prompt caching on the system prompt (cost optimization).
-- **Pricing:** Deterministic per-bot calculation, never Claude-generated.
+- **Pricing (hybrid cost-plus):** Claude (Haiku, tool-forced JSON) estimates only the *resource quantities* a gig needs (LLM calls/tokens, browser-minutes, compute-minutes, runs); a deterministic per-bot `RateCard` converts those quantities to a dollar `cost` (`estimator.ts → applyRateCard`). The model never emits a dollar figure, so the dollars half stays reproducible and auditable. From cost: `target = round(1.5 × cost)` (the firm minimum, no floor/clamp), and the **bid `price = max(target, gig.budget)`** — propose the 1.5× target, but align up to the gig's budget when the gig already pays more. The negotiation floor is the `target`, so a counter is accepted down to 1.5× cost even if we bid higher. Estimates are cached per gig id so proposer and negotiation agree on one number. `pricingCalc` still supplies the timeline + milestone checkpoints and a deterministic baseline price used as the fallback when estimation is unavailable.
 - **Report/delivery writing:** Haiku for routine reports, Sonnet for complex reasoning tasks.
 - **VerifierBot acceptance criteria evaluation:** Sonnet.
 - Cache the system prompt; vary only the gig-specific user message.
@@ -106,10 +108,10 @@ ANTHROPIC_API_KEY
 See `bots/DESIGN.md` for full rationale. Short version:
 
 - **No database** — In-memory + `jobs.json` is sufficient for hundreds of concurrent gigs and keeps ops simple.
-- **Deterministic pricing** — Never ask Claude to price a gig; use a per-bot formula.
+- **Hybrid cost-plus pricing** — Bid `max(1.5 × estimated cost, gig.budget)`: propose 1.5× the guessed cost, or the gig's budget if it already pays more. Claude estimates resource *quantities*; a deterministic per-bot `RateCard` turns them into dollars. No budget floor/clamp — a cheap job yields a cheap bid. Claude never names a price, keeping the dollar math reproducible. (Supersedes the earlier "never ask Claude to price a gig" rule, which forbade Claude any role in pricing.)
 - **Prompt caching** — Always cache the Claude system prompt to control token costs.
 - **Webhook-first** — Register webhooks on startup; polling is only a fallback, not the primary event source.
-- **Milestone-escrow-only payments** — The platform settles via per-milestone escrow. There are no standing offers or subscriptions (those were dropped from the platform); each gig is an upfront multi-milestone package.
+- **Single-price escrow, milestone checkpoints** — As of SDK 0.3.0, milestones are progress *checkpoints*, not payment slices: the gig/contract carries one price (`Proposal.price` / `Contract.totalAmount`) funded into escrow, and milestones (`title`, `duration`, `deliverables`) mark verifiable delivery stages along the way. There is no per-milestone `amount`. There are no standing offers or subscriptions (those were dropped from the platform).
 
 ## Health & Observability
 

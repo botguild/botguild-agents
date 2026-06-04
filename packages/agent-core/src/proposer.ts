@@ -1,5 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Gig, ProposalDraft, ProposalMilestone } from './client.js';
+import { criterionText } from './client.js';
+import type { CostEstimator } from './estimator.js';
 import type { Logger } from 'pino';
 
 export interface BotProfile {
@@ -13,11 +15,16 @@ export interface BotProfile {
 export interface ProposerConfig {
   apiKey: string;
   botProfile: BotProfile;
+  // pricingCalc supplies the timeline + milestone checkpoints, and a deterministic
+  // baseline price. When `costEstimator` is provided, the bid price instead comes
+  // from the estimator (1.5 × guessed compute/resource cost); pricingCalc's price
+  // is only the fallback if estimation isn't wired up.
   pricingCalc: (gig: Gig) => {
     price: number;
     timeline: string;
     milestones: ProposalMilestone[];
   };
+  costEstimator?: CostEstimator;
   logger: Logger;
 }
 
@@ -44,7 +51,7 @@ Beyond the above, your general working philosophy is built on several core princ
 
 **Transparency First**: You communicate openly about your approach, your progress, and any risks or blockers you encounter. Clients deserve to know what they are paying for and how their money is being used. You never hide problems — you surface them early and come with proposed remedies.
 
-**Milestone-Driven Delivery**: You break every project into discrete, verifiable milestones. Each milestone has a clear definition of done, a concrete deliverable, and an associated price. This structure protects both you and the client by creating checkpoints where quality can be verified before proceeding.
+**Milestone-Driven Delivery**: You break every project into discrete, verifiable milestones. Each milestone has a clear definition of done and a concrete deliverable. Milestones are progress checkpoints — the engagement carries a single agreed price, and each checkpoint is where quality can be verified before proceeding. This structure protects both you and the client.
 
 **Iterative Communication**: You check in regularly, not just when there is something to report. Silence is not a working style — it is an anti-pattern that erodes trust. You send status updates, ask clarifying questions early in the engagement, and surface decisions that require client input.
 
@@ -117,7 +124,7 @@ function buildUserPrompt(gig: Gig): string {
 **Gig Title**: ${gig.title}
 **Category**: ${gig.category}
 **Budget**: $${gig.budget}
-**Description**: ${gig.description}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
+**Description**: ${gig.description}${gig.deliverables?.length ? `\n**Deliverables**: ${gig.deliverables.join('; ')}` : ''}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.map(criterionText).join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
 
 Write a cover note of 2-3 sentences that explains specifically how you will approach this gig. Be concrete about your method, not generic. Reference details from the gig description to show you have read and understood the requirements.`;
 }
@@ -136,7 +143,26 @@ export function createProposer(config: ProposerConfig): Proposer {
 
   return {
     async generateProposal(gig: Gig): Promise<ProposalDraft> {
-      const { price, timeline, milestones } = config.pricingCalc(gig);
+      const { price: baselinePrice, timeline, milestones } = config.pricingCalc(gig);
+
+      // Price = 1.5 × the estimated compute/resource cost when the estimator is
+      // wired; otherwise fall back to the deterministic pricingCalc price.
+      let price = baselinePrice;
+      if (config.costEstimator) {
+        try {
+          const estimate = await config.costEstimator.estimate(gig);
+          price = estimate.price;
+          config.logger.info(
+            { gigId: gig.id, cost: estimate.cost, price, baselinePrice, source: estimate.source },
+            'priced proposal from estimated resource cost',
+          );
+        } catch (err) {
+          config.logger.warn(
+            { err, gigId: gig.id, baselinePrice },
+            'cost estimator failed; using deterministic baseline price',
+          );
+        }
+      }
 
       const warrantyOffer = config.botProfile.warrantyTerms || undefined;
 

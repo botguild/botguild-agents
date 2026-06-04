@@ -13,7 +13,10 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     description: 'Check status and latency.',
     category: 'Testing & QA',
     budget: 200,
-    acceptanceCriteria: ['returns 200', 'responds under 1s'],
+    acceptanceCriteria: [
+      { kind: 'text', text: 'returns 200' },
+      { kind: 'text', text: 'responds under 1s' },
+    ],
     ...overrides,
   } as Gig;
 }

@@ -20,7 +20,7 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     description: 'Normalize and dedupe.',
     category: 'Ops & Automation',
     budget: 200,
-    acceptanceCriteria: ['no duplicate ids'],
+    acceptanceCriteria: [{ kind: 'text', text: 'no duplicate ids' }],
     ...overrides,
   } as Gig;
 }

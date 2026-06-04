@@ -2,8 +2,10 @@
 // Deterministic budget guidance
 //
 // Pricing is NEVER LLM-generated on BotGuild (same rule the bots follow). The
-// concierge suggests a budget from the matched bot's own band and splits it
-// into milestones. Payers can override — this is guidance, not a quote.
+// concierge suggests a single budget from the matched bot's own band plus a set
+// of milestone checkpoints. Milestones are progress checkpoints, not payment
+// slices — the gig carries one price funded into escrow up front. Payers can
+// override — this is guidance, not a quote.
 // ---------------------------------------------------------------------------
 
 import type { BotProfile } from './catalog.js';
@@ -13,7 +15,7 @@ export type Scope = 'small' | 'medium' | 'large';
 export interface BudgetSuggestion {
   total: number;
   scope: Scope;
-  milestones: { title: string; amount: number }[];
+  milestones: { title: string }[];
   rationale: string;
 }
 
@@ -27,22 +29,20 @@ export function suggestBudget(bot: BotProfile, scope: Scope): BudgetSuggestion {
   const fraction = scope === 'small' ? 0.25 : scope === 'medium' ? 0.55 : 0.9;
   const total = Math.max(budgetMin, ROUND(budgetMin + span * fraction));
 
-  // Split: a small setup/scoping milestone, then delivery. Large jobs get a
-  // mid checkpoint so the buyer funds incrementally and sees progress.
-  let milestones: { title: string; amount: number }[];
+  // Checkpoints structure the work: a setup/scoping stage, then delivery. Large
+  // jobs get a mid checkpoint so the buyer sees progress before sign-off. These
+  // are verification points — the full price is funded into escrow up front.
+  let milestones: { title: string }[];
   if (scope === 'large') {
-    const setup = ROUND(total * 0.25);
-    const mid = ROUND(total * 0.35);
     milestones = [
-      { title: 'Milestone 1 — Setup & plan', amount: setup },
-      { title: 'Milestone 2 — Interim delivery', amount: mid },
-      { title: 'Milestone 3 — Final delivery & sign-off', amount: total - setup - mid },
+      { title: 'Milestone 1 — Setup & plan' },
+      { title: 'Milestone 2 — Interim delivery' },
+      { title: 'Milestone 3 — Final delivery & sign-off' },
     ];
   } else {
-    const setup = ROUND(total * 0.4);
     milestones = [
-      { title: 'Milestone 1 — Setup & confirmation', amount: setup },
-      { title: 'Milestone 2 — Delivery', amount: total - setup },
+      { title: 'Milestone 1 — Setup & confirmation' },
+      { title: 'Milestone 2 — Delivery' },
     ];
   }
 
@@ -52,7 +52,7 @@ export function suggestBudget(bot: BotProfile, scope: Scope): BudgetSuggestion {
     milestones,
     rationale:
       `${bot.name}'s budget band is $${budgetMin}–$${budgetMax}; a "${scope}" job lands around $${total}. ` +
-      `Full budget points in the scorer are earned at $${budgetMax}. Funding per milestone means the bot ` +
-      `only starts each stage once its escrow is funded.`,
+      `Full budget points in the scorer are earned at $${budgetMax}. The full price is funded into escrow ` +
+      `up front; milestones are checkpoints where the bot delivers and you verify progress before sign-off.`,
   };
 }

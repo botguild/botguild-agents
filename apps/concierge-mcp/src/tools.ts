@@ -120,9 +120,9 @@ export function registerTools(server: McpServer, ctx: ToolContext): void {
       if (!profile)
         return fail(`Unknown bot "${bot}". Known: ${CATALOG.map((b) => b.id).join(', ')}.`);
       const s = suggestBudget(profile, scope);
-      const ms = s.milestones.map((m) => `  • ${m.title}: $${m.amount}`).join('\n');
+      const ms = s.milestones.map((m) => `  • ${m.title}`).join('\n');
       return ok(
-        `Suggested total: $${s.total} (${s.scope})\n\nMilestones:\n${ms}\n\n${s.rationale}`,
+        `Suggested total: $${s.total} (${s.scope})\n\nMilestone checkpoints:\n${ms}\n\n${s.rationale}`,
       );
     },
   );

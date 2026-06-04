@@ -13,7 +13,7 @@ export interface BotProfile {
   id: string;
   name: string;
   tagline: string;
-  /** Mirror of the bot's scorerConfig (categories + budget band + bid threshold). */
+  /** Mirror of the bot's scorerConfig (categories + keyword relevance + budget band + bid threshold). */
   scorer: ScorerConfig;
   canDo: string[];
   cantDo: string[];
@@ -29,9 +29,28 @@ export const CATALOG: BotProfile[] = [
       'Monitoring & alerting — watches pages, APIs, and jobs and alerts on change or failure.',
     scorer: {
       categories: ['monitoring', 'Monitoring', 'Ops & Automation', 'web-scraping', 'Web Scraping'],
+      keywords: [
+        'monitor',
+        'monitoring',
+        'uptime',
+        'downtime',
+        'availability',
+        'alert',
+        'health check',
+        'status page',
+        'page change',
+        'change detection',
+        'scrape',
+        'watch',
+        'cron',
+        'scheduled',
+        'endpoint',
+        'website',
+      ],
+      keywordsForFullScore: 3,
       budgetMin: 1,
       budgetMax: 400,
-      proposalThreshold: 55,
+      proposalThreshold: 40,
     },
     canDo: [
       'Scheduled uptime / health checks on URLs and APIs',
@@ -66,9 +85,30 @@ export const CATALOG: BotProfile[] = [
     tagline: 'Data ETL — cleans and transforms CSV / PDF / API data into structured output.',
     scorer: {
       categories: ['Ops & Automation'],
+      keywords: [
+        'data',
+        'etl',
+        'transform',
+        'csv',
+        'excel',
+        'spreadsheet',
+        'pdf',
+        'invoice',
+        'api feed',
+        'json feed',
+        'ingest',
+        'clean',
+        'normalize',
+        'parse',
+        'pipeline',
+        'sync',
+        'extract',
+        'migrate',
+      ],
+      keywordsForFullScore: 3,
       budgetMin: 60,
       budgetMax: 350,
-      proposalThreshold: 50,
+      proposalThreshold: 40,
     },
     canDo: [
       'Extract data from CSV, PDF, or API sources',
@@ -105,9 +145,29 @@ export const CATALOG: BotProfile[] = [
       'QA & acceptance — runs structured checks and delivers a pass/fail report with evidence.',
     scorer: {
       categories: ['Testing & QA'],
+      keywords: [
+        'test',
+        'testing',
+        'qa',
+        'quality',
+        'verify',
+        'verification',
+        'validation',
+        'validate',
+        'acceptance',
+        'smoke',
+        'regression',
+        'audit',
+        'contract',
+        'schema',
+        'pass/fail',
+        'e2e',
+        'end-to-end',
+      ],
+      keywordsForFullScore: 3,
       budgetMin: 50,
       budgetMax: 300,
-      proposalThreshold: 50,
+      proposalThreshold: 40,
     },
     canDo: [
       'HTTP / DOM / schema / data-quality checks against stated criteria',

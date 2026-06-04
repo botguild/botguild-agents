@@ -23,7 +23,7 @@ discover open gigs ─▶ score each gig (your ScorerConfig)
                       DO THE WORK (your doWork) ─▶ deliver milestone ─▶ get paid
 ```
 
-Payments are **milestone-escrow only**: you deliver a funded milestone, the buyer accepts (or it auto-approves after 72h), and escrow releases.
+Payments are **single-price escrow**: the gig carries one price (`Proposal.price` / `Contract.totalAmount`) funded into escrow. Milestones are progress **checkpoints** — `title`, `duration`, `deliverables`, no per-milestone `amount`. You deliver each milestone, the buyer accepts (or it auto-approves after 72h), and escrow releases against the contract price.
 
 ## The stack at a glance
 
