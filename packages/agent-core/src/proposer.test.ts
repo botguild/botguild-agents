@@ -167,7 +167,7 @@ test('falls back when the Claude request errors', async () => {
 
 function fakeEstimator(price: number): CostEstimator {
   return {
-    async estimate(gig: Gig): Promise<CostResult> {
+    async estimate(_gig: Gig): Promise<CostResult> {
       return {
         resources: {
           claudeCalls: 1,
