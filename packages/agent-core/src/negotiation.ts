@@ -85,8 +85,20 @@ export async function handleCounterOffers(config: HandleCounterOffersConfig): Pr
       const gig = await client.getGig(p.gigId);
       const floor = pricingCalc(gig);
       // Hold our firm rate: the estimator's 1.5×-cost target when wired, else the
-      // deterministic pricingCalc price.
-      const floorPrice = costEstimator ? (await costEstimator.estimate(gig)).target : floor.price;
+      // deterministic pricingCalc price. If the estimate call fails, fall back to
+      // the deterministic floor rather than skipping the counter entirely —
+      // responding on solid terms beats going silent on the payer.
+      let floorPrice = floor.price;
+      if (costEstimator) {
+        try {
+          floorPrice = (await costEstimator.estimate(gig)).target;
+        } catch (err) {
+          log.warn(
+            { err },
+            'negotiation: cost estimate failed; using deterministic pricingCalc floor',
+          );
+        }
+      }
       const decision = decideCounter({
         counterPrice: p.counterPrice as number,
         floorPrice,

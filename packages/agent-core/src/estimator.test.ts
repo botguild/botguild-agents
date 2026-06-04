@@ -220,6 +220,38 @@ test('createCostEstimator: caches per gig id (one model call for repeated estima
   assert.deepEqual(first, second);
 });
 
+test('createCostEstimator: the per-gig cache is bounded (oldest entry is evicted)', async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return jsonResponse(
+      toolUseBody({
+        claudeCalls: 1,
+        claudeKTokens: 1,
+        browserMinutes: 0,
+        computeMinutes: 1,
+        runs: 1,
+      }),
+    );
+  }) as typeof globalThis.fetch;
+
+  const estimator = makeEstimator();
+  // Fill the cache past its 500-entry cap with distinct gig ids; gig-0 is the
+  // oldest and gets evicted once we exceed the cap.
+  for (let i = 0; i < 501; i++) {
+    await estimator.estimate(makeGig({ id: `gig-${i}` }));
+  }
+  assert.equal(calls, 501, 'one model call per distinct gig');
+
+  // gig-500 is still cached (recent) → no new call.
+  await estimator.estimate(makeGig({ id: 'gig-500' }));
+  assert.equal(calls, 501, 'recent gig served from cache');
+
+  // gig-0 was evicted → re-estimating re-calls the model.
+  await estimator.estimate(makeGig({ id: 'gig-0' }));
+  assert.equal(calls, 502, 'evicted gig is re-estimated');
+});
+
 test('createCostEstimator: falls back to the deterministic estimate when the call errors', async () => {
   // 400 is non-retryable, so the SDK throws immediately.
   globalThis.fetch = (async () =>

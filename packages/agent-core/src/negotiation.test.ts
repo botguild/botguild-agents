@@ -221,6 +221,30 @@ test('floor uses the estimator target: counters back at the target when below it
   );
 });
 
+test('a throwing estimator falls back to the pricingCalc floor instead of skipping the counter', async () => {
+  const rec: Recorder = { accepted: [], countered: [], declined: [] };
+  const throwing: CostEstimator = {
+    async estimate(): Promise<CostResult> {
+      throw new Error('estimate boom');
+    },
+  };
+  // counter 800 < pricingCalc floor 1000 → still responds (counters at 1000)
+  const p = counteredProposal({ counterPrice: 800 });
+  await handleCounterOffers({
+    client: stubClient([p], rec),
+    pricingCalc: floorPricing, // price 1000
+    costEstimator: throwing,
+    memory: memory(),
+    logger: silentLogger,
+  });
+  assert.deepEqual(
+    rec.countered,
+    [{ id: 'p1', price: 1000 }],
+    'counters at the deterministic floor',
+  );
+  assert.equal(rec.declined.length + rec.accepted.length, 0);
+});
+
 test('one failing proposal does not abort the sweep', async () => {
   const rec: Recorder = { accepted: [], countered: [], declined: [] };
   const bad = counteredProposal({ id: 'bad', counterPrice: 1000 });

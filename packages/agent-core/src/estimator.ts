@@ -15,10 +15,12 @@ import type { Logger } from 'pino';
 //   2. A deterministic per-bot RateCard converts those quantities to a dollar
 //      cost. Same quantities → same cost, every time. This keeps pricing
 //      reproducible and auditable even though step 1 is a model call.
-//   3. price = clamp(round(markup × cost)), markup defaulting to 1.5.
+//   3. target = round(markup × cost) (markup defaults to 1.5; no floor/clamp),
+//      and the bid price = max(target, gig.budget) — see bidPrice().
 //
-// Estimates are cached per gig id so the proposer and the negotiation poller
-// agree on the same number without paying for two model calls.
+// Estimates are cached per gig id (bounded, see ESTIMATE_CACHE_MAX) so the
+// proposer and the negotiation poller agree on the same number without paying
+// for two model calls.
 // ---------------------------------------------------------------------------
 
 export interface ResourceEstimate {
@@ -171,10 +173,24 @@ function coerceEstimate(input: unknown, fallback: ResourceEstimate): ResourceEst
   };
 }
 
+// Cap on the per-gig estimate cache. A long-running bot sees a steady stream of
+// new gig ids; an unbounded Map would grow without limit. We only need the cache
+// to outlive a gig's propose→negotiate window, so a bounded FIFO is plenty.
+const ESTIMATE_CACHE_MAX = 500;
+
 export function createCostEstimator(config: CostEstimatorConfig): CostEstimator {
   const anthropic = new Anthropic({ apiKey: config.apiKey });
   const markup = config.markup ?? 1.5;
   const cache = new Map<string, CostResult>();
+
+  function remember(gigId: string, result: CostResult): void {
+    // Map preserves insertion order, so the first key is the oldest entry.
+    if (cache.size >= ESTIMATE_CACHE_MAX) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(gigId, result);
+  }
 
   function resultFrom(
     resources: ResourceEstimate,
@@ -238,7 +254,7 @@ export function createCostEstimator(config: CostEstimatorConfig): CostEstimator 
         );
       }
 
-      cache.set(gig.id, result);
+      remember(gig.id, result);
       return result;
     },
   };
