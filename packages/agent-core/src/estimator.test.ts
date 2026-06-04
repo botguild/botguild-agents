@@ -1,6 +1,21 @@
-import { test } from 'node:test';
+import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRateCard, type RateCard, type ResourceEstimate } from './estimator.js';
+import type { Logger } from 'pino';
+import {
+  applyRateCard,
+  bidPrice,
+  createCostEstimator,
+  type RateCard,
+  type ResourceEstimate,
+} from './estimator.js';
+import type { Gig } from './client.js';
+
+const silentLogger = {
+  info() {},
+  warn() {},
+  error() {},
+  debug() {},
+} as unknown as Logger;
 
 const card: RateCard = {
   perClaudeCall: 0.5,
@@ -10,6 +25,16 @@ const card: RateCard = {
   perRun: 2,
   fixedOverhead: 15,
 };
+
+const fallback: ResourceEstimate = {
+  claudeCalls: 4,
+  claudeKTokens: 20,
+  browserMinutes: 0,
+  computeMinutes: 15,
+  runs: 1,
+};
+
+// --- applyRateCard (deterministic cost) ------------------------------------
 
 test('applyRateCard sums quantities × rates plus fixed overhead', () => {
   const est: ResourceEstimate = {
@@ -31,7 +56,6 @@ test('applyRateCard has no minimum: an empty estimate costs only the fixed overh
     computeMinutes: 0,
     runs: 0,
   };
-  // overhead only, with no floor applied
   assert.equal(applyRateCard(tiny, card), 15);
 });
 
@@ -47,38 +71,181 @@ test('a no-browser job costs less than the same job with browser minutes', () =>
   assert.ok(applyRateCard(withBrowser, card) > applyRateCard(base, card));
 });
 
-// The bid rule the estimator applies: target = round(1.5 × cost); bid the
-// target, but align up to the gig's budget when the gig already pays more.
-function bidPrice(cost: number, gigBudget: number): number {
-  const target = Math.round(1.5 * cost);
-  return Math.max(target, gigBudget);
+// --- bidPrice (the pure 1.5× rule) -----------------------------------------
+
+test('bidPrice: target is round(1.5 × cost) with no floor or clamp', () => {
+  assert.deepEqual(bidPrice(122.5, 0), { target: 184, price: 184 });
+});
+
+test('bidPrice: gig priced below target → bid the 1.5× target', () => {
+  // cost 100 → target 150; gig only budgets 90 → still bid 150
+  assert.deepEqual(bidPrice(100, 90), { target: 150, price: 150 });
+});
+
+test('bidPrice: gig priced at/above target → bid aligns up to the gig amount', () => {
+  // cost 100 → target 150; gig budgets 400 → bid 400 (target unchanged)
+  assert.deepEqual(bidPrice(100, 400), { target: 150, price: 400 });
+});
+
+test('bidPrice: a tiny cost yields a tiny bid — no floor pulls it up', () => {
+  assert.deepEqual(bidPrice(15, 10), { target: 23, price: 23 });
+});
+
+test('bidPrice: respects a custom markup', () => {
+  assert.deepEqual(bidPrice(100, 0, 2), { target: 200, price: 200 });
+});
+
+// --- createCostEstimator (real estimator, fetch-stubbed) -------------------
+//
+// The estimator builds its own Anthropic client over the global fetch. Stubbing
+// fetch drives the tool-use, error, and caching branches with no network.
+
+function toolUseBody(input: Record<string, number>) {
+  return {
+    id: 'msg_1',
+    type: 'message',
+    role: 'assistant',
+    model: 'claude-haiku-4-5',
+    content: [{ type: 'tool_use', id: 'tu_1', name: 'report_resource_estimate', input }],
+    stop_reason: 'tool_use',
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    },
+  };
 }
 
-test('target is 1.5× cost with no minimum and no clamp', () => {
-  const est: ResourceEstimate = {
-    claudeCalls: 8,
-    claudeKTokens: 40,
-    browserMinutes: 45,
-    computeMinutes: 45,
-    runs: 4,
-  };
-  const cost = applyRateCard(est, card);
-  // 15 + 4 + 10 + 67.5 + 18 + 8 = 122.5
-  assert.equal(cost, 122.5);
-  assert.equal(Math.round(1.5 * cost), 184);
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function makeGig(overrides: Partial<Gig> = {}): Gig {
+  return {
+    id: 'gig-1',
+    title: 'Watch my status page',
+    category: 'Ops & Automation',
+    budget: 120,
+    description: 'Monitor uptime and alert on downtime.',
+    deliverables: ['Weekly watch report'],
+    acceptanceCriteria: [{ kind: 'text', text: 'alert fires on a test trigger' }],
+    timeline: '1 week',
+    ...overrides,
+  } as Gig;
+}
+
+function makeEstimator(overrides: Partial<Parameters<typeof createCostEstimator>[0]> = {}) {
+  return createCostEstimator({
+    apiKey: 'test-key',
+    botName: 'TestBot',
+    botDescription: 'Monitors pages and alerts on change.',
+    rateCard: card,
+    fallbackEstimate: fallback,
+    logger: silentLogger,
+    ...overrides,
+  });
+}
+
+let originalFetch: typeof globalThis.fetch;
+beforeEach(() => {
+  originalFetch = globalThis.fetch;
+});
+afterEach(() => {
+  globalThis.fetch = originalFetch;
 });
 
-test('gig priced below target → bid the 1.5× target', () => {
-  // cost 100 → target 150; gig only budgets 90 → still bid 150
-  assert.equal(bidPrice(100, 90), 150);
+test('createCostEstimator: prices from the model estimate via the rate card', async () => {
+  globalThis.fetch = (async () =>
+    jsonResponse(
+      toolUseBody({
+        claudeCalls: 12,
+        claudeKTokens: 60,
+        browserMinutes: 60,
+        computeMinutes: 60,
+        runs: 8,
+      }),
+    )) as typeof globalThis.fetch;
+
+  // gig budget 120 is below target, so price == target
+  const result = await makeEstimator().estimate(makeGig({ budget: 120 }));
+  assert.equal(result.source, 'claude');
+  assert.equal(result.cost, 166); // deterministic from the rate card
+  assert.equal(result.target, 249); // round(1.5 * 166)
+  assert.equal(result.price, 249); // max(249, 120)
 });
 
-test('gig priced at/above target → bid aligns up to the gig amount', () => {
-  // cost 100 → target 150; gig budgets 400 → bid 400
-  assert.equal(bidPrice(100, 400), 400);
+test('createCostEstimator: bid aligns up to a gig budget above target', async () => {
+  globalThis.fetch = (async () =>
+    jsonResponse(
+      toolUseBody({
+        claudeCalls: 0,
+        claudeKTokens: 0,
+        browserMinutes: 0,
+        computeMinutes: 0,
+        runs: 0,
+      }),
+    )) as typeof globalThis.fetch;
+
+  // cost 15 → target 23; gig budgets 400 → bid 400
+  const result = await makeEstimator().estimate(makeGig({ budget: 400 }));
+  assert.equal(result.cost, 15);
+  assert.equal(result.target, 23);
+  assert.equal(result.price, 400);
 });
 
-test('a tiny estimate yields a tiny bid — no floor pulls it up', () => {
-  // cost 15 (overhead only) → target 23; gig budgets 10 → bid 23, not floored to any band min
-  assert.equal(bidPrice(15, 10), 23);
+test('createCostEstimator: caches per gig id (one model call for repeated estimates)', async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return jsonResponse(
+      toolUseBody({
+        claudeCalls: 4,
+        claudeKTokens: 20,
+        browserMinutes: 0,
+        computeMinutes: 15,
+        runs: 1,
+      }),
+    );
+  }) as typeof globalThis.fetch;
+
+  const estimator = makeEstimator();
+  const gig = makeGig();
+  const first = await estimator.estimate(gig);
+  const second = await estimator.estimate(gig);
+  assert.equal(calls, 1, 'second estimate is served from cache');
+  assert.deepEqual(first, second);
+});
+
+test('createCostEstimator: falls back to the deterministic estimate when the call errors', async () => {
+  // 400 is non-retryable, so the SDK throws immediately.
+  globalThis.fetch = (async () =>
+    jsonResponse(
+      { type: 'error', error: { type: 'invalid_request_error', message: 'bad' } },
+      400,
+    )) as typeof globalThis.fetch;
+
+  const result = await makeEstimator().estimate(makeGig({ budget: 50 }));
+  assert.equal(result.source, 'fallback');
+  // fallback cost: 15 + 4*0.5 + 20*0.25 + 0 + 15*0.4 + 1*2 = 15+2+5+0+6+2 = 30
+  assert.equal(result.cost, 30);
+  assert.equal(result.target, 45); // round(1.5 * 30)
+  assert.equal(result.price, 50); // max(45, 50) → gig budget wins
+});
+
+test('createCostEstimator: coerces missing/invalid quantities to the fallback value', async () => {
+  globalThis.fetch = (async () =>
+    // browserMinutes missing, runs negative → both replaced by fallback values
+    jsonResponse(
+      toolUseBody({ claudeCalls: 4, claudeKTokens: 20, computeMinutes: 15, runs: -3 }),
+    )) as typeof globalThis.fetch;
+
+  const result = await makeEstimator().estimate(makeGig());
+  assert.equal(result.resources.browserMinutes, fallback.browserMinutes);
+  assert.equal(result.resources.runs, fallback.runs);
+  // valid fields are kept as reported
+  assert.equal(result.resources.claudeCalls, 4);
 });

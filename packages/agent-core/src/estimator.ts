@@ -65,6 +65,19 @@ export function applyRateCard(est: ResourceEstimate, card: RateCard): number {
   );
 }
 
+// The bid rule, isolated and pure so it's directly testable:
+//   target = round(markup × cost)   — our firm minimum, no floor/clamp
+//   price  = max(target, gigBudget) — bid the target, or align up to the gig's
+//                                     budget when it already pays more
+export function bidPrice(
+  cost: number,
+  gigBudget: number,
+  markup = 1.5,
+): { target: number; price: number } {
+  const target = Math.round(markup * cost);
+  return { target, price: Math.max(target, gigBudget) };
+}
+
 export interface CostEstimatorConfig {
   apiKey: string;
   botName: string;
@@ -169,11 +182,7 @@ export function createCostEstimator(config: CostEstimatorConfig): CostEstimator 
     gigBudget: number,
   ): CostResult {
     const cost = applyRateCard(resources, config.rateCard);
-    // Our firm minimum: 1.5× the guessed cost. No lower bound beyond that.
-    const target = Math.round(markup * cost);
-    // Bid the target, but if the gig already budgets at/above it, align up to the
-    // gig amount to capture the buyer's full willingness to pay.
-    const price = Math.max(target, gigBudget);
+    const { target, price } = bidPrice(cost, gigBudget, markup);
     return { resources, cost, target, price, markup, source };
   }
 
