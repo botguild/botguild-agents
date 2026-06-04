@@ -7,6 +7,7 @@ import {
   type NegotiationMemory,
   type HandleCounterOffersConfig,
 } from './negotiation.js';
+import type { CostEstimator, CostResult } from './estimator.js';
 import type { Gig, Proposal, ProposalMilestone } from './client.js';
 
 const silentLogger = pino({ level: 'silent' });
@@ -43,9 +44,7 @@ test('decideCounter declines a repeat below-floor counter once we already counte
 
 // --- handleCounterOffers (orchestration over a stub client) -----------------
 
-const MS: ProposalMilestone[] = [
-  { title: 'All', amount: 1000, duration: '7 days', deliverables: ['x'] } as ProposalMilestone,
-];
+const MS: ProposalMilestone[] = [{ title: 'All', duration: '7 days', deliverables: ['x'] }];
 
 function memory(seed: string[] = []): NegotiationMemory {
   const set = new Set(seed);
@@ -161,6 +160,89 @@ test('ignores pending proposals with no open counter', async () => {
     logger: silentLogger,
   });
   assert.equal(rec.accepted.length + rec.countered.length + rec.declined.length, 0);
+});
+
+// --- floor sourced from the cost estimator's target -------------------------
+//
+// When an estimator is wired, the firm floor is its `target` (1.5× cost), NOT
+// the pricingCalc price and NOT the (possibly higher) bid price. These cases use
+// pricingCalc price 1000 but an estimator target of 500 to prove which one wins.
+
+function fakeEstimator(target: number, price = target): CostEstimator {
+  return {
+    async estimate(): Promise<CostResult> {
+      return {
+        resources: {
+          claudeCalls: 1,
+          claudeKTokens: 1,
+          browserMinutes: 0,
+          computeMinutes: 1,
+          runs: 1,
+        },
+        cost: target / 1.5,
+        target,
+        price,
+        markup: 1.5,
+        source: 'claude',
+      };
+    },
+  };
+}
+
+test('floor uses the estimator target: accepts a counter at/above target even below pricingCalc price', async () => {
+  const rec: Recorder = { accepted: [], countered: [], declined: [] };
+  // counter 600 is ≥ target 500 but < pricingCalc price 1000 and < bid price 900
+  const p = counteredProposal({ counterPrice: 600 });
+  await handleCounterOffers({
+    client: stubClient([p], rec),
+    pricingCalc: floorPricing, // price 1000
+    costEstimator: fakeEstimator(500, 900),
+    memory: memory(),
+    logger: silentLogger,
+  });
+  assert.deepEqual(rec.accepted, ['p1'], 'accepted because floor is the 500 target, not 1000/900');
+  assert.equal(rec.countered.length + rec.declined.length, 0);
+});
+
+test('floor uses the estimator target: counters back at the target when below it', async () => {
+  const rec: Recorder = { accepted: [], countered: [], declined: [] };
+  const p = counteredProposal({ counterPrice: 400 }); // below target 500
+  await handleCounterOffers({
+    client: stubClient([p], rec),
+    pricingCalc: floorPricing,
+    costEstimator: fakeEstimator(500, 900),
+    memory: memory(),
+    logger: silentLogger,
+  });
+  assert.deepEqual(
+    rec.countered,
+    [{ id: 'p1', price: 500 }],
+    'counters at the 500 target, not the pricingCalc 1000',
+  );
+});
+
+test('a throwing estimator falls back to the pricingCalc floor instead of skipping the counter', async () => {
+  const rec: Recorder = { accepted: [], countered: [], declined: [] };
+  const throwing: CostEstimator = {
+    async estimate(): Promise<CostResult> {
+      throw new Error('estimate boom');
+    },
+  };
+  // counter 800 < pricingCalc floor 1000 → still responds (counters at 1000)
+  const p = counteredProposal({ counterPrice: 800 });
+  await handleCounterOffers({
+    client: stubClient([p], rec),
+    pricingCalc: floorPricing, // price 1000
+    costEstimator: throwing,
+    memory: memory(),
+    logger: silentLogger,
+  });
+  assert.deepEqual(
+    rec.countered,
+    [{ id: 'p1', price: 1000 }],
+    'counters at the deterministic floor',
+  );
+  assert.equal(rec.declined.length + rec.accepted.length, 0);
 });
 
 test('one failing proposal does not abort the sweep', async () => {

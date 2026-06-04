@@ -2,6 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Logger } from 'pino';
 import { createProposer, type BotProfile } from './proposer.js';
+import type { CostEstimator, CostResult } from './estimator.js';
 import type { Gig, ProposalMilestone } from './client.js';
 
 // The proposer constructs its own Anthropic client, which talks over the
@@ -23,7 +24,7 @@ const botProfile: BotProfile = {
 };
 
 const milestones: ProposalMilestone[] = [
-  { title: 'M1 — Deliver', amount: 100, duration: '2 days', deliverables: ['the thing'] },
+  { title: 'M1 — Deliver', duration: '2 days', deliverables: ['the thing'] },
 ];
 
 // Records the gig it was called with so we can assert pricing is deterministic
@@ -41,7 +42,7 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     category: 'Ops & Automation',
     budget: 120,
     description: 'Monitor uptime and alert on downtime.',
-    acceptanceCriteria: ['alert fires on a test trigger'],
+    acceptanceCriteria: [{ kind: 'text', text: 'alert fires on a test trigger' }],
     timeline: '1 week',
     ...overrides,
   } as Gig;
@@ -160,6 +161,69 @@ test('falls back when the Claude request errors', async () => {
   assert.match(draft.assumptions![0], /Ops & Automation/);
   assert.equal(draft.price, 100);
   assert.equal(draft.warrantyOffer, '14-day selector-fix window.');
+});
+
+// --- cost-estimator pricing branch -----------------------------------------
+
+function fakeEstimator(price: number): CostEstimator {
+  return {
+    async estimate(_gig: Gig): Promise<CostResult> {
+      return {
+        resources: {
+          claudeCalls: 1,
+          claudeKTokens: 1,
+          browserMinutes: 0,
+          computeMinutes: 1,
+          runs: 1,
+        },
+        cost: price / 1.5,
+        target: price,
+        price,
+        markup: 1.5,
+        source: 'claude',
+      };
+    },
+  };
+}
+
+test('uses the estimator price (not the pricingCalc baseline) when an estimator is wired', async () => {
+  globalThis.fetch = (async () => jsonResponse(messageBody('On it.'))) as typeof globalThis.fetch;
+
+  const proposer = createProposer({
+    apiKey: 'test-key',
+    botProfile,
+    pricingCalc, // baseline price 100
+    costEstimator: fakeEstimator(250),
+    logger: silentLogger,
+  });
+  const draft = await proposer.generateProposal(makeGig());
+
+  assert.equal(draft.price, 250, 'estimator price overrides the baseline');
+  // timeline + milestones still come from pricingCalc
+  assert.equal(draft.timeline, '2 business days');
+  assert.deepEqual(draft.milestones, milestones);
+});
+
+test('falls back to the pricingCalc baseline price when the estimator throws', async () => {
+  globalThis.fetch = (async () => jsonResponse(messageBody('On it.'))) as typeof globalThis.fetch;
+
+  const throwingEstimator: CostEstimator = {
+    async estimate(): Promise<CostResult> {
+      throw new Error('estimator boom');
+    },
+  };
+
+  const proposer = createProposer({
+    apiKey: 'test-key',
+    botProfile,
+    pricingCalc, // baseline price 100
+    costEstimator: throwingEstimator,
+    logger: silentLogger,
+  });
+  const draft = await proposer.generateProposal(makeGig());
+
+  assert.equal(draft.price, 100, 'a failed estimate does not block the proposal');
+  assert.deepEqual(draft.milestones, milestones);
 });
 
 test('omits warrantyOffer when the profile has no warranty terms', async () => {

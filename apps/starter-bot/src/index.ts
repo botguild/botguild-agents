@@ -20,6 +20,7 @@ import {
   createReputationMonitor,
   createNegotiationMemory,
   createNegotiationPoller,
+  createCostEstimator,
   logContractReview,
   registerBot,
   ensureWebhookRegistered,
@@ -32,7 +33,7 @@ import {
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import { botProfile, scorerConfig, pricingCalc } from './config.js';
+import { botProfile, scorerConfig, pricingCalc, rateCard, fallbackEstimate } from './config.js';
 
 let logger = createLogger({ service: 'starter-bot' });
 
@@ -94,13 +95,26 @@ async function main(): Promise<void> {
   // feeds /health; earnings go to logs.
   repMonitor = createReputationMonitor({ source: mcpClient, logger });
 
+  // Hybrid pricing: Claude estimates the compute/resource quantities a gig needs,
+  // the rate card turns those into a cost, and we bid 1.5× that. Estimates are
+  // cached per gig so the proposer and negotiation agree on one number.
+  const costEstimator = createCostEstimator({
+    apiKey: anthropicApiKey,
+    botName: botProfile.name,
+    botDescription: botProfile.bio,
+    rateCard,
+    fallbackEstimate,
+    logger,
+  });
+
   // Counter-offers have no webhook event, so poll pending proposals and respond
-  // per policy: accept at/above our deterministic floor price, else counter
-  // back once at our firm price, else decline. The memory file makes "counter
-  // once" survive restarts.
+  // per policy: accept at/above our firm floor (the same 1.5×-cost price we bid),
+  // else counter back once at that price, else decline. The memory file makes
+  // "counter once" survive restarts.
   const negotiationPoller = createNegotiationPoller({
     client,
     pricingCalc,
+    costEstimator,
     memory: createNegotiationMemory(),
     logger,
   });
@@ -126,7 +140,8 @@ async function main(): Promise<void> {
     },
   });
 
-  // Claude writes the proposal cover note; pricing stays deterministic.
+  // Claude writes the proposal cover note; the bid price = 1.5 × the estimated
+  // compute/resource cost (rate card stays deterministic).
   const proposer = createProposer({
     apiKey: anthropicApiKey,
     botProfile: {
@@ -137,6 +152,7 @@ async function main(): Promise<void> {
       warrantyTerms: botProfile.warrantyTerms,
     },
     pricingCalc,
+    costEstimator,
     logger,
   });
 

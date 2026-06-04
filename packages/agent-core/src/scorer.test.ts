@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreGig, shouldPropose, scoreCategory, scoreBudget } from './scorer.js';
+import { scoreGig, shouldPropose, scoreCategory, scoreBudget, scoreRelevance } from './scorer.js';
 import type { Gig } from './client.js';
 
 const baseConfig = {
@@ -22,9 +22,9 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     subcategory: '',
     deliverables: [],
     acceptanceCriteria: [
-      'All pages load within 2 seconds',
-      'mobile-responsive',
-      'passes accessibility audit',
+      { kind: 'text', text: 'All pages load within 2 seconds' },
+      { kind: 'text', text: 'mobile-responsive' },
+      { kind: 'text', text: 'passes accessibility audit' },
     ],
     budget: 5000,
     timeline: '4 weeks',
@@ -148,9 +148,82 @@ test('scoreBudget returns linear score for midpoint budget', () => {
   assert.equal(scoreBudget(gig, 500, 5000), 10);
 });
 
+// scoreRelevance — keyword/"near description" matching
+const kwConfig = {
+  categories: ['monitoring'],
+  keywords: ['uptime', 'alert', 'scrape', 'watch'],
+  keywordsForFullScore: 3,
+  budgetMin: 1,
+  budgetMax: 400,
+  proposalThreshold: 40,
+};
+
+test('scoreRelevance: exact category match earns full 40 regardless of keywords', () => {
+  const gig = makeGig({ category: 'monitoring', title: 'x', description: 'y' });
+  assert.equal(scoreRelevance(gig, kwConfig), 40);
+});
+
+test('scoreRelevance: non-matching category but enough keyword hits earns full 40', () => {
+  // 3 distinct hits (uptime, alert, scrape) == keywordsForFullScore → 40
+  const gig = makeGig({
+    category: 'general',
+    title: 'Need uptime alerting',
+    description: 'Also scrape a page for changes.',
+  });
+  assert.equal(scoreRelevance(gig, kwConfig), 40);
+});
+
+test('scoreRelevance: a single keyword hit earns partial relevance', () => {
+  // 1 of 3 needed → round(40 * 1/3) = 13
+  const gig = makeGig({
+    category: 'general',
+    title: 'Watch my service',
+    description: 'no other matching terms here',
+  });
+  assert.equal(scoreRelevance(gig, kwConfig), 13);
+});
+
+test('scoreRelevance: a keyword that appears only in deliverables still counts', () => {
+  const gig = makeGig({
+    category: 'general',
+    title: 'Project help',
+    description: 'See the breakdown.',
+    deliverables: ['Set up uptime checks', 'Weekly alert summary', 'Scrape the status page'],
+  });
+  // hits: uptime, alert, scrape = 3 → full 40, sourced entirely from deliverables
+  assert.equal(scoreRelevance(gig, kwConfig), 40);
+});
+
+test('scoreRelevance: zero hits and wrong category scores 0 (bot will not bid)', () => {
+  const gig = makeGig({
+    category: 'graphic-design',
+    title: 'Design a logo',
+    description: 'Brand identity work',
+  });
+  assert.equal(scoreRelevance(gig, kwConfig), 0);
+  assert.equal(scoreGig(gig, kwConfig).total, 0);
+  assert.equal(shouldPropose(gig, kwConfig), false);
+});
+
+test('scoreRelevance: near-description gig clears a lowered threshold via partial relevance', () => {
+  // 1 keyword hit (13) + budget(20) + warranty(15) + clarity(15) + timeline(10) = 73 ≥ 40
+  const gig = makeGig({
+    category: 'general',
+    title: 'Watch my checkout flow',
+    description: 'Tell me when it breaks.',
+  });
+  assert.equal(shouldPropose(gig, kwConfig), true);
+});
+
+test('scoreRelevance: no keywords configured falls back to exact-category only', () => {
+  const noKw = { categories: ['monitoring'], budgetMin: 1, budgetMax: 400, proposalThreshold: 40 };
+  assert.equal(scoreRelevance(makeGig({ category: 'general' }), noKw), 0);
+  assert.equal(scoreRelevance(makeGig({ category: 'monitoring' }), noKw), 40);
+});
+
 // Short acceptanceCriteria scores 8
 test('short acceptanceCriteria (≤50 chars total) → clarity score 8', () => {
-  const gig = makeGig({ acceptanceCriteria: ['Must work on mobile'] }); // 19 chars
+  const gig = makeGig({ acceptanceCriteria: [{ kind: 'text', text: 'Must work on mobile' }] }); // 19 chars
   const breakdown = scoreGig(gig, baseConfig);
   assert.equal(breakdown.clarity, 8);
 });

@@ -56,24 +56,13 @@ test('complexity steps with target count: 3 simple, 8 moderate, 9 complex', () =
   assert.equal(at(9), Math.round(150 * 1.6)); // complex → 240
 });
 
-test('returns four weekly milestones whose amounts sum to the price', () => {
-  const { price, timeline, milestones } = pricingCalc(
+test('returns four weekly milestone checkpoints', () => {
+  const { timeline, milestones } = pricingCalc(
     makeGig({ title: 'Scheduled checks', description: 'monitor these endpoints' }),
   );
   assert.equal(timeline, '4 weeks');
   assert.equal(milestones.length, 4);
   for (const m of milestones) assert.equal(m.duration, '1 week');
-  const total = milestones.reduce((sum, m) => sum + m.amount, 0);
-  assert.equal(total, price, 'milestone amounts must reconstruct the price exactly');
-});
-
-test('the final milestone absorbs the rounding remainder', () => {
-  // price 130 → weekly round(32.5)=33, last = 130 - 99 = 31.
-  const { milestones } = pricingCalc(
-    makeGig({ title: 'Scheduled checks', description: 'monitor these endpoints' }),
-  );
-  assert.equal(milestones[0].amount, 33);
-  assert.equal(milestones[3].amount, 31);
 });
 
 test('price stays within the configured budget band', () => {

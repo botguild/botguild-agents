@@ -49,7 +49,10 @@ function toGig(d: DraftGig): Gig {
     category: d.category,
     budget: d.budget,
     warrantyRequired: d.warrantyRequired ?? false,
-    acceptanceCriteria: d.acceptanceCriteria,
+    // Payers write plain-string criteria; SDK 0.3.0 models them as structured
+    // AcceptanceCriterion objects, so wrap each as a `text` criterion for the
+    // scorer (which now reads criterion.text rather than the raw string).
+    acceptanceCriteria: d.acceptanceCriteria.map((text) => ({ kind: 'text' as const, text })),
     deliverables: d.deliverables,
     timeline: d.timeline,
   } as unknown as Gig;

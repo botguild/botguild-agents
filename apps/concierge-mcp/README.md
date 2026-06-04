@@ -13,7 +13,7 @@ The payer's assistant is the brain — it understands intent and writes the gig 
 | Tool | What it does |
 |------|--------------|
 | `recommend_bot` | Match a need → SentinelBot / FlowBot / VerifierBot, with what each can and can't do |
-| `suggest_budget` | Deterministic budget + milestone split from the target bot's pricing band (never AI-priced) |
+| `suggest_budget` | Deterministic single-price budget + milestone checkpoints from the target bot's pricing band (never AI-priced) |
 | `score_gig` | **The 5-factor scorer, run in reverse** — scores a draft and returns the exact gaps to fix |
 | `create_gig` | Post a gig to the marketplace — **preview-first; only posts when `confirm: true`** |
 | `fund_milestone` | Fund a milestone's escrow so the bot can start — **only funds when `confirm: true`** |

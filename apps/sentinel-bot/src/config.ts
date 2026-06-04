@@ -1,6 +1,7 @@
 import type { BotConfig } from '@botguild/agent-core';
 import type { ScorerConfig } from '@botguild/agent-core';
 import type { Gig } from '@botguild/agent-core';
+import type { RateCard, ResourceEstimate } from '@botguild/agent-core';
 
 // ---------------------------------------------------------------------------
 // Pricing types
@@ -68,9 +69,58 @@ export const sentinelPricing: SentinelPricing = {
 
 export const scorerConfig: ScorerConfig = {
   categories: ['monitoring', 'Monitoring', 'Ops & Automation', 'web-scraping', 'Web Scraping'],
+  // Gigs that merely read "near" what SentinelBot does still get a bid: any of
+  // these keywords in the title/description/criteria earns partial relevance, so
+  // an exact category match is no longer required.
+  keywords: [
+    'monitor',
+    'monitoring',
+    'uptime',
+    'downtime',
+    'availability',
+    'alert',
+    'health check',
+    'status page',
+    'page change',
+    'change detection',
+    'scrape',
+    'watch',
+    'cron',
+    'scheduled',
+    'endpoint',
+    'website',
+  ],
+  keywordsForFullScore: 3,
   budgetMin: 1,
   budgetMax: 400,
-  proposalThreshold: 55,
+  // Lowered so a near-description gig (one or two keyword hits) can clear the
+  // bar alongside the budget/clarity/timeline factors.
+  proposalThreshold: 40,
+};
+
+// ---------------------------------------------------------------------------
+// Cost model — Claude estimates resource quantities, this rate card turns them
+// into dollars, and the bid is 1.5× that cost. Tune these rates to your real
+// infra economics; they are the deterministic half of the hybrid estimator.
+// ---------------------------------------------------------------------------
+
+export const rateCard: RateCard = {
+  perClaudeCall: 0.5,
+  perKToken: 0.25,
+  perBrowserMinute: 1.5, // Playwright checks dominate a watch package's cost
+  perComputeMinute: 0.4,
+  perRun: 2,
+  fixedOverhead: 15,
+};
+
+// Used when the Claude estimate call fails — a typical multi-week single-target
+// watch package, so the bot still bids a sane number.
+export const fallbackEstimate: ResourceEstimate = {
+  claudeCalls: 8,
+  claudeKTokens: 40,
+  browserMinutes: 45,
+  computeMinutes: 45,
+  runs: 4,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,7 +161,7 @@ function deriveComplexity(targetCount: number): Complexity {
   return 'complex';
 }
 
-type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
+type MilestoneDraft = { title: string; duration: string; deliverables: string[] };
 
 export function pricingCalc(gig: Gig): {
   price: number;
@@ -131,14 +181,9 @@ export function pricingCalc(gig: Gig): {
     Math.max(sentinelPricing.budgetMin, Math.round(rawPrice)),
   );
 
-  const weeklyPrice = Math.round(price / 4);
-  // Distribute any rounding remainder into the last milestone
-  const lastWeekPrice = price - weeklyPrice * 3;
-
   const milestones: MilestoneDraft[] = [
     {
       title: 'Week 1 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Initial monitoring setup and first 7-day watch cycle. ' +
@@ -147,7 +192,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 2 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Second 7-day watch cycle. Structured report with change log, ' +
@@ -156,7 +200,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 3 — Watch Report',
-      amount: weeklyPrice,
       duration: '1 week',
       deliverables: [
         'Third 7-day watch cycle. Structured report with cumulative ' +
@@ -165,7 +208,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Week 4 — Watch Report',
-      amount: lastWeekPrice,
       duration: '1 week',
       deliverables: [
         'Final 7-day watch cycle. Comprehensive end-of-package report ' +

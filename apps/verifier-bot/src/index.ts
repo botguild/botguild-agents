@@ -16,12 +16,13 @@ import {
   createReputationMonitor,
   createNegotiationMemory,
   createNegotiationPoller,
+  createCostEstimator,
   logContractReview,
   type ReputationMonitor,
   type Gig,
   type Contract,
 } from '@botguild/agent-core';
-import { botProfile, scorerConfig, pricingCalc } from './config.js';
+import { botProfile, scorerConfig, pricingCalc, rateCard, fallbackEstimate } from './config.js';
 import { createGigParser } from './parser.js';
 import { runHttpCheck } from './runners/http.js';
 import { runDomChecks } from './runners/dom.js';
@@ -136,13 +137,26 @@ async function main(): Promise<void> {
   // earnings go to logs. Reputation (70+) is a launch success target.
   repMonitor = createReputationMonitor({ source: mcpClient, logger });
 
+  // Hybrid pricing: Claude estimates the compute/resource quantities a gig needs,
+  // the rate card turns those into a cost, and we bid 1.5× that. Estimates are
+  // cached per gig so the proposer and negotiation agree on one number.
+  const costEstimator = createCostEstimator({
+    apiKey: anthropicApiKey,
+    botName: botProfile.name,
+    botDescription: botProfile.bio,
+    rateCard,
+    fallbackEstimate,
+    logger,
+  });
+
   // Counter-offers have no webhook event, so poll pending proposals and respond
-  // per policy: accept at/above our deterministic floor, else counter back once
-  // at our firm price, else decline. The memory file makes "counter once" stick
-  // across restarts.
+  // per policy: accept at/above our firm floor (the same 1.5×-cost price we bid),
+  // else counter back once at that price, else decline. The memory file makes
+  // "counter once" stick across restarts.
   const negotiationPoller = createNegotiationPoller({
     client,
     pricingCalc,
+    costEstimator,
     memory: createNegotiationMemory(),
     logger,
   });
@@ -186,6 +200,7 @@ async function main(): Promise<void> {
       warrantyTerms: botProfile.warrantyTerms,
     },
     pricingCalc,
+    costEstimator,
     logger,
   });
 

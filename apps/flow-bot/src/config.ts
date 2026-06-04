@@ -1,6 +1,7 @@
 import type { BotConfig } from '@botguild/agent-core';
 import type { ScorerConfig } from '@botguild/agent-core';
 import type { Gig } from '@botguild/agent-core';
+import type { RateCard, ResourceEstimate } from '@botguild/agent-core';
 
 // ---------------------------------------------------------------------------
 // Pricing types
@@ -72,9 +73,55 @@ export const flowPricing: FlowPricing = {
 
 export const scorerConfig: ScorerConfig = {
   categories: ['Ops & Automation'],
+  // Any gig near FlowBot's ETL description bids, even outside the exact category.
+  keywords: [
+    'data',
+    'etl',
+    'transform',
+    'csv',
+    'excel',
+    'spreadsheet',
+    'pdf',
+    'invoice',
+    'api feed',
+    'json feed',
+    'ingest',
+    'clean',
+    'normalize',
+    'parse',
+    'pipeline',
+    'sync',
+    'extract',
+    'migrate',
+  ],
+  keywordsForFullScore: 3,
   budgetMin: 60,
   budgetMax: 350,
-  proposalThreshold: 50,
+  proposalThreshold: 40,
+};
+
+// ---------------------------------------------------------------------------
+// Cost model — Claude estimates resource quantities, this rate card turns them
+// into dollars, and the bid is 1.5× that cost. FlowBot does no browser work, so
+// perBrowserMinute is effectively unused (estimates report 0 browserMinutes).
+// ---------------------------------------------------------------------------
+
+export const rateCard: RateCard = {
+  perClaudeCall: 0.5,
+  perKToken: 0.3, // normalization leans on Claude tokens
+  perBrowserMinute: 1.5,
+  perComputeMinute: 0.5, // parsing/transform compute is the main cost driver
+  perRun: 2,
+  fixedOverhead: 15,
+};
+
+// Typical single-format, medium-row batch transform.
+export const fallbackEstimate: ResourceEstimate = {
+  claudeCalls: 6,
+  claudeKTokens: 50,
+  browserMinutes: 0,
+  computeMinutes: 30,
+  runs: 1,
 };
 
 // ---------------------------------------------------------------------------
@@ -84,7 +131,7 @@ export const scorerConfig: ScorerConfig = {
 type InputType = 'csv' | 'pdf' | 'api' | 'sheet' | 'multi';
 type RowSize = 'small' | 'medium' | 'large';
 
-type MilestoneDraft = { title: string; amount: number; duration: string; deliverables: string[] };
+type MilestoneDraft = { title: string; duration: string; deliverables: string[] };
 
 function detectInputType(gig: Gig): InputType {
   const text = `${gig.title} ${gig.description}`.toLowerCase();
@@ -137,15 +184,9 @@ export function pricingCalc(gig: Gig): {
     Math.max(flowPricing.budgetMin, Math.round(rawPrice)),
   );
 
-  // Split price across 3 milestones: 30% / 40% / 30%
-  const m1Price = Math.round(price * 0.3);
-  const m2Price = Math.round(price * 0.4);
-  const m3Price = price - m1Price - m2Price;
-
   const milestones: MilestoneDraft[] = [
     {
       title: 'Milestone 1 — Fetch & Validate',
-      amount: m1Price,
       duration: '1 business day',
       deliverables: [
         'Ingest source data from the provided input (CSV, PDF, API, or sheet). ' +
@@ -155,7 +196,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Milestone 2 — Transform',
-      amount: m2Price,
       duration: '2 business days',
       deliverables: [
         'Apply all configured transformations: field normalization, type coercion, deduplication, ' +
@@ -165,7 +205,6 @@ export function pricingCalc(gig: Gig): {
     },
     {
       title: 'Milestone 3 — Deliver',
-      amount: m3Price,
       duration: '1 business day',
       deliverables: [
         'Finalize and deliver the clean output in the agreed format (CSV, JSON, or API payload). ' +
