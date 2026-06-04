@@ -1,5 +1,6 @@
 import type { Logger } from 'pino';
 import type { AgentClient, Gig, Proposal, ProposalMilestone } from './client.js';
+import type { CostEstimator } from './estimator.js';
 
 // Deterministic per-bot pricing: the same calculator the proposer uses. Its
 // price is the firm floor we negotiate against — we never ask Claude to price.
@@ -42,6 +43,12 @@ export interface HandleCounterOffersConfig {
     'listProposals' | 'getGig' | 'acceptCounter' | 'counterProposal' | 'declineCounter'
   >;
   pricingCalc: PricingCalc;
+  // When provided, the firm floor we hold is the estimator's `target` — 1.5× the
+  // guessed cost (the estimator caches per gig, so this reuses the proposal's
+  // estimate rather than re-pricing). We may have *bid* higher than the target
+  // when the gig budgeted above it, but we'll still accept a counter down to the
+  // target. pricingCalc still supplies the counter's timeline/milestones.
+  costEstimator?: CostEstimator;
   memory: NegotiationMemory;
   logger: Logger;
 }
@@ -61,7 +68,7 @@ function isOurTurn(p: Proposal): boolean {
 // apply the policy to each. Tolerant per-proposal — one failure doesn't abort
 // the sweep; the proposal is retried next cycle.
 export async function handleCounterOffers(config: HandleCounterOffersConfig): Promise<void> {
-  const { client, pricingCalc, memory, logger } = config;
+  const { client, pricingCalc, costEstimator, memory, logger } = config;
 
   let proposals: Proposal[];
   try {
@@ -77,9 +84,12 @@ export async function handleCounterOffers(config: HandleCounterOffersConfig): Pr
     try {
       const gig = await client.getGig(p.gigId);
       const floor = pricingCalc(gig);
+      // Hold our firm rate: the estimator's 1.5×-cost target when wired, else the
+      // deterministic pricingCalc price.
+      const floorPrice = costEstimator ? (await costEstimator.estimate(gig)).target : floor.price;
       const decision = decideCounter({
         counterPrice: p.counterPrice as number,
-        floorPrice: floor.price,
+        floorPrice,
         alreadyCountered: memory.hasCountered(p.id),
       });
 
@@ -87,26 +97,23 @@ export async function handleCounterOffers(config: HandleCounterOffersConfig): Pr
         const { contractId } = await client.acceptCounter(p.id);
         memory.clear(p.id);
         log.info(
-          { counterPrice: p.counterPrice, floorPrice: floor.price, contractId },
+          { counterPrice: p.counterPrice, floorPrice, contractId },
           'accepted payer counter at/above floor',
         );
       } else if (decision === 'counter') {
         await client.counterProposal(p.id, {
-          price: floor.price,
+          price: floorPrice,
           timeline: floor.timeline,
           milestones: floor.milestones,
           note: 'Thanks for the offer. Our pricing reflects the scope and warranty — this is our firm rate.',
         });
         memory.markCountered(p.id);
-        log.info(
-          { counterPrice: p.counterPrice, floorPrice: floor.price },
-          'countered back once at firm price',
-        );
+        log.info({ counterPrice: p.counterPrice, floorPrice }, 'countered back once at firm price');
       } else {
         await client.declineCounter(p.id);
         memory.clear(p.id);
         log.info(
-          { counterPrice: p.counterPrice, floorPrice: floor.price },
+          { counterPrice: p.counterPrice, floorPrice },
           'declined repeat counter below floor; proposal stays on original terms',
         );
       }
