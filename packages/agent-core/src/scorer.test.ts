@@ -173,14 +173,35 @@ test('scoreRelevance: non-matching category but enough keyword hits earns full 4
   assert.equal(scoreRelevance(gig, kwConfig), 40);
 });
 
-test('scoreRelevance: a single keyword hit earns partial relevance', () => {
-  // 1 of 3 needed → round(40 * 1/3) = 13
+test('scoreRelevance: a single keyword hit scores 0 — below the minimum (#60)', () => {
+  // One stray keyword is noise, not a near-match: hits(1) < minKeywordHits(2) → 0
   const gig = makeGig({
     category: 'general',
     title: 'Watch my service',
     description: 'no other matching terms here',
   });
-  assert.equal(scoreRelevance(gig, kwConfig), 13);
+  assert.equal(scoreRelevance(gig, kwConfig), 0);
+  assert.equal(shouldPropose(gig, kwConfig), false);
+});
+
+test('scoreRelevance: two distinct hits clear the minimum and earn partial relevance', () => {
+  // 2 of 3 needed → round(40 * 2/3) = 27
+  const gig = makeGig({
+    category: 'general',
+    title: 'Watch my service uptime',
+    description: 'no other matching terms here',
+  });
+  assert.equal(scoreRelevance(gig, kwConfig), 27);
+});
+
+test('scoreRelevance: minKeywordHits is configurable', () => {
+  const strict = { ...kwConfig, minKeywordHits: 3 };
+  const gig = makeGig({
+    category: 'general',
+    title: 'Watch my service uptime', // 2 hits
+    description: 'no other matching terms here',
+  });
+  assert.equal(scoreRelevance(gig, strict), 0);
 });
 
 test('scoreRelevance: a keyword that appears only in deliverables still counts', () => {
@@ -206,13 +227,51 @@ test('scoreRelevance: zero hits and wrong category scores 0 (bot will not bid)',
 });
 
 test('scoreRelevance: near-description gig clears a lowered threshold via partial relevance', () => {
-  // 1 keyword hit (13) + budget(20) + warranty(15) + clarity(15) + timeline(10) = 73 ≥ 40
+  // 2 hits → relevance 27, fit 0.675: budget(20) + warranty(round(15×.675)=10) +
+  // clarity(10) + timeline(7) → 27 + 20 + 10 + 10 + 7 = 74 ≥ 40
   const gig = makeGig({
     category: 'general',
-    title: 'Watch my checkout flow',
+    title: 'Watch my checkout flow uptime',
     description: 'Tell me when it breaks.',
   });
+  const breakdown = scoreGig(gig, kwConfig);
+  assert.equal(breakdown.total, 74);
   assert.equal(shouldPropose(gig, kwConfig), true);
+});
+
+test('spec-quality factors scale with relevance — a well-written but barely-relevant gig cannot bid (#60)', () => {
+  // Regression for issue #60: a beautifully-specified QA gig with one stray
+  // sentinel keyword ("watch") used to score 13 + 40 spec-quality ≥ 40 → bid.
+  // Now: 1 hit < minKeywordHits → relevance 0 → everything zeroed, no bid.
+  const gig = makeGig({
+    category: 'Testing & QA',
+    title: 'QA smoke test and verification of web app',
+    description: 'Verify every page and watch for console errors.',
+    budget: 45,
+  });
+  const breakdown = scoreGig(gig, kwConfig);
+  assert.equal(breakdown.total, 0);
+  assert.equal(shouldPropose(gig, kwConfig), false);
+});
+
+test('spec-quality factors are scaled by fit on partial relevance, full at exact category match', () => {
+  // Same gig, partial fit vs exact category: scaled vs unscaled spec quality.
+  const partial = scoreGig(
+    makeGig({
+      category: 'general',
+      title: 'Watch my service uptime', // 2 hits → fit 27/40
+      description: 'Tell me when it breaks.',
+    }),
+    kwConfig,
+  );
+  assert.equal(partial.warranty, 10); // round(15 × 0.675)
+  assert.equal(partial.clarity, 10);
+  assert.equal(partial.timeline, 7); // round(10 × 0.675)
+
+  const exact = scoreGig(makeGig({ category: 'monitoring' }), kwConfig);
+  assert.equal(exact.warranty, 15);
+  assert.equal(exact.clarity, 15);
+  assert.equal(exact.timeline, 10);
 });
 
 test('scoreRelevance: no keywords configured falls back to exact-category only', () => {
