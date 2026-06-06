@@ -44,8 +44,6 @@ export const CATALOG: BotProfile[] = [
         'watch',
         'cron',
         'scheduled',
-        'endpoint',
-        'website',
       ],
       keywordsForFullScore: 3,
       budgetMin: 1,

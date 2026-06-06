@@ -69,9 +69,11 @@ export const sentinelPricing: SentinelPricing = {
 
 export const scorerConfig: ScorerConfig = {
   categories: ['monitoring', 'Monitoring', 'Ops & Automation', 'web-scraping', 'Web Scraping'],
-  // Gigs that merely read "near" what SentinelBot does still get a bid: any of
-  // these keywords in the title/description/criteria earns partial relevance, so
-  // an exact category match is no longer required.
+  // Gigs that merely read "near" what SentinelBot does still get a bid: ≥2
+  // distinct keyword hits in the title/description/criteria earn partial
+  // relevance, so an exact category match is not required. Keep this list to
+  // vocabulary that is *specific* to monitoring work — generic web words
+  // (`endpoint`, `website`) made sentinel bid on other bots' gigs (#60).
   keywords: [
     'monitor',
     'monitoring',
@@ -87,14 +89,13 @@ export const scorerConfig: ScorerConfig = {
     'watch',
     'cron',
     'scheduled',
-    'endpoint',
-    'website',
   ],
   keywordsForFullScore: 3,
   budgetMin: 1,
   budgetMax: 400,
-  // Lowered so a near-description gig (one or two keyword hits) can clear the
-  // bar alongside the budget/clarity/timeline factors.
+  // Lowered so a near-description gig (two or more keyword hits) can clear the
+  // bar; spec-quality factors are scaled by relevance, so a well-written but
+  // irrelevant gig can no longer reach this on its own.
   proposalThreshold: 40,
 };
 

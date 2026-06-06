@@ -5,6 +5,7 @@ export interface ScorerConfig {
   categories: string[]; // category strings this bot handles; an exact match scores full relevance
   keywords?: string[]; // description keywords; a gig "near our description" matches some of these
   keywordsForFullScore?: number; // how many distinct keyword hits earn the full 40 (default 3)
+  minKeywordHits?: number; // distinct hits required before the fallback awards ANY relevance (default 2)
   budgetMin: number; // minimum acceptable budget
   budgetMax: number; // maximum budget (full score)
   proposalThreshold: number; // minimum score to propose (0-100)
@@ -27,8 +28,10 @@ export function scoreCategory(gig: Gig, categories: string[]): number {
 // the gig as a fuzzy/text match against the bot's description: count how many of
 // the bot's `keywords` appear in the gig's text, and scale toward 40. This is
 // what lets a bot bid on "any job near its description" rather than only gigs
-// whose category string matches exactly. A gig that shares zero keywords (and
-// isn't an exact category match) scores 0 — and scoreGig zeroes the rest, so we
+// whose category string matches exactly. The fallback needs at least
+// `minKeywordHits` (default 2) DISTINCT hits before it awards anything — a single
+// stray keyword (e.g. "endpoint" in a QA gig) is noise, not a near-match (#60).
+// Below that minimum the gig scores 0 — and scoreGig zeroes the rest, so we
 // never bid on something unrelated.
 export function scoreRelevance(gig: Gig, config: ScorerConfig): number {
   if (config.categories.includes(gig.category)) return 40;
@@ -52,7 +55,8 @@ export function scoreRelevance(gig: Gig, config: ScorerConfig): number {
     keywords.map((k) => k.toLowerCase().trim()).filter((k) => k.length > 0 && haystack.includes(k)),
   ).size;
 
-  if (hits === 0) return 0;
+  const minHits = config.minKeywordHits ?? 2;
+  if (hits < minHits) return 0;
 
   const needed = config.keywordsForFullScore ?? 3;
   const fraction = Math.min(1, hits / Math.max(1, needed));
@@ -94,10 +98,15 @@ export function scoreGig(gig: Gig, config: ScorerConfig): ScoreBreakdown {
     return { category: 0, budget: 0, warranty: 0, clarity: 0, timeline: 0, total: 0 };
   }
 
+  // Spec-quality factors (warranty/clarity/timeline) are bot-agnostic: any
+  // well-written gig maxes them at 40 regardless of whether the work matches.
+  // Scale them by how relevant the gig actually is so a beautifully-specified
+  // but barely-relevant gig can't carry itself past the proposal threshold (#60).
+  const fit = category / 40;
   const budget = scoreBudget(gig, config.budgetMin, config.budgetMax);
-  const warranty = scoreWarranty(gig);
-  const clarity = scoreClarity(gig);
-  const timeline = scoreTimeline(gig);
+  const warranty = Math.round(scoreWarranty(gig) * fit);
+  const clarity = Math.round(scoreClarity(gig) * fit);
+  const timeline = Math.round(scoreTimeline(gig) * fit);
   const total = category + budget + warranty + clarity + timeline;
 
   return { category, budget, warranty, clarity, timeline, total };
