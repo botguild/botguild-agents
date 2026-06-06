@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import { AgentError } from './client.js';
 
 export interface BotConfig {
   handlerId: string;
@@ -58,16 +59,6 @@ function toApiBody(botConfig: BotConfig): Record<string, unknown> {
   };
 }
 
-class ApiError extends Error {
-  status: number;
-
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = 'ApiError';
-    this.status = status;
-  }
-}
-
 async function apiFetch(url: string, apiKey: string, options: RequestInit): Promise<unknown> {
   const res = await fetch(url, {
     ...options,
@@ -80,9 +71,10 @@ async function apiFetch(url: string, apiKey: string, options: RequestInit): Prom
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new ApiError(
-      `BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`,
+    throw new AgentError(
       res.status,
+      `BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`,
+      url,
     );
   }
   return res.json();
@@ -133,7 +125,7 @@ export async function registerBot(config: RegistrationConfig): Promise<string> {
       // until it concludes"), which crash-looped VerifierBot on deploy: the
       // active contract itself prevented the bot from booting. Log and carry
       // on with the existing profile; the sync will catch up on a later boot.
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof AgentError && err.status === 409) {
         logger.warn(
           { botId: existing.id, err },
           'bot profile is locked (active contract) — skipping profile sync and continuing startup',
