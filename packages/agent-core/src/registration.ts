@@ -1,4 +1,5 @@
 import type { Logger } from 'pino';
+import { AgentError } from './client.js';
 
 export interface BotConfig {
   handlerId: string;
@@ -70,7 +71,11 @@ async function apiFetch(url: string, apiKey: string, options: RequestInit): Prom
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`);
+    throw new AgentError(
+      res.status,
+      `BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`,
+      url,
+    );
   }
   return res.json();
 }
@@ -107,11 +112,28 @@ export async function registerBot(config: RegistrationConfig): Promise<string> {
 
   if (existing) {
     logger.info({ botId: existing.id }, 'existing bot found, patching with current config');
-    await apiFetch(`${base}/bots/${existing.id}`, apiKey, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-    logger.info({ botId: existing.id }, 'bot profile updated');
+    try {
+      await apiFetch(`${base}/bots/${existing.id}`, apiKey, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      logger.info({ botId: existing.id }, 'bot profile updated');
+    } catch (err) {
+      // The PATCH is only a profile sync — we already have the bot id, so a
+      // failed sync must not kill startup. In particular the platform returns
+      // 409 CONFLICT while the bot has an active contract ("can't be edited
+      // until it concludes"), which crash-looped VerifierBot on deploy: the
+      // active contract itself prevented the bot from booting. Log and carry
+      // on with the existing profile; the sync will catch up on a later boot.
+      if (err instanceof AgentError && err.status === 409) {
+        logger.warn(
+          { botId: existing.id, err },
+          'bot profile is locked (active contract) — skipping profile sync and continuing startup',
+        );
+      } else {
+        throw err;
+      }
+    }
     return existing.id;
   }
 
