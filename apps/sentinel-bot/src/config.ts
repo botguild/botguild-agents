@@ -91,6 +91,9 @@ export const scorerConfig: ScorerConfig = {
     'scheduled',
   ],
   keywordsForFullScore: 3,
+  // A single stray keyword hit is noise, not a near-match (#60). Explicit here
+  // (matches the library default) so behavior doesn't shift if that default changes.
+  minKeywordHits: 2,
   budgetMin: 1,
   budgetMax: 400,
   // Lowered so a near-description gig (two or more keyword hits) can clear the

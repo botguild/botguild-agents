@@ -46,6 +46,7 @@ export const CATALOG: BotProfile[] = [
         'scheduled',
       ],
       keywordsForFullScore: 3,
+      minKeywordHits: 2,
       budgetMin: 1,
       budgetMax: 400,
       proposalThreshold: 40,
