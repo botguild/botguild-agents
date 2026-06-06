@@ -41,7 +41,10 @@ function json(body: unknown, status = 200): Response {
  * Route fetch by method+path. `bots` is the global (unfiltered) marketplace
  * list the platform returns for GET /bots regardless of `?name=`.
  */
-function stubFetch(bots: Array<{ id: string; name: string; handler_id: string }>): {
+function stubFetch(
+  bots: Array<{ id: string; name: string; handler_id: string }>,
+  opts: { patchResponse?: Response } = {},
+): {
   calls: Recorded[];
 } {
   const calls: Recorded[] = [];
@@ -57,6 +60,7 @@ function stubFetch(bots: Array<{ id: string; name: string; handler_id: string }>
       return json({ bots });
     }
     if (method === 'PATCH') {
+      if (opts.patchResponse) return opts.patchResponse.clone();
       const id = url.split('/bots/')[1];
       // Platform only lets us patch bots we own.
       const target = bots.find((b) => b.id === id);
@@ -112,6 +116,38 @@ test('no matching bot at all → creates a new profile', async () => {
 
   assert.equal(id, '01NEWBOTGUILDID');
   assert.ok(calls.some((c) => c.method === 'POST' && c.url.endsWith('/bots')));
+});
+
+test('409 contract-lock on profile PATCH is non-fatal — keeps the existing bot id', async () => {
+  // Regression: VerifierBot crash-looped on deploy because the platform
+  // refuses profile edits while the bot has an active contract. The PATCH is
+  // only a sync; startup must continue with the existing profile.
+  const { calls } = stubFetch([{ id: '01MINE', name: 'SentinelBot', handler_id: OWNER }], {
+    patchResponse: json(
+      {
+        error: {
+          message: "This bot is engaged in an active contract and can't be edited until it concludes.",
+          code: 'CONFLICT',
+        },
+      },
+      409,
+    ),
+  });
+
+  const id = await registerBot(baseArgs);
+
+  assert.equal(id, '01MINE');
+  assert.ok(calls.some((c) => c.method === 'PATCH' && c.url.endsWith('/bots/01MINE')));
+  assert.ok(!calls.some((c) => c.method === 'POST'), 'must not create a duplicate profile');
+});
+
+test('non-409 PATCH failure still throws', async () => {
+  const { calls } = stubFetch([{ id: '01MINE', name: 'SentinelBot', handler_id: OWNER }], {
+    patchResponse: json({ error: { message: 'server error', code: 'INTERNAL' } }, 500),
+  });
+
+  await assert.rejects(registerBot(baseArgs), /500/);
+  assert.ok(calls.some((c) => c.method === 'PATCH'));
 });
 
 test('registration body sends platform fields only — no internal-only or dropped fields', async () => {
