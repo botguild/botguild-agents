@@ -30,7 +30,7 @@
     "@anthropic-ai/sdk": "^0.51.0",
     "@botguild/sdk": "^0.3.0",
     "@hono/node-server": "^1.13.0",
-    "hono": "^4.6.0",
+    "hono": "^4.12.23",
     "pino": "^9.0.0"
   },
   "devDependencies": {

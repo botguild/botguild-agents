@@ -1,5 +1,29 @@
 # Tech Debt
 
+## Bots Un-restartable Mid-Contract (Platform 409 Profile Lock) — MITIGATED, platform fix pending
+
+**Area:** `packages/agent-core/src/registration.ts` + platform `PATCH /bots/:id`
+**Platform issue:** [botguild/botguild-platform#301](https://github.com/botguild/botguild-platform/issues/301)
+
+**Observed in production (2026-06-06, ~20:30–21:00 UTC):** the #63 release
+deploy restarted VerifierBot while it held an active contract. The platform
+returns `409 CONFLICT` ("This bot is engaged in an active contract and can't
+be edited until it concludes.") on the startup profile-sync PATCH for the
+entire duration of any active contract. `registerBot` treated any PATCH
+failure as fatal, so VerifierBot crash-looped, hit Fly's max restart count,
+and was down ~30 min — the active contract itself prevented the bot working
+it from booting. A `proposal.accepted` webhook was 503'd during the outage
+(platform retry recovered it).
+
+**Agent-side mitigation (shipped, #64):** a 409 on the profile-sync PATCH is
+non-fatal — log a warning and continue startup with the existing bot id; the
+sync catches up on a later boot. Other PATCH failures still throw.
+
+**Remaining debt:** the lock is a platform design problem (any PATCH —
+including no-ops — is rejected mid-contract, and the error code is a generic
+`CONFLICT`). Tracked as platform #301; until fixed, third-party bots not on
+`agent-core` ≥ this fix remain exposed.
+
 ## ~~SentinelBot Bids on Out-of-Scope Gigs (Keyword-Fallback Spillover)~~ — RESOLVED
 
 **Resolved (2026-06-05, issue #60):** three of the options below were applied:
