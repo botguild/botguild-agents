@@ -126,7 +126,8 @@ test('409 contract-lock on profile PATCH is non-fatal — keeps the existing bot
     patchResponse: json(
       {
         error: {
-          message: "This bot is engaged in an active contract and can't be edited until it concludes.",
+          message:
+            "This bot is engaged in an active contract and can't be edited until it concludes.",
           code: 'CONFLICT',
         },
       },

@@ -80,7 +80,10 @@ async function apiFetch(url: string, apiKey: string, options: RequestInit): Prom
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new ApiError(`BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`, res.status);
+    throw new ApiError(
+      `BotGuild API ${options.method} ${url} failed: ${res.status} ${text}`,
+      res.status,
+    );
   }
   return res.json();
 }
