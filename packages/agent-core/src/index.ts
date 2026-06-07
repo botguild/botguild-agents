@@ -1,5 +1,6 @@
 // Agent Core — exports added per story
 export * from './client.js';
+export * from './claudeJson.js';
 export * from './webhook.js';
 export * from './poller.js';
 export * from './scorer.js';
