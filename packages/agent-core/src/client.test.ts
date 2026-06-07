@@ -27,7 +27,12 @@ function installFetchMock(responder: unknown | ((req: CapturedRequest) => unknow
         headers[k] = v;
       }
     }
-    const body = init?.body ? JSON.parse(init.body as string) : undefined;
+    const body =
+      init?.body instanceof FormData
+        ? init.body
+        : init?.body
+          ? JSON.parse(init.body as string)
+          : undefined;
     const req: CapturedRequest = { url, method: init?.method ?? 'GET', headers, body };
     calls.push(req);
     const responseBody = typeof responder === 'function' ? responder(req) : responder;
@@ -362,6 +367,150 @@ test('getGig coerces missing/array fields to [] (never a non-array)', async () =
     assert.deepEqual(gig.acceptanceCriteria, [], 'undefined → []');
     assert.deepEqual(gig.deliverables, ['already-array'], 'array passes through');
     assert.equal(typeof gig.acceptanceCriteria.join, 'function', 'always a real array');
+  } finally {
+    mock.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// deliverMilestone — platform contract is { summary, evidence[] } (#238).
+// ---------------------------------------------------------------------------
+
+function uploadsResponder(req: CapturedRequest): unknown {
+  if (req.url.endsWith('/uploads')) {
+    const file = (req.body as FormData).get('file') as File;
+    return {
+      key: `h/${file.name}`,
+      url: `/files/h/${file.name}`,
+      size: file.size,
+      type: file.type,
+    };
+  }
+  return {};
+}
+
+test('deliverMilestone uploads the note and POSTs { summary, evidence }', async () => {
+  const mock = installFetchMock(uploadsResponder);
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    await client.deliverMilestone('c_1', 'm_1', { note: 'All checks passed.' });
+
+    assert.equal(mock.calls.length, 2);
+    const upload = mock.calls[0]!;
+    assert.equal(upload.method, 'POST');
+    assert.equal(upload.url, 'https://api.botguild.test/uploads');
+    assert.equal(
+      'Content-Type' in upload.headers,
+      false,
+      'multipart boundary must be set by fetch, not forced to application/json',
+    );
+    const file = (upload.body as FormData).get('file') as File;
+    assert.equal(file.name, 'delivery-m_1.md');
+    assert.equal(file.type, 'text/markdown');
+    assert.equal(await file.text(), 'All checks passed.');
+
+    const deliver = mock.calls[1]!;
+    assert.equal(deliver.url, 'https://api.botguild.test/contracts/c_1/milestones/m_1/deliver');
+    const body = deliver.body as { summary: string; evidence: unknown[]; note?: string };
+    assert.equal(body.summary, 'All checks passed.');
+    assert.equal('note' in body, false, 'legacy note field must not be sent');
+    assert.deepEqual(body.evidence, [
+      { type: 'file', url: '/files/h/delivery-m_1.md', name: 'Delivery note' },
+    ]);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('deliverMilestone uploads data: attachments as files and passes http(s) as links', async () => {
+  const mock = installFetchMock(uploadsResponder);
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    const png = Buffer.from('fake-png-bytes');
+    await client.deliverMilestone('c_1', 'm_2', {
+      note: 'Report attached.',
+      attachments: [
+        `data:image/png;base64,${png.toString('base64')}`,
+        'https://example.com/report',
+        'not-a-url', // skipped with a warn, never blocks delivery
+      ],
+    });
+
+    const uploads = mock.calls.filter((c) => c.url.endsWith('/uploads'));
+    assert.equal(uploads.length, 2, 'note + one data: attachment');
+    const attachmentFile = (uploads[1]!.body as FormData).get('file') as File;
+    assert.equal(attachmentFile.name, 'attachment-1.png');
+    assert.equal(attachmentFile.type, 'image/png');
+    assert.deepEqual(Buffer.from(await attachmentFile.arrayBuffer()), png);
+
+    const deliver = mock.calls.at(-1)!;
+    const body = deliver.body as { evidence: Array<Record<string, unknown>> };
+    assert.deepEqual(body.evidence, [
+      { type: 'file', url: '/files/h/delivery-m_2.md', name: 'Delivery note' },
+      { type: 'file', url: '/files/h/attachment-1.png', name: 'Attachment 1' },
+      { type: 'link', url: 'https://example.com/report' },
+    ]);
+  } finally {
+    mock.restore();
+  }
+});
+
+test('deliverMilestone uploads CSV data: attachments as text/plain (allowed type)', async () => {
+  const mock = installFetchMock(uploadsResponder);
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    const csv = Buffer.from('a,b\n1,2');
+    await client.deliverMilestone('c_1', 'm_3', {
+      note: 'Output attached.',
+      attachments: [`data:text/csv;base64,${csv.toString('base64')}`],
+    });
+
+    const uploads = mock.calls.filter((c) => c.url.endsWith('/uploads'));
+    const attachmentFile = (uploads[1]!.body as FormData).get('file') as File;
+    assert.equal(attachmentFile.name, 'attachment-1.csv');
+    assert.equal(attachmentFile.type, 'text/plain', 'POST /uploads does not allow text/csv');
+  } finally {
+    mock.restore();
+  }
+});
+
+test('deliverMilestone truncates long notes in the summary, full note stays in the upload', async () => {
+  const mock = installFetchMock(uploadsResponder);
+  try {
+    const client = new AgentClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      botId: 'bot_1',
+      logger: silentLogger,
+    });
+
+    const note = 'x'.repeat(1200);
+    await client.deliverMilestone('c_1', 'm_4', { note });
+
+    const file = (mock.calls[0]!.body as FormData).get('file') as File;
+    assert.equal((await file.text()).length, 1200, 'uploaded note is not truncated');
+
+    const body = mock.calls.at(-1)!.body as { summary: string };
+    assert.equal(body.summary.length, 500, 'summary stays ≤500 chars including the ellipsis');
+    assert.ok(body.summary.endsWith('…'));
   } finally {
     mock.restore();
   }

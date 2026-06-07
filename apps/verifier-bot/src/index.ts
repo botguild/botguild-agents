@@ -29,7 +29,7 @@ import { runDomChecks } from './runners/dom.js';
 import { runDataQualityChecks } from './runners/data.js';
 import { runAcceptanceAudit } from './runners/audit.js';
 import { generateAndDeliverReport } from './report.js';
-import { loadStore, setJob, getJob } from './store.js';
+import { loadStore, setJob, getJob, listJobs } from './store.js';
 import type { CheckResult } from './runners/http.js';
 import type { AuditVerdict } from './runners/audit.js';
 import {
@@ -253,9 +253,16 @@ async function main(): Promise<void> {
 
       const milestone1Id = plan.milestoneIds[0];
       if (milestone1Id) {
-        await client.deliverMilestone(contractId, milestone1Id, {
-          note: `Run Checks: starting ${plan.checkType} checks for ${plan.criteriaList.length} criteria.`,
-        });
+        // Checkpoint delivery — non-fatal. On a recovery re-run the milestone
+        // may already be delivered (the platform 404s a re-delivery); that
+        // must not abort the checks themselves.
+        try {
+          await client.deliverMilestone(contractId, milestone1Id, {
+            note: `Run Checks: starting ${plan.checkType} checks for ${plan.criteriaList.length} criteria.`,
+          });
+        } catch (err) {
+          log.warn({ err, milestoneId: milestone1Id }, 'milestone 1 checkpoint delivery failed');
+        }
       }
 
       const allCheckResults: CheckResult[] = [];
@@ -519,10 +526,73 @@ async function main(): Promise<void> {
     },
   });
 
+  // Recover in-flight contracts persisted from a prior run. A restart between
+  // milestone.funded and delivery (deploy, crash, OOM) used to strand the job:
+  // nothing re-runs the pipeline, and the funded-handler guard ignores webhook
+  // replays once the job is past 'awaiting_funding' (platform #301's
+  // execution-side twin). Re-fetch each contract and re-run the pipeline if
+  // the platform still expects work. This happens BEFORE markReady() — the
+  // platform 503-retries webhooks meanwhile — so a concurrent delivery can't
+  // race the recovery scan; the pipelines themselves start after markReady().
+  const recoveries: Array<() => Promise<void>> = [];
+  for (const job of listJobs()) {
+    if (!['awaiting_funding', 'running', 'delivering'].includes(job.status)) continue;
+    const log = withContext(logger, { gigId: job.gigId, contractId: job.contractId });
+
+    let gig: Gig;
+    let contract: Contract;
+    try {
+      [gig, contract] = await Promise.all([
+        client.getGig(job.gigId),
+        client.getContract(job.contractId),
+      ]);
+    } catch (err) {
+      log.warn({ err }, 'failed to fetch contract during startup recovery, leaving job as-is');
+      continue;
+    }
+
+    if (contract.status === 'draft' || contract.status === 'funded') {
+      // Still awaiting funding/activation; milestone.funded will kick it off.
+      log.info({ contractStatus: contract.status }, 'recovered job still awaits activation');
+      continue;
+    }
+    if (contract.status !== 'active') {
+      // The contract moved on without us (delivered/completed/cancelled/...).
+      log.info({ contractStatus: contract.status }, 'contract no longer active, closing job');
+      setJob(job.contractId, {
+        ...job,
+        status:
+          contract.status === 'cancelled' ||
+          contract.status === 'refunded' ||
+          contract.status === 'disputed'
+            ? 'error'
+            : 'complete',
+        pendingAcceptance: undefined,
+        updatedAt: new Date().toISOString(),
+      });
+      continue;
+    }
+
+    // Flip the job synchronously so a milestone.funded replay after
+    // markReady() hits the past-awaiting_funding guard and can't double-run.
+    setJob(job.contractId, {
+      ...job,
+      status: 'running',
+      pendingAcceptance: undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    log.info({ priorStatus: job.status }, 'recovering in-flight contract, re-running pipeline');
+    recoveries.push(() => executeAcceptedFlow(gig, contract));
+  }
+
   // All handlers are wired. Flip the webhook server
   // out of "not ready" mode so incoming deliveries dispatch to handlers
   // instead of getting a 503 placeholder.
   webhookServer.markReady();
+
+  // Kick recovered pipelines off in the background; they can take minutes and
+  // must not block startup. executeAcceptedFlow handles its own errors.
+  for (const run of recoveries) void run();
 
   // Start gig poller (webhook server was bound at the top of main())
   poller.start();

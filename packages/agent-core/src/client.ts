@@ -20,6 +20,21 @@ export type AcceptanceCriterion = Gig['acceptanceCriteria'][number];
 // here.
 export type { Gig, Contract, ContractMilestone, ProposalMilestone, Proposal, Testimonial };
 
+// Mirrors the platform's evidenceItemSchema (#238): a 'link' must be an
+// http(s) URL; a 'file' must be a /files/ path returned by POST /uploads.
+export interface EvidenceItem {
+  type: 'file' | 'link';
+  url: string;
+  name?: string;
+}
+
+export interface UploadResult {
+  key: string;
+  url: string;
+  size: number;
+  type: string;
+}
+
 export interface ProposalDraft {
   price: number;
   timeline: string;
@@ -152,6 +167,41 @@ function normalizeGig(gig: Gig): Gig {
   };
 }
 
+// File extension + upload Content-Type for the mime types bots attach.
+// POST /uploads allows a fixed list (images, pdf, text/plain, text/markdown,
+// json, zip) — CSV is not on it, so CSV content is uploaded as text/plain
+// (the .csv filename keeps it usable on download).
+const MIME_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+  'text/markdown': 'md',
+  'text/csv': 'csv',
+  'application/json': 'json',
+  'application/zip': 'zip',
+};
+
+function extensionForMime(mime: string): string {
+  return MIME_EXTENSIONS[mime] ?? 'bin';
+}
+
+function uploadContentType(mime: string): string {
+  return mime === 'text/csv' ? 'text/plain' : mime;
+}
+
+function parseDataUrl(value: string): { mime: string; bytes: Buffer } | null {
+  const match = /^data:([^;,]+);base64,(.+)$/.exec(value);
+  if (!match) return null;
+  try {
+    return { mime: match[1] as string, bytes: Buffer.from(match[2] as string, 'base64') };
+  } catch {
+    return null;
+  }
+}
+
 export class AgentClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
@@ -170,9 +220,12 @@ export class AgentClient {
     const url = `${this.apiUrl}${path}`;
     // BotGuild's REST API accepts X-API-Key for static `bg_<hex>` keys.
     // `Authorization: Bearer` is reserved for OAuth tokens (`bg_oat_*`).
+    // For FormData bodies (POST /uploads) fetch sets the multipart
+    // Content-Type + boundary itself — forcing application/json would break it.
+    const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
     const headers: Record<string, string> = {
       'X-API-Key': this.apiKey,
-      'Content-Type': 'application/json',
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     };
 
     let attempt = 0;
@@ -184,7 +237,12 @@ export class AgentClient {
         response = await fetch(url, {
           method,
           headers,
-          body: body !== undefined ? JSON.stringify(body) : undefined,
+          body:
+            body !== undefined
+              ? isFormData
+                ? (body as FormData)
+                : JSON.stringify(body)
+              : undefined,
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (err) {
@@ -345,15 +403,84 @@ export class AgentClient {
     return res.contract;
   }
 
-  deliverMilestone(
+  /** Upload a file to the platform (R2-backed). Returns the `/files/<key>`
+   * url usable as 'file' evidence on a milestone delivery. */
+  async uploadFile(
+    filename: string,
+    content: string | Uint8Array,
+    contentType: string,
+  ): Promise<UploadResult> {
+    // Copy byte content into a fresh ArrayBuffer: Buffer views can sit on a
+    // shared pool (ArrayBufferLike), which BlobPart's typing rejects.
+    const part: BlobPart =
+      typeof content === 'string' ? content : (new Uint8Array(content).buffer as ArrayBuffer);
+    const form = new FormData();
+    form.append('file', new File([part], filename, { type: contentType }));
+    return this.request<UploadResult>('POST', '/uploads', form);
+  }
+
+  /**
+   * Deliver a milestone. The platform's deliver contract (#238) is
+   * `{ summary, evidence[] }`, where evidence requires at least one item and
+   * each item must be an uploaded `/files/` path or an http(s) link — a bare
+   * `{ note, attachments }` body is rejected with a 400. To satisfy that, the
+   * full note is uploaded as a markdown artifact (so evidence is never empty),
+   * `data:` URL attachments are decoded and uploaded as files, and http(s)
+   * attachments pass through as link evidence. A failed attachment upload is
+   * logged and skipped — it must not block an otherwise-valid delivery.
+   */
+  async deliverMilestone(
     contractId: string,
     milestoneId: string,
     payload: { note: string; attachments?: string[] },
   ): Promise<void> {
+    const evidence: EvidenceItem[] = [];
+
+    const noteUpload = await this.uploadFile(
+      `delivery-${milestoneId}.md`,
+      payload.note,
+      'text/markdown',
+    );
+    evidence.push({ type: 'file', url: noteUpload.url, name: 'Delivery note' });
+
+    const attachments = payload.attachments ?? [];
+    for (const [index, attachment] of attachments.entries()) {
+      if (/^https?:\/\//i.test(attachment)) {
+        evidence.push({ type: 'link', url: attachment });
+        continue;
+      }
+      const parsed = parseDataUrl(attachment);
+      if (!parsed) {
+        this.logger.warn(
+          { contractId, milestoneId, index },
+          'attachment is neither an http(s) url nor a data: url, skipping',
+        );
+        continue;
+      }
+      try {
+        const upload = await this.uploadFile(
+          `attachment-${index + 1}.${extensionForMime(parsed.mime)}`,
+          parsed.bytes,
+          uploadContentType(parsed.mime),
+        );
+        evidence.push({ type: 'file', url: upload.url, name: `Attachment ${index + 1}` });
+      } catch (err) {
+        this.logger.warn(
+          { err, contractId, milestoneId, index },
+          'attachment upload failed, delivering without it',
+        );
+      }
+    }
+
+    // The summary is persisted as a thread message visible to the payer; keep
+    // it short (≤500 chars including the ellipsis) and leave the full detail
+    // to the uploaded note artifact.
+    const summary = payload.note.length > 500 ? `${payload.note.slice(0, 499)}…` : payload.note;
+
     return this.request<void>(
       'POST',
       `/contracts/${contractId}/milestones/${milestoneId}/deliver`,
-      payload,
+      { summary, evidence },
     );
   }
 
