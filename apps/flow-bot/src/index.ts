@@ -555,7 +555,12 @@ async function main(): Promise<void> {
       log.info({ contractStatus: contract.status }, 'contract no longer active, closing job');
       setJob(job.contractId, {
         ...job,
-        status: contract.status === 'cancelled' || contract.status === 'refunded' || contract.status === 'disputed' ? 'error' : 'complete',
+        status:
+          contract.status === 'cancelled' ||
+          contract.status === 'refunded' ||
+          contract.status === 'disputed'
+            ? 'error'
+            : 'complete',
         pendingAcceptance: undefined,
         updatedAt: new Date().toISOString(),
       });

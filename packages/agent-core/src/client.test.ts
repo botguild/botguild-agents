@@ -379,7 +379,12 @@ test('getGig coerces missing/array fields to [] (never a non-array)', async () =
 function uploadsResponder(req: CapturedRequest): unknown {
   if (req.url.endsWith('/uploads')) {
     const file = (req.body as FormData).get('file') as File;
-    return { key: `h/${file.name}`, url: `/files/h/${file.name}`, size: file.size, type: file.type };
+    return {
+      key: `h/${file.name}`,
+      url: `/files/h/${file.name}`,
+      size: file.size,
+      type: file.type,
+    };
   }
   return {};
 }

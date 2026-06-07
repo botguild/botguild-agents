@@ -237,7 +237,12 @@ export class AgentClient {
         response = await fetch(url, {
           method,
           headers,
-          body: body !== undefined ? (isFormData ? (body as FormData) : JSON.stringify(body)) : undefined,
+          body:
+            body !== undefined
+              ? isFormData
+                ? (body as FormData)
+                : JSON.stringify(body)
+              : undefined,
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
       } catch (err) {
@@ -469,8 +474,7 @@ export class AgentClient {
 
     // The summary is persisted as a thread message visible to the payer; keep
     // it short and leave the full detail to the uploaded note artifact.
-    const summary =
-      payload.note.length > 500 ? `${payload.note.slice(0, 500)}…` : payload.note;
+    const summary = payload.note.length > 500 ? `${payload.note.slice(0, 500)}…` : payload.note;
 
     return this.request<void>(
       'POST',
