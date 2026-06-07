@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Gig } from '@botguild/agent-core';
-import { criterionText } from '@botguild/agent-core';
+import { criterionText, parseClaudeJson } from '@botguild/agent-core';
 import type { Logger } from 'pino';
 
 export type WatchType = 'uptime' | 'change' | 'price' | 'scheduled';
@@ -127,7 +127,7 @@ export function createGigParser(config: GigParserConfig): {
 
       let extraction: ClaudeExtraction;
       try {
-        extraction = JSON.parse(textBlock.text) as ClaudeExtraction;
+        extraction = parseClaudeJson<ClaudeExtraction>(textBlock.text);
       } catch (err) {
         logger.error(
           { err, gigId: gig.id, contractId, rawText: textBlock.text },
