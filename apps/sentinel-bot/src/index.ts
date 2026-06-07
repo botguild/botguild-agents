@@ -27,7 +27,14 @@ import { botProfile, scorerConfig, pricingCalc, rateCard, fallbackEstimate } fro
 import { createGigParser } from './parser.js';
 import { createScheduler } from './scheduler.js';
 import { createComms } from './comms.js';
-import { loadStore, listJobs as listStoredJobs, getJob, setJob, type JobState } from './store.js';
+import {
+  loadStore,
+  listJobs as listStoredJobs,
+  getJob,
+  setJob,
+  deleteJob,
+  type JobState,
+} from './store.js';
 import type { WatchJobConfig } from './parser.js';
 
 // ---------------------------------------------------------------------------
@@ -403,25 +410,57 @@ async function main(): Promise<void> {
     },
   });
 
-  // Restore cron schedules for any active watch contracts persisted from a
-  // prior run, so a restart doesn't silently stop monitoring. Jobs still in
-  // 'awaiting_funding' are deliberately skipped — they'll resume when the
-  // pending milestone.funded webhook arrives.
+  // Restore persisted watch contracts from a prior run, checking the live
+  // contract first so a restart neither silently stops monitoring nor keeps
+  // working a contract that moved on without us:
+  // - lifecycle 'active' + contract active → re-arm the cron schedule.
+  // - 'awaiting_funding' + contract active → the milestone.funded webhook was
+  //   missed while we were down (platform #301's execution-side twin); kick
+  //   the job off now via the same idempotent startWatchJob path.
+  // - 'awaiting_funding' + contract draft/funded → still waiting; leave it for
+  //   the webhook (or the next restart's recovery pass).
+  // - contract closed (completed/cancelled/...) → drop the job; the
+  //   contract.status.changed webhook that would have removed it was missed.
+  const recoveries: Array<() => Promise<void>> = [];
   for (const persisted of listStoredJobs()) {
     if (!persisted.watchConfig) continue;
-    if (persisted.lifecycle === 'awaiting_funding') {
-      logger.info(
-        { contractId: persisted.contractId },
-        'persisted job still awaiting funding, skipping cron restore',
-      );
+    const log = withContext(logger, {
+      gigId: persisted.gigId,
+      contractId: persisted.contractId,
+    });
+
+    let contract: Contract | null = null;
+    try {
+      contract = await client.getContract(persisted.contractId);
+    } catch (err) {
+      // Fail open for already-active jobs (keep monitoring), fail closed for
+      // awaiting_funding (don't start unpaid work on an unverifiable contract).
+      log.warn({ err }, 'failed to fetch contract during startup recovery');
+    }
+
+    if (contract && !['active', 'draft', 'funded'].includes(contract.status)) {
+      log.info({ contractStatus: contract.status }, 'contract no longer active, dropping job');
+      scheduler.removeJob(persisted.contractId);
+      deleteJob(persisted.contractId);
       continue;
     }
+
+    if (persisted.lifecycle === 'awaiting_funding') {
+      if (contract?.status === 'active') {
+        log.info('missed milestone.funded while down, kicking off watch job');
+        recoveries.push(() => startWatchJob(persisted.contractId));
+      } else {
+        log.info(
+          { contractStatus: contract?.status },
+          'persisted job still awaiting funding, skipping cron restore',
+        );
+      }
+      continue;
+    }
+
     const cfg = persisted.watchConfig as WatchJobConfig;
     if (!cfg.contractId || !cfg.targets || cfg.targets.length === 0) continue;
-    logger.info(
-      { contractId: persisted.contractId },
-      'restoring scheduled watch job from persisted store',
-    );
+    log.info('restoring scheduled watch job from persisted store');
     scheduler.addJob(cfg);
   }
 
@@ -429,6 +468,11 @@ async function main(): Promise<void> {
   // out of "not ready" mode so incoming deliveries dispatch to handlers
   // instead of getting a 503 placeholder.
   webhookServer.markReady();
+
+  // Kick recovered watch jobs off in the background; the first check can take
+  // a while and must not block startup. startWatchJob is idempotent, so a
+  // milestone.funded replay arriving after markReady() can't double-run it.
+  for (const run of recoveries) void run();
 
   // Start gig poller (webhook server was bound at the top of main())
   poller.start();
