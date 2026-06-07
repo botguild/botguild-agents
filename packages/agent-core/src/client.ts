@@ -473,8 +473,9 @@ export class AgentClient {
     }
 
     // The summary is persisted as a thread message visible to the payer; keep
-    // it short and leave the full detail to the uploaded note artifact.
-    const summary = payload.note.length > 500 ? `${payload.note.slice(0, 500)}…` : payload.note;
+    // it short (≤500 chars including the ellipsis) and leave the full detail
+    // to the uploaded note artifact.
+    const summary = payload.note.length > 500 ? `${payload.note.slice(0, 499)}…` : payload.note;
 
     return this.request<void>(
       'POST',

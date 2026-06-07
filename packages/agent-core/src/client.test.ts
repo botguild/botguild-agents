@@ -509,7 +509,7 @@ test('deliverMilestone truncates long notes in the summary, full note stays in t
     assert.equal((await file.text()).length, 1200, 'uploaded note is not truncated');
 
     const body = mock.calls.at(-1)!.body as { summary: string };
-    assert.equal(body.summary.length, 501);
+    assert.equal(body.summary.length, 500, 'summary stays ≤500 chars including the ellipsis');
     assert.ok(body.summary.endsWith('…'));
   } finally {
     mock.restore();
