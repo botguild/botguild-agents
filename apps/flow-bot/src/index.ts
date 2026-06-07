@@ -526,9 +526,15 @@ async function main(): Promise<void> {
   // markReady() — the platform 503-retries webhooks meanwhile — so a
   // concurrent delivery can't race the recovery scan; the pipelines themselves
   // start after markReady().
+  // 'error' jobs are retried too: while the contract is still active the
+  // platform expects work, and a transient failure (Claude hiccup, network)
+  // shouldn't strand the contract any more than a crash would. Permanent
+  // failures just re-error — bounded at one retry per restart.
   const recoveries: Array<() => Promise<void>> = [];
   for (const job of listJobs()) {
-    if (!['awaiting_funding', 'fetching', 'transforming', 'delivering'].includes(job.status)) {
+    if (
+      !['awaiting_funding', 'fetching', 'transforming', 'delivering', 'error'].includes(job.status)
+    ) {
       continue;
     }
     const log = withContext(logger, { gigId: job.gigId, contractId: job.contractId });
