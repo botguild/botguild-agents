@@ -19,6 +19,7 @@ import {
   createNegotiationPoller,
   createCostEstimator,
   logContractReview,
+  isOwnContract,
   type ReputationMonitor,
   type Gig,
   type Contract,
@@ -290,6 +291,17 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Webhooks are handler-scoped: a shared handler delivers every contract's
+    // events to all its bots. Only act on contracts assigned to this bot, or
+    // we'd parse and queue a sibling bot's contract for monitoring.
+    if (!isOwnContract(contract, effectiveBotId)) {
+      log.info(
+        { contractBotId: contract.botId },
+        'proposal.accepted for a contract owned by another bot, ignoring',
+      );
+      return;
+    }
+
     let parseResult;
     const parseStart = Date.now();
     try {
@@ -436,6 +448,19 @@ async function main(): Promise<void> {
       // Fail open for already-active jobs (keep monitoring), fail closed for
       // awaiting_funding (don't start unpaid work on an unverifiable contract).
       log.warn({ err }, 'failed to fetch contract during startup recovery');
+    }
+
+    // Drop foreign contracts that a handler-scoped webhook stashed before the
+    // ownership guard existed (cross-bot routing). Only act when the contract
+    // resolved — a null fetch keeps the existing fail-open/closed behaviour.
+    if (contract && !isOwnContract(contract, effectiveBotId)) {
+      log.info(
+        { contractBotId: contract.botId },
+        'recovered job belongs to another bot, dropping it',
+      );
+      scheduler.removeJob(persisted.contractId);
+      deleteJob(persisted.contractId);
+      continue;
     }
 
     if (contract && !['active', 'draft', 'funded'].includes(contract.status)) {
