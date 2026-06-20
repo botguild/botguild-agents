@@ -18,6 +18,8 @@ import {
   createNegotiationPoller,
   createCostEstimator,
   logContractReview,
+  isOwnContract,
+  gigFromContract,
   type ReputationMonitor,
   type Gig,
   type Contract,
@@ -402,6 +404,17 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Webhooks are handler-scoped: a shared handler delivers every contract's
+    // events to all its bots. Only act on contracts assigned to this bot, or
+    // we'd stash (and later run checks against) a sibling bot's contract.
+    if (!isOwnContract(contract, effectiveBotId)) {
+      log.info(
+        { contractBotId: contract.botId },
+        'proposal.accepted for a contract owned by another bot, ignoring',
+      );
+      return;
+    }
+
     // Stash the gig + contract; do not run any checks until escrow is funded.
     setJob(contractId, {
       gigId,
@@ -543,15 +556,30 @@ async function main(): Promise<void> {
     if (!['awaiting_funding', 'running', 'delivering', 'error'].includes(job.status)) continue;
     const log = withContext(logger, { gigId: job.gigId, contractId: job.contractId });
 
-    let gig: Gig;
+    // The contract is authoritative — fetch it first. The gig may have been
+    // deleted by the payer; that must not strand an otherwise-active contract,
+    // so it's fetched (and tolerated) separately below.
     let contract: Contract;
     try {
-      [gig, contract] = await Promise.all([
-        client.getGig(job.gigId),
-        client.getContract(job.contractId),
-      ]);
+      contract = await client.getContract(job.contractId);
     } catch (err) {
       log.warn({ err }, 'failed to fetch contract during startup recovery, leaving job as-is');
+      continue;
+    }
+
+    // Drop foreign contracts that a handler-scoped webhook stashed before the
+    // ownership guard existed (platform #301 twin / cross-bot routing).
+    if (!isOwnContract(contract, effectiveBotId)) {
+      log.info(
+        { contractBotId: contract.botId },
+        'recovered job belongs to another bot, closing it',
+      );
+      setJob(job.contractId, {
+        ...job,
+        status: 'complete',
+        pendingAcceptance: undefined,
+        updatedAt: new Date().toISOString(),
+      });
       continue;
     }
 
@@ -575,6 +603,18 @@ async function main(): Promise<void> {
         updatedAt: new Date().toISOString(),
       });
       continue;
+    }
+
+    // The contract is active and ours — we need the gig to plan checks. If the
+    // payer deleted it, rebuild a minimal gig from the contract (title +
+    // acceptance criteria + deliverables) so the pipeline can still finish
+    // rather than stranding a funded contract on a 404.
+    let gig: Gig;
+    try {
+      gig = await client.getGig(job.gigId);
+    } catch (err) {
+      log.warn({ err }, 'gig fetch failed during recovery; reconstructing from contract');
+      gig = gigFromContract(contract);
     }
 
     // Flip the job synchronously so a milestone.funded replay after

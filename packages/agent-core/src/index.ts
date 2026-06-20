@@ -15,6 +15,7 @@ export * from './negotiation.js';
 export * from './negotiationStore.js';
 export * from './reviews.js';
 export * from './messenger.js';
+export * from './ownership.js';
 export * from './logger.js';
 export * from './alerting.js';
 

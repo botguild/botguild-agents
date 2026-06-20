@@ -22,6 +22,7 @@ import {
   createNegotiationPoller,
   createCostEstimator,
   logContractReview,
+  isOwnContract,
   registerBot,
   ensureWebhookRegistered,
   shouldPropose,
@@ -207,6 +208,18 @@ async function main(): Promise<void> {
     } catch (err) {
       inFlight.delete(contractId); // allow the platform's retry to re-run
       log.error({ err }, 'failed to load gig/contract on milestone.funded');
+      return;
+    }
+
+    // Webhooks are handler-scoped: a shared handler delivers every contract's
+    // events to all its bots. Only do (paid) work on contracts assigned to this
+    // bot, or we'd run our runner against a sibling bot's milestone.
+    if (!isOwnContract(contract, effectiveBotId)) {
+      inFlight.delete(contractId);
+      log.info(
+        { contractBotId: contract.botId },
+        'milestone.funded for a contract owned by another bot, ignoring',
+      );
       return;
     }
 
