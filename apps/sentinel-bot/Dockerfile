@@ -22,7 +22,11 @@ RUN pnpm --filter @botguild/sentinel-bot build
 # Produce /app/deploy with workspace deps materialized as real packages.
 RUN pnpm --filter @botguild/sentinel-bot deploy --prod /app/deploy
 
-FROM mcr.microsoft.com/playwright:v1.49.0-noble AS runner
+# The image tag MUST match the `playwright` version in package.json — the npm
+# package looks for browsers baked into the image at a version-specific path
+# and crashes at launch on a mismatch (this killed live DOM checks when a
+# dependabot bump moved the lockfile to 1.59.1 against a v1.49.0 image).
+FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 WORKDIR /app
 COPY --from=build /app/deploy ./
 RUN mkdir -p /app/data

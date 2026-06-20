@@ -16,7 +16,7 @@
     "@anthropic-ai/sdk": "^0.51.0",
     "@botguild/agent-core": "workspace:*",
     "node-cron": "^3.0.3",
-    "playwright": "^1.49.0",
+    "playwright": "1.59.1",
     "pino": "^9.0.0"
   },
   "devDependencies": {
