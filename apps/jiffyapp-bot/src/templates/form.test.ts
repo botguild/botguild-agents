@@ -91,3 +91,8 @@ test('form success-msg and error-msg render hidden by default', () => {
   assert.match(html, /<p data-testid="success-msg" hidden>/);
   assert.match(html, /<p data-testid="error-msg" hidden>/);
 });
+
+test('index.html loads app.js via a same-origin <script> tag', () => {
+  const { html } = renderReference(FORM);
+  assert.match(html, /<script src="\/app\.js">/);
+});

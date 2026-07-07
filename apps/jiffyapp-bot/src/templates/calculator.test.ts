@@ -66,6 +66,11 @@ test('rendered app.js embeds the JSON config and compute source with markers rep
   assert.equal(appJs.includes(String(slots.compute)), true);
 });
 
+test('index.html loads app.js via a same-origin <script> tag', () => {
+  const { html } = renderReference(CALCULATOR);
+  assert.match(html, /<script src="\/app\.js">/);
+});
+
 test('rendered index.html carries one input-<name> testid per declared input with correct control types', () => {
   const { html } = renderReference(CALCULATOR);
   const inputs = CALCULATOR.referenceSlots.inputs as Array<{

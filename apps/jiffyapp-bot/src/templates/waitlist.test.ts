@@ -73,3 +73,8 @@ test('rendered HTML carries data-target verbatim (never ticking text) in the sta
   const { html } = renderReference(WAITLIST);
   assert.match(html, /data-target="2026-09-01T09:00:00Z"/);
 });
+
+test('index.html loads app.js via a same-origin <script> tag', () => {
+  const { html } = renderReference(WAITLIST);
+  assert.match(html, /<script src="\/app\.js">/);
+});

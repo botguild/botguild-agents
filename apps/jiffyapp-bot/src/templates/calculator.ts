@@ -261,7 +261,8 @@ function render(slots: SlotValues, ctx: RenderContext): FileSet {
     <strong data-testid="result"></strong>
     <dl id="breakdown"></dl>
   </output>
-</main>`;
+</main>
+<script src="/app.js"></script>`;
 
   const html = pageShell({ title: headline, body, ctx });
   const css = buildStyles(accentHex);

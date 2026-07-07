@@ -295,7 +295,8 @@ function render(slots: SlotValues, ctx: RenderContext): FileSet {
   </form>
   <p data-testid="success-msg" hidden>${esc(successCopy)}</p>
   <p data-testid="error-msg" hidden>${esc(errorCopy)}</p>
-</main>`;
+</main>
+<script src="/app.js"></script>`;
 
   const html = pageShell({ title: headline, body, ctx });
   const css = buildStyles(accentHex);
