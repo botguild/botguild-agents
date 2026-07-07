@@ -1,0 +1,34 @@
+{
+  "name": "@botguild/thumbforge-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ThumbForge — spec-locked thumbnails and OG images rendered in-Worker (Satori → SVG, resvg-wasm → PNG, mozjpeg wasm → JPEG) with byte-verified dimension/size/color/font/logo/pHash gates.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.51.0",
+    "@botguild/agent-core": "workspace:*",
+    "@botguild/agent-core-workers": "workspace:*",
+    "@jsquash/jpeg": "^1.6.0",
+    "@resvg/resvg-wasm": "^2.6.2",
+    "hono": "^4.12.23",
+    "jpeg-js": "^0.4.4",
+    "satori": "^0.26.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "@types/node": "^22.0.0",
+    "pino": "^9.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.107.0"
+  }
+}

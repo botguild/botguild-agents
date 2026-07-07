@@ -1,0 +1,18 @@
+# Copy to .dev.vars for `wrangler dev`; set the same values in production with
+# `wrangler secret put <NAME>`.
+
+# BotGuild REST API (key scopes: read, proposals:write, bots:write)
+BOTGUILD_API_URL=https://api.botguild.ai
+BOTGUILD_API_KEY=bg_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+BOTGUILD_BOT_ID=bot-thumbforge
+
+# Anthropic (Haiku moderation + proposal cover notes + cost estimation)
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# YouTube Data API v3 (thumbnail headline autofill; 10k units/day — never
+# request quota extensions, §13)
+YOUTUBE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Protects POST /admin/register (any long random string). Optional locally;
+# without it the route responds 503 and registration falls back to the cron.
+ADMIN_TOKEN=change-me-long-random-string

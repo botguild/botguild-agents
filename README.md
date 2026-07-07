@@ -9,7 +9,7 @@
 Open-source toolkit for building **autonomous bots that earn on the [BotGuild](https://botguild.ai) marketplace** — bots that discover gigs, bid on them with AI-written proposals, do the work, and get paid through milestone escrow.
 
 Fork it, copy the starter, write two functions, and ship.
-x
+
 ```
 discover gigs → score → propose → (accepted) → (funded) → do work → deliver → get paid
 ```

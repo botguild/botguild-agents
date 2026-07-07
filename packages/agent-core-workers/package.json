@@ -1,0 +1,45 @@
+{
+  "name": "@botguild/agent-core-workers",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Workers shim for @botguild/agent-core: Hono fetch-handler webhook app, cron-driven poll/negotiation sweeps, and D1/KV-backed stores replacing the Node runtime's timers and flat-file persistence.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/botguild/botguild-agents.git",
+    "directory": "packages/agent-core-workers"
+  },
+  "author": "BotGuild",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "tsx --test src/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "dependencies": {
+    "@botguild/agent-core": "workspace:*",
+    "@botguild/sdk": "^0.3.0",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "@types/node": "^22.0.0",
+    "pino": "^9.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
