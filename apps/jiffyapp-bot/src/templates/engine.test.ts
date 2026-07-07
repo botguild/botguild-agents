@@ -14,6 +14,7 @@ test('pageShell wraps body with chrome and the attribution footer', () => {
   assert.match(html, /data-testid="footer"/);
   assert.match(html, /Report abuse/);
   assert.match(html, /https:\/\/bot\.example\.com\/abuse\?slug=acme/);
+  assert.equal(html.includes(footerHtml(ctx)), true); // shell embeds footerHtml verbatim
 });
 
 test('cspFor allows only self by default and adds the bot origin for relay tools', () => {
