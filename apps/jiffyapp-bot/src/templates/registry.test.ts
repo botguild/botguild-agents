@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MATCHER_KEYWORDS } from '../brief.js';
+import { validateGoldenSet } from '../goldens.js';
 import { TEMPLATE_IDS } from '../types.js';
 import { validateSlots } from './engine.js';
 import { getTemplate, renderReference, TEMPLATES } from './registry.js';
@@ -81,6 +82,18 @@ test('every reference golden set has 3-7 goldens with unique titles, asserting o
         }
       }
     }
+  }
+});
+
+test('every reference golden set passes the full schema validation (validateGoldenSet)', () => {
+  for (const def of Object.values(TEMPLATES)) {
+    const bindable = def.bindableTestids(def.referenceSlots);
+    const result = validateGoldenSet(def.referenceGoldens, bindable);
+    assert.equal(
+      result.ok,
+      true,
+      `${def.id}: referenceGoldens failed validateGoldenSet: ${result.ok ? '' : result.errors.join('; ')}`,
+    );
   }
 });
 
