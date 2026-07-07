@@ -270,3 +270,61 @@ test('paste with a fixture reference resolves the fixture content via fill', asy
 
   assert.ok(state.log.includes('fill input={"a":1}'));
 });
+
+test('screenshots are captured for failing goldens', async () => {
+  const state = newState({
+    elements: { result: [{ text: 'WRONG_VALUE', visible: true }] },
+    title: 'Test Page',
+  });
+  const store = memoryStore();
+  const set: GoldenSet = {
+    goldens: [
+      {
+        title: 'failing check',
+        steps: [],
+        expect: [{ testid: 'result', equals: 'EXPECTED_VALUE' }],
+      },
+    ],
+  };
+
+  const result = await runGoldens({
+    url: 'https://x.test',
+    set,
+    openPage: async () => fakeDriver(state),
+    screenshots: { store, keyPrefix: 'pfx/' },
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.pass, false);
+  assert.equal(result.outcomes[0].pass, false);
+  assert.equal(result.outcomes[0].screenshotKey, 'shot-0.png');
+  assert.ok(store.data.has('pfx/shot-0.png'));
+});
+
+test('screenshots are captured for timed-out goldens', async () => {
+  const state = newState({ hang: new Set(['textContent']) });
+  const store = memoryStore();
+  const set: GoldenSet = {
+    goldens: [
+      {
+        title: 'timed out check',
+        steps: [],
+        expect: [{ testid: 'result', equals: 'x' }],
+      },
+    ],
+  };
+
+  const result = await runGoldens({
+    url: 'https://x.test',
+    set,
+    openPage: async () => fakeDriver(state),
+    screenshots: { store, keyPrefix: 'pfx/' },
+    timeoutMs: 50,
+  });
+
+  assert.equal(result.pass, false);
+  assert.equal(result.outcomes[0].pass, false);
+  assert.ok(result.outcomes[0].error);
+  assert.equal(result.outcomes[0].screenshotKey, 'shot-0.png');
+  assert.ok(store.data.has('pfx/shot-0.png'));
+});
