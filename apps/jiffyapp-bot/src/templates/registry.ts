@@ -5,11 +5,15 @@
 import type { FileSet, TemplateId } from '../types.js';
 import { CALCULATOR } from './calculator.js';
 import type { RenderContext, TemplateDefinition } from './engine.js';
+import { FORM } from './form.js';
 import { LANDING } from './landing.js';
+import { WAITLIST } from './waitlist.js';
 
 export const TEMPLATES: Partial<Record<TemplateId, TemplateDefinition>> = {
   landing: LANDING,
   calculator: CALCULATOR,
+  form: FORM,
+  waitlist: WAITLIST,
 };
 
 export function getTemplate(id: TemplateId): TemplateDefinition {
