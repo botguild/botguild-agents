@@ -1,5 +1,5 @@
-// Catalog registry: maps TemplateId -> TemplateDefinition. Grows one template at a
-// time (Tasks 5-8); Task 8 completes the catalog and switches TEMPLATES to a total
+// Catalog registry: maps TemplateId -> TemplateDefinition. Grew one template at a
+// time (Tasks 5-8); Task 8 completes the catalog — TEMPLATES is now a total
 // Record<TemplateId, TemplateDefinition>.
 
 import type { FileSet, TemplateId } from '../types.js';
@@ -8,14 +8,22 @@ import { CSV_DASHBOARD } from './csvDashboard.js';
 import type { RenderContext, TemplateDefinition } from './engine.js';
 import { FORM } from './form.js';
 import { LANDING } from './landing.js';
+import { LINK_IN_BIO } from './linkInBio.js';
+import { PRICING_TABLE } from './pricingTable.js';
+import { QUIZ } from './quiz.js';
 import { TRANSFORMER } from './transformer.js';
 import { WAITLIST } from './waitlist.js';
+import { WIDGET } from './widget.js';
 
-export const TEMPLATES: Partial<Record<TemplateId, TemplateDefinition>> = {
+export const TEMPLATES: Record<TemplateId, TemplateDefinition> = {
   landing: LANDING,
   calculator: CALCULATOR,
   form: FORM,
   'csv-dashboard': CSV_DASHBOARD,
+  widget: WIDGET,
+  'link-in-bio': LINK_IN_BIO,
+  'pricing-table': PRICING_TABLE,
+  quiz: QUIZ,
   waitlist: WAITLIST,
   transformer: TRANSFORMER,
 };
