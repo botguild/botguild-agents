@@ -1,0 +1,15 @@
+# Copy to .dev.vars for `wrangler dev`; set the same values in production with `wrangler secret put <NAME>`.
+BOTGUILD_API_URL=https://api.botguild.ai
+BOTGUILD_API_KEY=
+BOTGUILD_BOT_ID=bot-jiffyapp
+ANTHROPIC_API_KEY=
+# OpenAI Moderation (pinned vendor, fail-closed)
+MODERATION_API_KEY=
+# Cloudflare API token scoped to Workers-for-Platforms dispatch-namespace script edit ONLY.
+CF_API_TOKEN=
+# Second Cloudflare token scoped to Email Routing destination addresses ONLY (relay recipients).
+CF_EMAIL_API_TOKEN=
+# PageSpeed Insights API key
+PSI_API_KEY=
+# Optional locally; without it /admin/* routes respond 503.
+ADMIN_TOKEN=
