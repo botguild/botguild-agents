@@ -64,6 +64,24 @@ const FUNCTION_DENY_TOKENS = [
   'location',
 ];
 
+/** Escape a literal string for embedding in a RegExp source. */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Per-token regex matching the token only as a standalone identifier/expression —
+ * not as a substring of a longer identifier (e.g. "fetch" must not match "prefetch"
+ * or "fetching"). Regex-special chars in the token are escaped so `document.cookie`
+ * matches the literal dot; internal whitespace (as in `new Function`) matches `\s+`
+ * so incidental formatting differences don't evade the check.
+ */
+const FUNCTION_DENY_TOKEN_PATTERNS: ReadonlyArray<{ token: string; re: RegExp }> =
+  FUNCTION_DENY_TOKENS.map((token) => {
+    const escaped = escapeRegExp(token).replace(/\s+/g, '\\s+');
+    return { token, re: new RegExp(`(?<![A-Za-z0-9_$])${escaped}(?![A-Za-z0-9_$])`) };
+  });
+
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 function isJsonValue(value: unknown): boolean {
@@ -114,8 +132,8 @@ export function validateSlots(def: TemplateDefinition, slots: SlotValues): strin
               `${spec.name}: must be a function expression (starting with "function" or "(")`,
             );
           }
-          for (const token of FUNCTION_DENY_TOKENS) {
-            if (value.includes(token)) {
+          for (const { token, re } of FUNCTION_DENY_TOKEN_PATTERNS) {
+            if (re.test(value)) {
               errors.push(`${spec.name}: must not contain "${token}"`);
             }
           }
