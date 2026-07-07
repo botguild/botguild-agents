@@ -76,7 +76,13 @@ export function extractToolId(description: string): string | undefined {
       // fall through to the bare-pattern match below
     }
   }
-  const match = /toolId\s*[:=]\s*["']?([A-Za-z0-9_-]{8,})["']?/i.exec(description);
+  // The `(?:^|[^A-Za-z0-9_])` guard requires `toolId` to be a standalone key, not a
+  // suffix of a longer identifier (`extraToolId`, `myToolId`, `_toolId`) — a bare `\b`
+  // wouldn't help here since there's no word-boundary between a lowercase letter and
+  // an uppercase one (`a`|`T` in `extraToolId`).
+  const match = /(?:^|[^A-Za-z0-9_])toolId\s*[:=]\s*["']?([A-Za-z0-9_-]{8,})["']?/i.exec(
+    description,
+  );
   return match ? match[1] : undefined;
 }
 
@@ -120,12 +126,28 @@ function isValidTemplateId(value: string): value is TemplateId {
 }
 
 /**
+ * Count distinct keyword-phrase hits for one template's keyword list against the
+ * (already-lowercased) gig text. A matched keyword that is itself a substring of a
+ * *different* matched keyword from the same list is the same signal under two names
+ * (e.g. `'plans'` inside `'compare plans'` — issue: intra-list subsumption let one
+ * real signal masquerade as two "distinct" hits and defeat `MIN_KEYWORD_HITS`), so it
+ * is deduped down to the more specific (longer) phrase rather than counted twice.
+ */
+function countDistinctHits(keywords: readonly string[], text: string): number {
+  const matched = keywords.filter((keyword) => text.includes(keyword));
+  const distinct = matched.filter(
+    (keyword) => !matched.some((other) => other !== keyword && other.includes(keyword)),
+  );
+  return distinct.length;
+}
+
+/**
  * Resolve a template for a gig. An explicit `brief.template` must be a valid
  * `TemplateId`, or the match fails outright — an explicit ask is never overridden
- * by a keyword guess. Absent that, distinct keyword-phrase hits are counted per
- * template over the lowercased gig text; the winner needs at least
- * `MIN_KEYWORD_HITS` hits and strictly more than the runner-up, otherwise `null`
- * (the caller logs the gig as off-catalog and skips it).
+ * by a keyword guess. Absent that, distinct keyword-phrase hits (see
+ * `countDistinctHits`) are counted per template over the lowercased gig text; the
+ * winner needs at least `MIN_KEYWORD_HITS` hits and strictly more than the
+ * runner-up, otherwise `null` (the caller logs the gig as off-catalog and skips it).
  */
 export function matchTemplate(
   brief: JiffyBrief | null | undefined,
@@ -140,7 +162,7 @@ export function matchTemplate(
   const text = gigText.toLowerCase();
   const scored = TEMPLATE_IDS.map((templateId) => ({
     templateId,
-    hits: MATCHER_KEYWORDS[templateId].filter((keyword) => text.includes(keyword)).length,
+    hits: countDistinctHits(MATCHER_KEYWORDS[templateId], text),
   })).sort((a, b) => b.hits - a.hits);
 
   const [best, runnerUp] = scored;

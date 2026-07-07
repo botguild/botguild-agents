@@ -80,6 +80,23 @@ test('extractToolId: returns undefined when absent', () => {
   assert.equal(extractToolId('no ids here at all'), undefined);
 });
 
+test('extractToolId: bare form requires a boundary, does not match inside extraToolId', () => {
+  assert.equal(extractToolId('extraToolId: 9f8e7d6c5b4a3210'), undefined);
+});
+
+test('extractToolId: bare "toolId: <id>" as a standalone key still extracts', () => {
+  assert.equal(extractToolId('toolId: 9f8e7d6c5b4a3210'), '9f8e7d6c5b4a3210');
+});
+
+test('extractToolId: bare "toolId=<id>" mid-sentence still extracts', () => {
+  assert.equal(extractToolId('Use toolId=abc12345 here'), 'abc12345');
+});
+
+test('extractToolId: fenced JSON form still works alongside the boundary fix', () => {
+  const description = '```json\n{"toolId": "abc123def456"}\n```';
+  assert.equal(extractToolId(description), 'abc123def456');
+});
+
 // ---- matchTemplate ----
 
 test('matchTemplate: explicit valid template wins, via explicit', () => {
@@ -134,6 +151,21 @@ test('MATCHER_KEYWORDS: has an entry for every template id', () => {
 test('MATCHER_KEYWORDS: bare "converter" belongs to transformer only, not calculator', () => {
   assert.ok(MATCHER_KEYWORDS.transformer.includes('converter'));
   assert.ok(!MATCHER_KEYWORDS.calculator.includes('converter'));
+});
+
+test('matchTemplate: an intra-list subsumed hit ("plans" inside "compare plans") counts as one signal, not two', () => {
+  // pricing-table's keyword list has both 'plans' and 'compare plans'; this text only
+  // contains one real signal ('compare plans'), so it must not clear the 2-distinct-
+  // hits confidence gate.
+  const result = matchTemplate(null, 'customers can compare plans');
+  assert.equal(result, null);
+});
+
+test('matchTemplate: two genuinely independent pricing-table hits still match', () => {
+  // 'pricing page' and 'compare plans' are independent signals (neither is a substring
+  // of the other), so this should clear the gate even with the subsumption fix.
+  const result = matchTemplate(null, 'Check out our pricing page and compare plans here');
+  assert.deepEqual(result, { templateId: 'pricing-table', via: 'keywords' });
 });
 
 // ---- briefErrorsForTemplate ----
