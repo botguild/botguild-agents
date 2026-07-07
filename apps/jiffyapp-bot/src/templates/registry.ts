@@ -4,16 +4,20 @@
 
 import type { FileSet, TemplateId } from '../types.js';
 import { CALCULATOR } from './calculator.js';
+import { CSV_DASHBOARD } from './csvDashboard.js';
 import type { RenderContext, TemplateDefinition } from './engine.js';
 import { FORM } from './form.js';
 import { LANDING } from './landing.js';
+import { TRANSFORMER } from './transformer.js';
 import { WAITLIST } from './waitlist.js';
 
 export const TEMPLATES: Partial<Record<TemplateId, TemplateDefinition>> = {
   landing: LANDING,
   calculator: CALCULATOR,
   form: FORM,
+  'csv-dashboard': CSV_DASHBOARD,
   waitlist: WAITLIST,
+  transformer: TRANSFORMER,
 };
 
 export function getTemplate(id: TemplateId): TemplateDefinition {

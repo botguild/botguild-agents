@@ -7,6 +7,10 @@ pnpm-lock.yaml
 # Vendored third-party library (marked) — keep upstream's minified form as-is.
 docs/assets/marked.min.js
 
+# Vendored third-party deps (Papa Parse, Chart.js) — single-line generated string
+# exports; reformatting would just churn the diff against upstream.
+apps/jiffyapp-bot/src/templates/vendor/
+
 # Prose docs — formatting them would mangle author-chosen line wrapping
 # without improving readability.
 README.md
