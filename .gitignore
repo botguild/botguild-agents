@@ -5,3 +5,6 @@ dist/
 .turbo/
 *.tsbuildinfo
 data/
+
+# Claude worktrees
+.claude/worktrees/
