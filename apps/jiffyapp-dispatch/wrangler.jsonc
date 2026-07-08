@@ -8,10 +8,12 @@
   "vars": { "TOOL_HOST_SUFFIX": "jiffyapp.dev" },
   "d1_databases": [
     // Shared with jiffyapp-bot — same database, read-only usage here.
-    { "binding": "DB", "database_name": "jiffyapp", "database_id": "00000000-0000-0000-0000-000000000000" } // ⚠️ REPLACE
+    {
+      "binding": "DB",
+      "database_name": "jiffyapp",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    }, // ⚠️ REPLACE
   ],
-  "dispatch_namespaces": [
-    { "binding": "DISPATCH", "namespace": "jiffyapp-tools" }
-  ],
-  "observability": { "enabled": true }
+  "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "jiffyapp-tools" }],
+  "observability": { "enabled": true },
 }

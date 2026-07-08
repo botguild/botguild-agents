@@ -200,7 +200,9 @@ export async function processCycleJob(
 
     revived = tool.status === 'grace' || tool.status === 'suspended';
     const existingMs = tool.hostedUntil ? new Date(tool.hostedUntil).getTime() : 0;
-    hostedUntil = new Date(Math.max(existingMs, nowMs) + HOSTING_WINDOW_DAYS * DAY_MS).toISOString();
+    hostedUntil = new Date(
+      Math.max(existingMs, nowMs) + HOSTING_WINDOW_DAYS * DAY_MS,
+    ).toISOString();
     await cfg.tools.extendHosting(tool.toolId, {
       hostedUntil,
       hostingContractId: msg.contractId,

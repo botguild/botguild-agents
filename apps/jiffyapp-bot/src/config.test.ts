@@ -3,8 +3,14 @@ import assert from 'node:assert/strict';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
 import { applyMigrations } from './testSupport.js';
 import {
-  pricingCalc, TEMPLATE_PRICE_USD, HOSTING_PRICE_USD, scorerConfig, botProfile,
-  MAX_REPAIR_ROUNDS, MAX_SPEND_USD, JOB_WALL_CLOCK_MINUTES,
+  pricingCalc,
+  TEMPLATE_PRICE_USD,
+  HOSTING_PRICE_USD,
+  scorerConfig,
+  botProfile,
+  MAX_REPAIR_ROUNDS,
+  MAX_SPEND_USD,
+  JOB_WALL_CLOCK_MINUTES,
 } from './config.js';
 import { TEMPLATE_IDS } from './types.js';
 import type { Gig } from '@botguild/agent-core';
@@ -14,8 +20,15 @@ const gig = { id: 'g1', title: 't', description: 'd', budget: 20 } as unknown as
 test('migrations apply cleanly to a fresh in-memory D1', async () => {
   const db = createMemoryD1();
   await applyMigrations(db);
-  await db.prepare("INSERT INTO jobs (job_key, contract_id, kind, deliverable_token, created_at, updated_at) VALUES ('k:build', 'c1', 'build', 'tok', 'now', 'now')").run();
-  const row = await db.prepare('SELECT status FROM jobs WHERE job_key = ?').bind('k:build').first<{ status: string }>();
+  await db
+    .prepare(
+      "INSERT INTO jobs (job_key, contract_id, kind, deliverable_token, created_at, updated_at) VALUES ('k:build', 'c1', 'build', 'tok', 'now', 'now')",
+    )
+    .run();
+  const row = await db
+    .prepare('SELECT status FROM jobs WHERE job_key = ?')
+    .bind('k:build')
+    .first<{ status: string }>();
   assert.equal(row?.status, 'claimed');
 });
 

@@ -163,7 +163,9 @@ export function wrapContractHandlers(
   return Object.fromEntries(
     Object.entries(handlers).map(([eventType, handler]) => [
       eventType,
-      (OWNERSHIP_FILTERED_EVENTS as readonly string[]).includes(eventType) ? wrap(handler) : handler,
+      (OWNERSHIP_FILTERED_EVENTS as readonly string[]).includes(eventType)
+        ? wrap(handler)
+        : handler,
     ]),
   );
 }

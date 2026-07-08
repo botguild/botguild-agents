@@ -1,8 +1,16 @@
 // Domain types shared across the bot. No Workers globals — node-testable everywhere.
 
 export const TEMPLATE_IDS = [
-  'landing', 'calculator', 'form', 'csv-dashboard', 'widget',
-  'link-in-bio', 'pricing-table', 'quiz', 'waitlist', 'transformer',
+  'landing',
+  'calculator',
+  'form',
+  'csv-dashboard',
+  'widget',
+  'link-in-bio',
+  'pricing-table',
+  'quiz',
+  'waitlist',
+  'transformer',
 ] as const;
 export type TemplateId = (typeof TEMPLATE_IDS)[number];
 
@@ -26,8 +34,8 @@ export type GoldenStep =
   | { do: 'fill'; fields: Record<string, string | boolean> } // testid → value; boolean = checkbox
   | { do: 'select'; fields: Record<string, string> }
   | { do: 'click'; testid: string; nth?: number }
-  | { do: 'paste'; testid: string; text?: string; fixture?: string }  // exactly one of text|fixture (fixture = key into GoldenSet.fixtures)
-  | { do: 'upload'; testid: string; fixture: string };       // fixture = key into GoldenSet.fixtures
+  | { do: 'paste'; testid: string; text?: string; fixture?: string } // exactly one of text|fixture (fixture = key into GoldenSet.fixtures)
+  | { do: 'upload'; testid: string; fixture: string }; // fixture = key into GoldenSet.fixtures
 
 export type GoldenExpectation =
   | { testid: string; nth?: number; equals: string }
@@ -42,13 +50,13 @@ export type GoldenExpectation =
   | { metaEquals: { property: string; value: string } };
 
 export interface GoldenExample {
-  title: string;                 // human-readable row in the proposal table
-  steps: GoldenStep[];           // executor always loads the page first; steps may be []
+  title: string; // human-readable row in the proposal table
+  steps: GoldenStep[]; // executor always loads the page first; steps may be []
   expect: GoldenExpectation[];
 }
 
 export interface GoldenSet {
-  goldens: GoldenExample[];      // 3–7 per FR-3
+  goldens: GoldenExample[]; // 3–7 per FR-3
   fixtures?: Record<string, string>; // e.g. golden CSV content for upload/paste steps
 }
 
@@ -59,9 +67,9 @@ export type JobKind = 'build' | 'cycle' | 'edit';
 export interface JobMessage {
   kind: JobKind;
   contractId: string;
-  jobKey: string;               // sha256(contractId) + ':' + stage
-  toolId?: string;              // cycle + edit
-  requestId?: string;           // edit (thread message id)
+  jobKey: string; // sha256(contractId) + ':' + stage
+  toolId?: string; // cycle + edit
+  requestId?: string; // edit (thread message id)
 }
 
 export type ToolStatus = 'building' | 'live' | 'grace' | 'suspended' | 'killed';
@@ -71,7 +79,7 @@ export type ToolStatus = 'building' | 'live' | 'grace' | 'suspended' | 'killed';
 export interface FileEntry {
   content: string;
   contentType: string;
-  encoding?: 'base64';          // binary assets (re-hosted images)
+  encoding?: 'base64'; // binary assets (re-hosted images)
 }
 export type FileSet = Record<string, FileEntry>; // path ('/index.html') → entry
 
