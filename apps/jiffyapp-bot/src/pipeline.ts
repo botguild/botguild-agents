@@ -1837,8 +1837,12 @@ async function runBuildJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> 
       // with the reserved `stg-` prefix, is a reserved word, or carries a phishing/brand
       // fragment can NEVER become a live slug. A `stg-` slug would defeat the dispatcher's
       // status gate (FR-17 kill-switch, hosting-expiry 410); a brand/phishing slug is a
-      // phishing vector (paypal-login.jiffyapp.dev, …). `candidateSlugs` derives base + base-2..-9,
-      // which all share the policy-relevant fragments, so a policy-bad base rejects the whole set.
+      // phishing vector (paypal-login.jiffyapp.dev, …). For the SHARED-fragment classes
+      // (stg-/phishing/brand) every derived `base-2..-9` also carries the fragment, so a
+      // policy-bad base rejects the whole set and parks. EXACT-match classes (reserved word,
+      // too-short) fail only the bare base — the `-N` variants pass — so `chosen` lands on a
+      // suffixed variant; the `ordered` list handed to create() below is filtered to policy-clean
+      // so create()'s collision fallthrough can never mint the bare reserved/too-short base.
       if (slugPolicyErrors(candidate).length > 0) continue;
       const slugMod = await cfg.moderation.moderate(candidate);
       if (!slugMod.ok) {
@@ -1857,7 +1861,10 @@ async function runBuildJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> 
       );
       return;
     }
-    const ordered = [chosen, ...candidates.filter((candidate) => candidate !== chosen)];
+    // Every fallback slug create() may reserve on a collision must ALSO be policy-clean, so a taken
+    // `chosen` never falls through onto a bare reserved/too-short base still present in `candidates`.
+    const policyClean = candidates.filter((candidate) => slugPolicyErrors(candidate).length === 0);
+    const ordered = [chosen, ...policyClean.filter((candidate) => candidate !== chosen)];
     await cfg.tools.create({
       toolId: crypto.randomUUID(),
       slugCandidates: ordered,

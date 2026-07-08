@@ -868,6 +868,43 @@ test('slug policy: a slugPreference containing a blocked brand (paypal) is rejec
   assert.equal(h.deployerPuts.length, 0);
 });
 
+test('slug policy: a reserved-word base whose -2 variant is taken never mints the reserved base (F1 residual)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+
+  // A DIFFERENT tool already squats 'admin-2' — the first policy-clean candidate for the reserved
+  // base 'admin'. The bare reserved 'admin' must NOT be handed to create() as a collision fallback,
+  // so the build lands on 'admin-3', never 'admin' (admin.jiffyapp.dev). Reserved/too-short bases
+  // fail policy on an EXACT-match rule (not a shared fragment), so unlike stg-/phishing/brand they
+  // don't reject the whole candidate set — only the ordered list handed to create must exclude them.
+  const def = getTemplate('calculator');
+  await h.stores.tools.create({
+    toolId: 'tool-squatter',
+    slugCandidates: ['admin-2'],
+    templateId: 'calculator',
+    templateVersion: def.version,
+    buildContractId: 'contract-squatter',
+    name: 'squatter',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  const brief: JiffyBrief = { ...CALC_BRIEF, slugPreference: 'admin' };
+  const { msg, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg);
+
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  assert.ok(tool);
+  assert.equal(tool!.slug, 'admin-3'); // NOT the reserved 'admin'
+  assert.equal(tool!.status, 'live');
+});
+
 test('relay template unverified: registers the destination, mails once, parks awaiting_verification', async () => {
   const h = await makeHarness();
   const { msg, jobKey } = await h.seedBuildGig({
