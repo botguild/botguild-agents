@@ -172,8 +172,10 @@ interface Harness {
   };
   setPage: (state: PageState) => void;
   codegenQueue: CodegenResult[];
+  codegenCalls: CodegenArgs[];
   compileResult: { value: { ok: true; set: GoldenSet; costUsd: number } };
   recompileResult: { value: { ok: true; set: GoldenSet; costUsd: number } };
+  recompileCalls: Array<{ instruction: string }>;
   submitProposalCalls: Array<{ gigId: string; draft: ProposalDraft }>;
   deliverMilestoneCalls: Array<{
     contractId: string;
@@ -217,8 +219,10 @@ async function makeHarness(): Promise<Harness> {
   const openPage = async (): Promise<PageDriver> => fakeDriver(page);
 
   const codegenQueue: CodegenResult[] = [];
+  const codegenCalls: CodegenArgs[] = [];
   const codegen = {
-    async generate(_args: CodegenArgs): Promise<CodegenResult> {
+    async generate(args: CodegenArgs): Promise<CodegenResult> {
+      codegenCalls.push(args);
       const entry = codegenQueue.shift();
       if (!entry) throw new Error('codegen fake: queue empty (test under-provisioned)');
       return entry;
@@ -280,11 +284,13 @@ async function makeHarness(): Promise<Harness> {
   const recompileResult: Harness['recompileResult'] = {
     value: { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 },
   };
+  const recompileCalls: Array<{ instruction: string }> = [];
   const compiler = {
     async compile(): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
       return compileResult.value;
     },
-    async recompileForEdit(): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
+    async recompileForEdit(args: { instruction: string }): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
+      recompileCalls.push(args);
       return recompileResult.value;
     },
   };
@@ -472,8 +478,10 @@ async function makeHarness(): Promise<Harness> {
       page = state;
     },
     codegenQueue,
+    codegenCalls,
     compileResult,
     recompileResult,
+    recompileCalls,
     submitProposalCalls,
     deliverMilestoneCalls,
     messages,
@@ -625,11 +633,12 @@ test('jiffyapp e2e: discover → build → host → edit → report → expiry �
       h.setPage(calcLivePage('$100.00'));
       h.codegenQueue.push(okCodegen(calcSlots()));
       // Buyer posts an edit request in the (open) cycle thread.
+      const editInstruction = 'change the headline to Rate Estimator';
       h.threadsByContract.set(CYCLE1_CONTRACT, [
         {
           id: 'edit-msg-1',
           botId: 'buyer-1',
-          content: 'edit: change the headline to Rate Estimator',
+          content: `edit: ${editInstruction}`,
         },
       ]);
 
@@ -645,6 +654,16 @@ test('jiffyapp e2e: discover → build → host → edit → report → expiry �
       assert.ok(h.deployerPuts.includes(slug));
       assert.equal(h.deliverMilestoneCalls.length, 1); // still just the build delivery
       assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, CYCLE1_CONTRACT), 1);
+
+      // Instruction honored: the edit instruction appears in both recompile and codegen calls
+      assert.ok(
+        h.recompileCalls.some((call) => call.instruction === editInstruction),
+        `recompileForEdit should have been called with instruction: "${editInstruction}"`,
+      );
+      assert.ok(
+        h.codegenCalls.some((call) => call.instruction === editInstruction),
+        `codegen.generate should have been called with instruction: "${editInstruction}"`,
+      );
     },
   );
 

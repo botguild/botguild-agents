@@ -382,3 +382,52 @@ test('orphan backstop: a request that already has a job row is not re-enqueued',
 
   assert.equal(h.queueSent.length, 0);
 });
+
+test('orphan backstop: an orphaned edit >30 min old over-quota is held, not re-enqueued', async () => {
+  const h = await makeHarness(ORPHAN_START);
+  await h.seedOpenCycle({
+    contractId: 'c-orph-quota',
+    toolId: 'tool-quota',
+    windowStart: '2026-01-20T00:00:00.000Z',
+    windowEnd: '2026-02-20T00:00:00.000Z',
+  });
+
+  // Exhaust the quota with 3 normal edits
+  h.threadsByContract.set('c-orph-quota', [
+    { id: 'm1', botId: 'buyer-1', content: 'edit: one' },
+    { id: 'm2', botId: 'buyer-1', content: 'edit: two' },
+    { id: 'm3', botId: 'buyer-1', content: 'edit: three' },
+  ]);
+  await pollEditRequests(h.services);
+  assert.equal(h.queueSent.length, 3);
+  assert.equal(await h.usage.getUsed('edit:tool-quota', 'c-orph-quota'), EDITS_PER_CYCLE);
+
+  // Manually create an orphaned edit: claimed but no quotaScope/quotaPeriod, no job
+  await h.edits.claim({
+    requestId: 'm-orphan-quota',
+    toolId: 'tool-quota',
+    contractId: 'c-orph-quota',
+    instruction: 'change colors',
+  });
+
+  // Advance past orphan cutoff to trigger backstop
+  h.setNow(new Date(new Date(ORPHAN_START).getTime() + (ORPHAN_EDIT_CLAIM_MINUTES + 1) * 60_000));
+  const holdMessagesBefore = h.messages.length;
+  await pollEditRequests(h.services);
+
+  // The orphan is held, not re-enqueued
+  const orphan = await h.edits.get('m-orphan-quota');
+  assert.equal(orphan?.status, 'held');
+  assert.equal(h.queueSent.length, 3); // no additional job enqueued
+  assert.equal(await h.usage.getUsed('edit:tool-quota', 'c-orph-quota'), EDITS_PER_CYCLE); // no additional reservation
+
+  // Exactly one hold message was sent
+  const holdMessagesAfter = h.messages.length;
+  assert.equal(holdMessagesAfter - holdMessagesBefore, 1);
+  assert.ok(h.messages.some((m) => /HELD/i.test(m.content)));
+
+  // A second sweep does not re-send (orphan now has status 'held' and is not re-checked)
+  const holdMessagesAfter2ndSweep = h.messages.length;
+  await pollEditRequests(h.services);
+  assert.equal(h.messages.length, holdMessagesAfter2ndSweep); // no additional message
+});
