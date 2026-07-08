@@ -84,22 +84,28 @@ function toJobMessage(job: {
 /**
  * Score-and-propose callback for a freshly-discovered gig (§15 KPI): classify it, then
  * dispatch to the cycle/build path, or — for a gig that scored well enough that the bot
- * WOULD have bid (`shouldPropose`) but got skipped for being off-catalog or brief-incomplete
- * — record the off-catalog-skip audit row so the operator can see near-misses. A gig that
- * scores too low to ever bid on (or carries no brief/prose match at all, 'no-brief') is a
- * pure miss, not a near-miss, so it returns silently.
+ * WOULD have bid (`shouldPropose`) but got skipped anyway — record the off-catalog-skip
+ * audit row so the operator can see every near-miss, segmented by skip reason. The KPI
+ * wants EVERY scored skip on a gig the scorer would have bid on: off-catalog (a fenced
+ * brief that named no matching template), no-brief (a prose gig with no fenced JSON at
+ * all that still didn't keyword-match any template), and incomplete-brief* (matched a
+ * template but failed its required-field check) all count. `invalid-template` is the one
+ * exception — an explicitly-wrong `brief.template` value is buyer error noise, not catalog
+ * demand, so it's never audited. A gig that scores too low to ever bid on returns silently
+ * regardless of reason.
  */
 export async function maybePropose(s: SweepServices, gig: Gig): Promise<void> {
   const logger = s.logger.child({ gigId: gig.id });
   const c = classifyGig(gig);
 
   if (c.kind === 'skip') {
-    const isNearMiss = c.reason === 'off-catalog' || c.reason.startsWith('incomplete-brief');
-    if (isNearMiss && shouldPropose(gig, scorerConfig)) {
+    const isScoredSkipReason =
+      c.reason === 'off-catalog' || c.reason === 'no-brief' || c.reason.startsWith('incomplete-brief');
+    if (isScoredSkipReason && shouldPropose(gig, scorerConfig)) {
       await s.audit.record({ scope: `gig:${gig.id}`, gate: 'off-catalog-skip', result: c.reason });
       logger.info(
         { reason: c.reason },
-        'gig scored well but was skipped as off-catalog/incomplete',
+        'gig scored well but was skipped as off-catalog/no-brief/incomplete',
       );
     }
     return;

@@ -335,6 +335,26 @@ test('maybePropose: off-catalog-but-scored gig records the off-catalog-skip KPI 
   assert.equal(rows[0]?.result, 'off-catalog');
 });
 
+test('maybePropose: scored prose gig with no fenced brief and no template match records no-brief KPI', async () => {
+  const h = await makeHarness();
+  const gig = makeGig({
+    id: 'g-nobrief',
+    category: 'Miscellaneous', // not scorerConfig.categories — relevance comes from keyword fallback
+    title: 'Something for my website',
+    description:
+      'A micro-app prototype for internal use; this is a general web tool with no ' +
+      'specific category yet, just a rough idea written out in plain prose.',
+  });
+
+  await maybePropose(h.services, gig);
+
+  assert.equal(h.submitProposalCalls.length, 0);
+  const rows = await h.audit.listByScope('gig:g-nobrief');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.gate, 'off-catalog-skip');
+  assert.equal(rows[0]?.result, 'no-brief');
+});
+
 test('maybePropose: cycle gig with a known toolId proposes a hosting-cycle renewal', async () => {
   const h = await makeHarness();
   const def = getTemplate('calculator');
@@ -552,14 +572,83 @@ test('pollBriefCorrections leaves the job parked when no message parses as a cor
   );
 });
 
-test('sweep-step isolation: a gig-poll failure does not prevent the reputation snapshot from saving', async () => {
+// Note: a plain `listGigs` failure does NOT exercise step isolation — runGigPollSweep
+// catches it internally (pollSweep.ts) and returns an empty result, so step 1's own
+// try/catch in runFifteenMinuteSweep is never reached. The two tests below use failures
+// that genuinely escape their step, to prove runFifteenMinuteSweep's per-step try/catch
+// is what's doing the isolating.
+
+test('sweep-step isolation: a seen-store failure escapes runGigPollSweep uncaught and is caught by step 1s own try/catch; later steps still run', async () => {
   const h = await makeHarness();
-  h.listGigs.impl = async () => {
-    throw new Error('listGigs: simulated platform outage');
+  // seen.has is called OUTSIDE runGigPollSweep's per-gig try/catch (pollSweep.ts), so a
+  // throw here propagates all the way out of runGigPollSweep itself.
+  h.listGigs.impl = async () => [makeGig({ id: 'g-seen-boom' })];
+  h.services.seen.has = async () => {
+    throw new Error('seen.has: simulated KV outage');
   };
 
   await runFifteenMinuteSweep(h.services);
 
+  assert.equal(h.submitProposalCalls.length, 0); // never reached onGig
+
+  const snapshot = await loadReputationSnapshot(h.db);
+  assert.equal((snapshot as { reputationScore: number } | null)?.reputationScore, 82);
+  assert.equal((snapshot as { disputeRate: number } | null)?.disputeRate, 0.01);
+});
+
+test('sweep-step isolation: a jobs.listParked failure escapes reenqueueParked (step 3) uncaught; step 5s brief-correction still runs and step 7s reputation snapshot still saves', async () => {
+  const h = await makeHarness();
+
+  // A moderation_outage-parked job step 3 would normally re-enqueue — reenqueueParked
+  // has no internal try/catch, so a throw from listParked propagates straight out of it.
+  const modKey = await h.claimAndPark({
+    contractId: 'c-mod-boom',
+    kind: 'build',
+    reason: 'moderation_outage',
+  });
+
+  // A brief_invalid-parked job step 5 (pollBriefCorrections) should still pick up and
+  // correct, proving step 3's throw didn't take the rest of the sweep down with it.
+  const briefKey = await h.claimAndPark({
+    contractId: 'c-brief-still-runs',
+    kind: 'build',
+    reason: 'brief_invalid',
+  });
+  h.threadsByContract.set('c-brief-still-runs', [
+    {
+      id: 'm1',
+      botId: 'buyer-1',
+      content: '```json\n{"name":"Fixed Name","description":"Fixed description text."}\n```',
+    },
+  ]);
+
+  const originalListParked = h.jobs.listParked;
+  h.services.jobs.listParked = async (reason?: string) => {
+    if (reason === 'moderation_outage' || reason === 'psi_outage') {
+      throw new Error('listParked: simulated D1 outage');
+    }
+    return originalListParked(reason);
+  };
+
+  await runFifteenMinuteSweep(h.services);
+
+  // Step 3 blew up before ever unparking/sending the moderation_outage job.
+  assert.equal(
+    h.queueSent.some((m) => m.jobKey === modKey),
+    false,
+  );
+  assert.equal((await h.jobs.get(modKey))?.status, 'parked');
+
+  // Step 5 still ran and applied the correction despite step 3's throw.
+  const briefRow = await h.jobs.get(briefKey);
+  assert.equal(briefRow?.status, 'claimed');
+  assert.deepEqual(briefRow?.brief, { name: 'Fixed Name', description: 'Fixed description text.' });
+  assert.equal(
+    h.queueSent.some((m) => m.jobKey === briefKey),
+    true,
+  );
+
+  // Step 7 still saved the reputation snapshot.
   const snapshot = await loadReputationSnapshot(h.db);
   assert.equal((snapshot as { reputationScore: number } | null)?.reputationScore, 82);
   assert.equal((snapshot as { disputeRate: number } | null)?.disputeRate, 0.01);
