@@ -64,7 +64,7 @@ import type { PsiResult } from './psi.js';
 import { proposalBindable, type GoldenCompiler } from './goldenCompiler.js';
 import { formatBriefErrors } from './brief.js';
 import { classifyGig } from './proposer.js';
-import { candidateSlugs, stagingSlug } from './slug.js';
+import { candidateSlugs, slugPolicyErrors, stagingSlug } from './slug.js';
 import { getTemplate } from './templates/registry.js';
 import {
   buildToolWorkerScript,
@@ -1753,6 +1753,13 @@ async function runBuildJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> 
     const candidates = candidateSlugs(brief.slugPreference, brief.name);
     let chosen: string | undefined;
     for (const candidate of candidates) {
+      // Naming-policy gate (templates PRD §3) BEFORE content-safety: a candidate that starts
+      // with the reserved `stg-` prefix, is a reserved word, or carries a phishing/brand
+      // fragment can NEVER become a live slug. A `stg-` slug would defeat the dispatcher's
+      // status gate (FR-17 kill-switch, hosting-expiry 410); a brand/phishing slug is a
+      // phishing vector (paypal-login.jiffyapp.dev, …). `candidateSlugs` derives base + base-2..-9,
+      // which all share the policy-relevant fragments, so a policy-bad base rejects the whole set.
+      if (slugPolicyErrors(candidate).length > 0) continue;
       const slugMod = await cfg.moderation.moderate(candidate);
       if (!slugMod.ok) {
         await parkModerationOutage('slug');
@@ -1765,7 +1772,7 @@ async function runBuildJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> 
     if (chosen === undefined) {
       await parkBriefInvalid(
         formatBriefErrors([
-          'every candidate slug was flagged by content-safety; please suggest a different slugPreference',
+          'every candidate slug was rejected by naming policy or content-safety; please suggest a different slugPreference',
         ]),
       );
       return;

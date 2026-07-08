@@ -20,11 +20,28 @@ export default {
     const slug = resolveSlug(new URL(request.url).hostname, env.TOOL_HOST_SUFFIX);
     if (!slug) return html(NOT_FOUND_PAGE_HTML, 404);
 
+    // Read the tools row up front. Legit staging builds have NO tools row (rows always use the
+    // real promoted slug, never `stg-`), so a `stg-` host with a real row is defense-in-depth
+    // against a slug that slipped the bot's naming policy — it MUST be status-gated, not an
+    // auth-free passthrough (else a `stg-` slug would defeat the FR-17 kill switch and the
+    // hosting-expiry 410). Wrap the read (F5): a D1 blip serves an honest 404, never a 500
+    // (matches the DISPATCH.get try/catch below). Staging traffic is low-volume (Browser
+    // Rendering during builds only), so the extra read is negligible.
+    let row: { status: string } | null;
+    try {
+      row = await env.DB.prepare('SELECT status FROM tools WHERE slug = ?')
+        .bind(slug)
+        .first<{ status: string }>();
+    } catch {
+      return html(NOT_FOUND_PAGE_HTML, 404);
+    }
+
     // Staging builds (bot Task 17) are browser-reachable before promotion so Playwright
-    // (Browser Rendering) can run goldens against them. Short-circuit BEFORE the D1 read —
-    // there is no tools row yet — and serve the in-namespace script directly, marked
-    // non-cacheable + noindex so a staging preview never lands in a cache or a search index.
-    if (isStagingSlug(slug)) {
+    // (Browser Rendering) can run goldens against them. A `stg-` slug with NO tools row is
+    // served straight from the namespace, marked non-cacheable + noindex so a staging preview
+    // never lands in a cache or a search index. A `stg-` slug WITH a row falls through to the
+    // status gate below (never a passthrough).
+    if (isStagingSlug(slug) && !row) {
       try {
         const staged = await env.DISPATCH.get(slug).fetch(request);
         const headers = new Headers(staged.headers);
@@ -40,9 +57,6 @@ export default {
       }
     }
 
-    const row = await env.DB.prepare('SELECT status FROM tools WHERE slug = ?')
-      .bind(slug)
-      .first<{ status: string }>();
     const decision = decideDispatch(row?.status ?? null);
     if (decision.kind === 'gone') return html(GONE_PAGE_HTML, 410);
     if (decision.kind === 'unknown') return html(NOT_FOUND_PAGE_HTML, 404);

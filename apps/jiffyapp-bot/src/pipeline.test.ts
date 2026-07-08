@@ -830,6 +830,44 @@ test('flagged brief: messages the buyer and marks the job rejected', async () =>
   assert.equal(h.deployerPuts.length, 0);
 });
 
+test('slug policy: a slugPreference normalizing to stg-* is rejected — parks, no tool, no deploy', async () => {
+  const h = await makeHarness();
+  const brief: JiffyBrief = { ...CALC_BRIEF, slugPreference: 'stg cool' };
+  const { msg, jobKey, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg); // controlled park — no throw
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'parked');
+  assert.equal(job?.parkReason, 'brief_invalid');
+  assert.match(h.messages[h.messages.length - 1].content, /naming policy/i);
+  // No tool row was ever created (a stg- slug can never be reserved) and nothing deployed.
+  assert.equal(await h.stores.tools.getByBuildContract(contractId), null);
+  assert.equal(h.deployerPuts.length, 0);
+});
+
+test('slug policy: a slugPreference containing a blocked brand (paypal) is rejected — parks, no deploy', async () => {
+  const h = await makeHarness();
+  const brief: JiffyBrief = { ...CALC_BRIEF, slugPreference: 'paypal' };
+  const { msg, jobKey, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg);
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'parked');
+  assert.equal(job?.parkReason, 'brief_invalid');
+  assert.equal(await h.stores.tools.getByBuildContract(contractId), null);
+  assert.equal(h.deployerPuts.length, 0);
+});
+
 test('relay template unverified: registers the destination, mails once, parks awaiting_verification', async () => {
   const h = await makeHarness();
   const { msg, jobKey } = await h.seedBuildGig({
