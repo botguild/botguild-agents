@@ -128,6 +128,14 @@ function serviceReportMarkdown(args: {
  * the month-end report's job (`deliverCycleReports`), NOT this function — the job row stays
  * `in_progress` with a lightweight checkpoint so a redelivered claim on the same contract
  * skips cleanly (JobStore's conflict policy).
+ *
+ * Idempotent per contract: `tools.extendHosting` is a compounding recompute
+ * (`max(existing hostedUntil, now) + HOSTING_WINDOW_DAYS`), so it — along with cycle
+ * creation and the in-thread confirmation — MUST NOT be re-run for a contract that already
+ * extended this tool (`tool.latestHostingContractId === msg.contractId`). A crash between
+ * `extendHosting` and the trailing checkpoint would otherwise be redelivered (queue retry,
+ * or the daily stuck-claim sweep) and double the paid window. On a detected repeat, only the
+ * tail bookkeeping (build log / audit / checkpoint) re-runs so the job row still converges.
  */
 export async function processCycleJob(
   cfg: PipelineConfig,
@@ -167,27 +175,48 @@ export async function processCycleJob(
   const nowMs = nowDate.getTime();
   const windowStart = nowDate.toISOString();
   const windowEnd = new Date(nowMs + HOSTING_WINDOW_DAYS * DAY_MS).toISOString();
-  await cfg.cycles.create({
-    contractId: msg.contractId,
-    toolId: tool.toolId,
-    windowStart,
-    windowEnd,
-  });
 
-  const revived = tool.status === 'grace' || tool.status === 'suspended';
-  const existingMs = tool.hostedUntil ? new Date(tool.hostedUntil).getTime() : 0;
-  const hostedUntil = new Date(
-    Math.max(existingMs, nowMs) + HOSTING_WINDOW_DAYS * DAY_MS,
-  ).toISOString();
-  await cfg.tools.extendHosting(tool.toolId, {
-    hostedUntil,
-    hostingContractId: msg.contractId,
-  });
+  // Idempotency guard: extendHosting is NOT safe to replay — it recomputes
+  // max(existing hostedUntil, now) + HOSTING_WINDOW_DAYS, so a redelivery that
+  // re-runs it after already having extended for this exact contract would
+  // compound a second window on top of the first (a paid month becoming two).
+  // A crash/retry between extendHosting and the checkpoint is exactly the case
+  // the queue's at-least-once delivery (plus the daily stuck-claim sweep) can
+  // produce, so keyed idempotency — not checkpoint-ordering — is the fix: if
+  // this contract already extended this tool, skip the cycle-creation/extend/
+  // confirmation-message steps and only (re-)run the tail bookkeeping so the
+  // job row still converges to checkpointed.
+  const alreadyExtended = tool.latestHostingContractId === msg.contractId;
+  let hostedUntil = tool.hostedUntil ?? windowEnd;
+  let revived = false;
 
-  await cfg.client.sendMessage(
-    msg.contractId,
-    cycleConfirmMessage({ windowStart, windowEnd, revived }),
-  );
+  if (!alreadyExtended) {
+    await cfg.cycles.create({
+      contractId: msg.contractId,
+      toolId: tool.toolId,
+      windowStart,
+      windowEnd,
+    });
+
+    revived = tool.status === 'grace' || tool.status === 'suspended';
+    const existingMs = tool.hostedUntil ? new Date(tool.hostedUntil).getTime() : 0;
+    hostedUntil = new Date(Math.max(existingMs, nowMs) + HOSTING_WINDOW_DAYS * DAY_MS).toISOString();
+    await cfg.tools.extendHosting(tool.toolId, {
+      hostedUntil,
+      hostingContractId: msg.contractId,
+    });
+
+    await cfg.client.sendMessage(
+      msg.contractId,
+      cycleConfirmMessage({ windowStart, windowEnd, revived }),
+    );
+  } else {
+    cfg.logger.info(
+      { jobKey: msg.jobKey, contractId: msg.contractId, toolId: tool.toolId },
+      'cycle already applied — resuming bookkeeping only',
+    );
+  }
+
   await cfg.buildLog.append(job.deliverableToken, 'cycle', 'hosting cycle window confirmed', {
     toolId: tool.toolId,
     windowStart,
@@ -198,7 +227,7 @@ export async function processCycleJob(
   await cfg.audit.record({
     scope: msg.contractId,
     gate: 'cycle',
-    result: revived ? 'revived' : 'window-created',
+    result: alreadyExtended ? 'already-applied' : revived ? 'revived' : 'window-created',
     detail: { toolId: tool.toolId, hostedUntil },
   });
 

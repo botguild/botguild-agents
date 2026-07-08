@@ -405,6 +405,80 @@ test('processCycleJob: redelivered claim on the same contract skips as in-progre
   assert.deepEqual(decision, { action: 'skip', reason: 'in-progress' });
 });
 
+test('processCycleJob: redelivery after a crash between extendHosting and checkpoint does not double-extend', async () => {
+  const h = await makeHarness();
+  const existingHostedUntil = new Date(h.clock.now().getTime() + 10 * DAY_MS).toISOString();
+  await h.seedTool({ toolId: 'tool-14', slug: 'rate-calc-14', hostedUntil: existingHostedUntil });
+  const { jobKey, msg } = await h.claimCycleJob({ contractId: 'c-cyc-14', toolId: 'tool-14' });
+
+  // Script sendMessage (which runs AFTER extendHosting, before the trailing buildLog/audit/
+  // checkpoint bookkeeping) to throw on its first call only, simulating a crash right in that
+  // window — the exact gap the redelivery/stuck-claim sweep can then retry into.
+  let sendMessageCalls = 0;
+  const originalSendMessage = h.cfg.client.sendMessage.bind(h.cfg.client);
+  h.cfg.client.sendMessage = async (contractId: string, content: string): Promise<void> => {
+    sendMessageCalls++;
+    if (sendMessageCalls === 1) {
+      throw new Error('sendMessage failed (simulated)');
+    }
+    return originalSendMessage(contractId, content);
+  };
+
+  await assert.rejects(() => processCycleJob(h.cfg, msg), /sendMessage failed \(simulated\)/);
+
+  const afterCrash = await h.stores.tools.get('tool-14');
+  const expectedHostedUntil = new Date(
+    new Date(existingHostedUntil).getTime() + HOSTING_WINDOW_DAYS * DAY_MS,
+  ).toISOString();
+  assert.equal(afterCrash?.hostedUntil, expectedHostedUntil);
+  assert.equal(afterCrash?.latestHostingContractId, 'c-cyc-14');
+
+  // Redelivery: same message, sendMessage now healthy.
+  await processCycleJob(h.cfg, msg);
+
+  const afterRedelivery = await h.stores.tools.get('tool-14');
+  assert.equal(afterRedelivery?.hostedUntil, expectedHostedUntil, 'must not double-extend to +60d');
+  assert.equal(afterRedelivery?.latestHostingContractId, 'c-cyc-14');
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'in_progress');
+  assert.ok(job?.checkpoint);
+
+  // sendMessage was attempted once (and threw); the redelivery detects the extension already
+  // applied to this contract and skips re-sending the confirmation entirely.
+  assert.equal(sendMessageCalls, 1);
+  assert.equal(h.messages.length, 0);
+});
+
+test('processCycleJob: clean redelivery of a fully completed cycle job is a no-op', async () => {
+  const h = await makeHarness();
+  const existingHostedUntil = new Date(h.clock.now().getTime() + 10 * DAY_MS).toISOString();
+  await h.seedTool({ toolId: 'tool-15', slug: 'rate-calc-15', hostedUntil: existingHostedUntil });
+  const { jobKey, msg } = await h.claimCycleJob({ contractId: 'c-cyc-15', toolId: 'tool-15' });
+
+  await processCycleJob(h.cfg, msg);
+
+  const expectedHostedUntil = new Date(
+    new Date(existingHostedUntil).getTime() + HOSTING_WINDOW_DAYS * DAY_MS,
+  ).toISOString();
+  const afterFirst = await h.stores.tools.get('tool-15');
+  assert.equal(afterFirst?.hostedUntil, expectedHostedUntil);
+  assert.equal(h.messages.length, 1);
+
+  // A second, direct redelivery of the exact same message (e.g. the daily stuck-claim sweep
+  // re-enqueuing a job it believes is still outstanding).
+  await processCycleJob(h.cfg, msg);
+
+  const afterSecond = await h.stores.tools.get('tool-15');
+  assert.equal(afterSecond?.hostedUntil, expectedHostedUntil, 'must not double-extend');
+  assert.equal(afterSecond?.latestHostingContractId, 'c-cyc-15');
+  assert.equal(h.messages.length, 1, 'no extra confirmation message on redelivery');
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'in_progress');
+  assert.ok(job?.checkpoint);
+});
+
 // =============================================================================
 // sweepHostingExpiry
 // =============================================================================
