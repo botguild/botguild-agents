@@ -165,6 +165,10 @@ export interface JobStore {
   ): Promise<void>;
   /** Denormalizes spent_usd + repair_rounds from the checkpoint alongside the JSON blob. */
   saveCheckpoint(jobKey: string, cp: BuildCheckpoint): Promise<void>;
+  /** Overwrites brief_json in place without touching status/park_reason (unlike setInProgress,
+   *  which forces status to 'in_progress' — wrong for a still-parked row). Used by the 15-min
+   *  sweep's brief-correction poll to apply a corrected brief BEFORE unparking the job. */
+  updateBrief(jobKey: string, briefJson: string): Promise<void>;
   park(jobKey: string, reason: string): Promise<void>;
   /** parked → claimed, clearing park_reason, ahead of a cron re-enqueue. */
   unpark(jobKey: string): Promise<void>;
@@ -246,6 +250,13 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
           'UPDATE jobs SET checkpoint_json = ?, spent_usd = ?, repair_rounds = ?, updated_at = ? WHERE job_key = ?',
         )
         .bind(JSON.stringify(cp), cp.spendUsd, cp.round, touch(), jobKey)
+        .run();
+    },
+
+    async updateBrief(jobKey, briefJson): Promise<void> {
+      await db
+        .prepare('UPDATE jobs SET brief_json = ?, updated_at = ? WHERE job_key = ?')
+        .bind(briefJson, touch(), jobKey)
         .run();
     },
 

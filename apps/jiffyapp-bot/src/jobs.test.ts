@@ -194,6 +194,21 @@ test('setInProgress sets status and only overwrites provided fields (COALESCE)',
   assert.deepEqual(row?.goldens, goldens);
 });
 
+test('updateBrief overwrites brief_json without forcing status (unlike setInProgress)', async () => {
+  const { store } = await freshJobStore();
+  await store.claim({ jobKey: 'k1', contractId: 'c1', kind: 'build' });
+  await store.park('k1', 'brief_invalid');
+
+  const corrected: JiffyBrief = { name: 'Fixed Calc', description: 'a corrected calculator' };
+  await store.updateBrief('k1', JSON.stringify(corrected));
+
+  const row = await store.get('k1');
+  assert.deepEqual(row?.brief, corrected);
+  // Still parked — updateBrief must not touch status/park_reason (the sweep unparks separately).
+  assert.equal(row?.status, 'parked');
+  assert.equal(row?.parkReason, 'brief_invalid');
+});
+
 test('checkpoint round-trips including activeMs and denormalizes spent_usd/repair_rounds', async () => {
   const { store, db } = await freshJobStore();
   await store.claim({ jobKey: 'k1', contractId: 'c1', kind: 'build' });

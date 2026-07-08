@@ -81,6 +81,8 @@ import {
   type RelayDeps,
   type RelayMailer,
 } from './relay.js';
+import { createThreadReader } from './threads.js';
+import { runDailySweep, runFifteenMinuteSweep, type SweepServices } from './sweeps.js';
 import type { JobMessage } from './types.js';
 
 // @cloudflare/workers-types (pinned in package.json) already declares `SendEmail`
@@ -141,6 +143,8 @@ interface Services {
   negotiationStore: D1NegotiationStore;
   /** The full build/live-gate/deliver pipeline config for the queue consumer (Tasks 17/18). */
   pipeline: PipelineConfig;
+  /** The cron sweep layer's services (Tasks 20/21/22). */
+  sweeps: SweepServices;
   /** Shared deps for the public relay routes (Task 19) — same relay/usage/audit/mailer the
    *  pipeline uses, so live submissions and the build pipeline agree on one set of counters. */
   relayDeps: RelayDeps;
@@ -302,6 +306,38 @@ function getServices(env: Env): Services {
     logger,
   };
 
+  // --- Cron sweep layer (Tasks 20/21/22) --------------------------------------
+  const sweeps: SweepServices = {
+    db: env.DB,
+    client,
+    jobs,
+    tools,
+    cycles,
+    gigs,
+    edits: editRequests,
+    usage,
+    relay,
+    buildLog,
+    audit,
+    seen,
+    negotiationStore,
+    // AgentMcpClient satisfies ReputationSource (getMyReputation/getMyEarnings).
+    reputationSource: mcpClient,
+    proposer: jiffyProposer,
+    costEstimator,
+    threadReader: createThreadReader({
+      apiUrl: env.BOTGUILD_API_URL,
+      apiKey: env.BOTGUILD_API_KEY,
+    }),
+    queue: env.JOBS,
+    emailRouting,
+    fetchImpl: globalThis.fetch,
+    botId,
+    publicBaseUrl,
+    toolHostSuffix: env.TOOL_HOST_SUFFIX,
+    logger,
+  };
+
   const app = buildApp(env, {
     logger,
     client,
@@ -338,6 +374,7 @@ function getServices(env: Env): Services {
     seen,
     negotiationStore,
     pipeline,
+    sweeps,
     relayDeps,
     closeBrowser: pageFactory.closeAll,
     app,
@@ -650,7 +687,7 @@ async function scheduled(
   s.logger.info({ cron: controller.cron }, 'cron sweep starting');
 
   if (controller.cron === DAILY_CRON) {
-    s.logger.info({ cron: controller.cron }, 'sweeps not yet wired (Task 20/21)');
+    await runDailySweep(s.sweeps);
     return;
   }
 
@@ -673,7 +710,7 @@ async function scheduled(
       logger: s.logger,
     });
   }
-  s.logger.info({ cron: controller.cron }, 'sweeps not yet wired (Task 20/21)');
+  await runFifteenMinuteSweep(s.sweeps);
 }
 
 async function queue(
