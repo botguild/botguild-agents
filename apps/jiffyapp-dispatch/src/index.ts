@@ -1,4 +1,10 @@
-import { resolveSlug, decideDispatch, GONE_PAGE_HTML, NOT_FOUND_PAGE_HTML } from './decide.js';
+import {
+  resolveSlug,
+  decideDispatch,
+  isStagingSlug,
+  GONE_PAGE_HTML,
+  NOT_FOUND_PAGE_HTML,
+} from './decide.js';
 
 export interface Env {
   DB: D1Database;
@@ -13,6 +19,26 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const slug = resolveSlug(new URL(request.url).hostname, env.TOOL_HOST_SUFFIX);
     if (!slug) return html(NOT_FOUND_PAGE_HTML, 404);
+
+    // Staging builds (bot Task 17) are browser-reachable before promotion so Playwright
+    // (Browser Rendering) can run goldens against them. Short-circuit BEFORE the D1 read —
+    // there is no tools row yet — and serve the in-namespace script directly, marked
+    // non-cacheable + noindex so a staging preview never lands in a cache or a search index.
+    if (isStagingSlug(slug)) {
+      try {
+        const staged = await env.DISPATCH.get(slug).fetch(request);
+        const headers = new Headers(staged.headers);
+        headers.set('Cache-Control', 'no-store');
+        headers.set('X-Robots-Tag', 'noindex');
+        return new Response(staged.body, {
+          status: staged.status,
+          statusText: staged.statusText,
+          headers,
+        });
+      } catch {
+        return html(NOT_FOUND_PAGE_HTML, 404);
+      }
+    }
 
     const row = await env.DB.prepare('SELECT status FROM tools WHERE slug = ?')
       .bind(slug)

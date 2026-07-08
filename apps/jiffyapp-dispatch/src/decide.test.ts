@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveSlug, decideDispatch, GONE_PAGE_HTML, NOT_FOUND_PAGE_HTML } from './decide.js';
+import {
+  resolveSlug,
+  decideDispatch,
+  isStagingSlug,
+  GONE_PAGE_HTML,
+  NOT_FOUND_PAGE_HTML,
+} from './decide.js';
 
 test('resolveSlug extracts the leftmost label under the tool suffix', () => {
   assert.equal(resolveSlug('acme-rates.jiffyapp.dev', 'jiffyapp.dev'), 'acme-rates');
@@ -27,6 +33,15 @@ test('decideDispatch 410s suspended and killed tools', () => {
 test('decideDispatch treats building/unknown as not found', () => {
   assert.deepEqual(decideDispatch('building'), { kind: 'unknown' });
   assert.deepEqual(decideDispatch(null), { kind: 'unknown' });
+});
+
+// Staging slugs (bot Task 17) are recognized by their `stg-` prefix and served straight from
+// the dispatch namespace before the D1 status read (index.ts) — no tools row exists yet.
+test('isStagingSlug is true only for the stg- prefix', () => {
+  assert.equal(isStagingSlug('stg-0123456789abcdef01234567'), true);
+  assert.equal(isStagingSlug('acme-rates'), false);
+  assert.equal(isStagingSlug('staging'), false);
+  assert.equal(isStagingSlug('stg'), false);
 });
 
 test('gone page carries the eject note; both pages are complete HTML', () => {
