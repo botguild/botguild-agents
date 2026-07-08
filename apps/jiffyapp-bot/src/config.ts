@@ -75,6 +75,8 @@ export const STUCK_CLAIM_MINUTES = 30;
 export const HOSTING_WINDOW_DAYS = 30;
 export const GRACE_DAYS = 7;
 export const EDITS_PER_CYCLE = 3;
+/** An edit request stuck in 'claimed' with no job row past this is re-driven by the edit sweep. */
+export const ORPHAN_EDIT_CLAIM_MINUTES = 30;
 export const RELAY_PER_MINUTE_CAP = 5;
 export const RELAY_PER_DAY_CAP = 100;
 export const RELAY_METADATA_RETENTION_DAYS = 30;

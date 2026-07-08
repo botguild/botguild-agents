@@ -7,7 +7,7 @@
 // NEVER a calendar month — a 30-day window straddling a month boundary must not grant a second
 // batch of edits.
 
-import { EDITS_PER_CYCLE } from './config.js';
+import { EDITS_PER_CYCLE, ORPHAN_EDIT_CLAIM_MINUTES } from './config.js';
 import { jobKeyFor, sha256Hex } from './jobs.js';
 import type { SweepServices } from './sweeps.js';
 
@@ -73,27 +73,92 @@ export async function pollEditRequests(s: SweepServices): Promise<void> {
         // Persist the reserved (scope, period) on the request row so a failed edit releases the
         // exact row it reserved, even across cycle/month boundaries.
         await s.edits.setQuotaRef(message.id, scope, period);
-        const hash = await sha256Hex(cycle.contractId);
-        const jobKey = jobKeyFor(hash, `edit:${message.id}`);
-        const decision = await s.jobs.claim({
-          jobKey,
+        await claimAndEnqueueEdit(s, {
           contractId: cycle.contractId,
-          kind: 'edit',
           toolId: cycle.toolId,
+          requestId: message.id,
+          logger,
         });
-        if (decision.action === 'enqueue') {
-          await s.queue.send({
-            kind: 'edit',
-            contractId: cycle.contractId,
-            jobKey,
-            toolId: cycle.toolId,
-            requestId: message.id,
-          });
-          logger.info({ requestId: message.id, jobKey }, 'edit request claimed and enqueued');
-        }
       }
+
+      // Backstop: re-drive any of this tool's edit requests stuck in 'claimed' with no job row
+      // (a crash between claim/reserve and queue.send). Without this a buyer's edit stalls
+      // forever and — if it had already reserved — its quota slot leaks for the whole cycle.
+      await reconcileOrphanedClaims(s, cycle, now());
     } catch (err) {
       logger.warn({ err }, 'edit-request poll failed for cycle; retrying next sweep');
     }
+  }
+}
+
+/** Claim the edit job (idempotent) and enqueue it exactly once. Shared by the main message loop
+ *  and the orphan backstop, so both agree on the jobKey scheme and the enqueue-once guard. */
+async function claimAndEnqueueEdit(
+  s: SweepServices,
+  args: { contractId: string; toolId: string; requestId: string; logger: SweepServices['logger'] },
+): Promise<void> {
+  const hash = await sha256Hex(args.contractId);
+  const jobKey = jobKeyFor(hash, `edit:${args.requestId}`);
+  const decision = await s.jobs.claim({
+    jobKey,
+    contractId: args.contractId,
+    kind: 'edit',
+    toolId: args.toolId,
+  });
+  if (decision.action === 'enqueue') {
+    await s.queue.send({
+      kind: 'edit',
+      contractId: args.contractId,
+      jobKey,
+      toolId: args.toolId,
+      requestId: args.requestId,
+    });
+    args.logger.info({ requestId: args.requestId, jobKey }, 'edit request claimed and enqueued');
+  }
+}
+
+/**
+ * Reconcile edit requests still 'claimed' for this cycle's tool past ORPHAN_EDIT_CLAIM_MINUTES
+ * that have NO corresponding job row. For each: if the reservation never landed (quotaRef null),
+ * reserve it now (idempotent — only when null) and record the ref; then claim + enqueue the edit
+ * job (idempotent via the job claim). A request whose contract still can't reserve is held.
+ */
+async function reconcileOrphanedClaims(
+  s: SweepServices,
+  cycle: { contractId: string; toolId: string },
+  now: Date,
+): Promise<void> {
+  const logger = s.logger.child({ contractId: cycle.contractId, toolId: cycle.toolId });
+  const cutoff = new Date(now.getTime() - ORPHAN_EDIT_CLAIM_MINUTES * 60_000).toISOString();
+  const orphans = await s.edits.listClaimedOlderThan(cycle.toolId, cutoff);
+
+  for (const orphan of orphans) {
+    const hash = await sha256Hex(orphan.contractId);
+    const jobKey = jobKeyFor(hash, `edit:${orphan.requestId}`);
+    // A job row already exists ⇒ not orphaned (it's queued/in-flight); leave it alone.
+    if ((await s.jobs.get(jobKey)) !== null) continue;
+
+    // Reserve only when the request never recorded a quota ref (idempotent guard) — a request
+    // that already reserved keeps its slot and is simply re-enqueued below.
+    if (orphan.quotaScope === null || orphan.quotaPeriod === null) {
+      const scope = `edit:${cycle.toolId}`;
+      const period = orphan.contractId;
+      const reservation = await s.usage.reserve(scope, period, EDITS_PER_CYCLE);
+      if (!reservation.reserved) {
+        await s.edits.setStatus(orphan.requestId, 'held');
+        await s.client.sendMessage(orphan.contractId, EDIT_HELD_MESSAGE);
+        logger.info({ requestId: orphan.requestId }, 'orphaned edit held — cycle quota exhausted');
+        continue;
+      }
+      await s.edits.setQuotaRef(orphan.requestId, scope, period);
+    }
+
+    await claimAndEnqueueEdit(s, {
+      contractId: orphan.contractId,
+      toolId: cycle.toolId,
+      requestId: orphan.requestId,
+      logger,
+    });
+    logger.info({ requestId: orphan.requestId }, 'orphaned edit claim re-driven');
   }
 }

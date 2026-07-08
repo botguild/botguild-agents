@@ -72,6 +72,7 @@ import { createModerationClient } from './moderation.js';
 import { createPlaywrightLauncher, createPlaywrightPageFactory } from './playwrightDriver.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
 import { processCycleJob } from './hosting.js';
+import { runReferenceCheck } from './adminReference.js';
 import { buildLogPageHtml, createLogEventStream, handleLogJson } from './buildlog.js';
 import {
   buildRelayMime,
@@ -84,7 +85,11 @@ import {
 } from './relay.js';
 import { createThreadReader } from './threads.js';
 import { runDailySweep, runFifteenMinuteSweep, type SweepServices } from './sweeps.js';
-import type { JobMessage } from './types.js';
+import { TEMPLATE_IDS, type JobMessage, type TemplateId } from './types.js';
+
+function isTemplateId(value: string): value is TemplateId {
+  return (TEMPLATE_IDS as readonly string[]).includes(value);
+}
 
 // @cloudflare/workers-types (pinned in package.json) already declares `SendEmail`
 // as a global ambient type, so no local fallback interface is needed here.
@@ -348,10 +353,12 @@ function getServices(env: Env): Services {
     tools,
     cycles,
     gigs,
+    audit,
     botId,
     publicBaseUrl,
     relayDeps,
     buildLog,
+    pipeline,
   });
 
   services = {
@@ -442,10 +449,12 @@ function buildApp(
     tools: ToolStore;
     cycles: CycleStore;
     gigs: GigStore;
+    audit: AuditStore;
     botId: string;
     publicBaseUrl: string;
     relayDeps: RelayDeps;
     buildLog: BuildLogStore;
+    pipeline: PipelineConfig;
   },
 ): Hono {
   const {
@@ -457,10 +466,12 @@ function buildApp(
     tools,
     cycles,
     gigs,
+    audit,
     botId,
     publicBaseUrl,
     relayDeps,
     buildLog,
+    pipeline,
   } = deps;
 
   const rawHandlers = buildHandlers({
@@ -672,6 +683,74 @@ function buildApp(
       logger,
     });
     return c.json(result);
+  });
+
+  // The three protected admin routes below share the same Bearer guard as /admin/register:
+  // 503 when ADMIN_TOKEN is unset (route disabled), 401 on a missing/wrong token.
+
+  // FR-17 kill switch: flip a tool to `killed` so the dispatcher serves 410 immediately (no
+  // deploy action needed — the status read is the gate). Idempotent from the operator's view.
+  app.post('/admin/suspend/:slug', async (c) => {
+    if (!env.ADMIN_TOKEN) return c.json({ error: 'ADMIN_TOKEN is not configured' }, 503);
+    if ((c.req.header('Authorization') ?? '') !== `Bearer ${env.ADMIN_TOKEN}`) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const slug = c.req.param('slug');
+    const tool = await tools.getBySlug(slug);
+    if (!tool) return c.json({ error: `unknown slug: ${slug}` }, 404);
+    await tools.setStatus(tool.toolId, 'killed');
+    await audit.record({
+      scope: `tool:${tool.toolId}`,
+      gate: 'kill-switch',
+      result: 'killed',
+      detail: { slug },
+    });
+    return c.json({ slug, toolId: tool.toolId, status: 'killed' });
+  });
+
+  // Reverse a kill switch — only from `killed` (a 409 otherwise, so this never resurrects a
+  // suspended/grace tool and bypasses the hosting lifecycle).
+  app.post('/admin/unsuspend/:slug', async (c) => {
+    if (!env.ADMIN_TOKEN) return c.json({ error: 'ADMIN_TOKEN is not configured' }, 503);
+    if ((c.req.header('Authorization') ?? '') !== `Bearer ${env.ADMIN_TOKEN}`) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const slug = c.req.param('slug');
+    const tool = await tools.getBySlug(slug);
+    if (!tool) return c.json({ error: `unknown slug: ${slug}` }, 404);
+    if (tool.status !== 'killed') {
+      return c.json({ error: `tool is ${tool.status}, not killed`, status: tool.status }, 409);
+    }
+    await tools.setStatus(tool.toolId, 'live');
+    await audit.record({
+      scope: `tool:${tool.toolId}`,
+      gate: 'kill-switch',
+      result: 'unsuspended',
+      detail: { slug },
+    });
+    return c.json({ slug, toolId: tool.toolId, status: 'live' });
+  });
+
+  // Phase-2 calibration probe: run ONE template's live reference check (render → stage → goldens
+  // → PSI → teardown) and return the full JSON. A thrown probe (e.g. a deploy failure) surfaces
+  // as a 500 with the error message; the staging script is torn down either way.
+  app.post('/admin/reference/:templateId', async (c) => {
+    if (!env.ADMIN_TOKEN) return c.json({ error: 'ADMIN_TOKEN is not configured' }, 503);
+    if ((c.req.header('Authorization') ?? '') !== `Bearer ${env.ADMIN_TOKEN}`) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const templateId = c.req.param('templateId');
+    if (!isTemplateId(templateId)) {
+      return c.json({ error: `unknown templateId: ${templateId}` }, 400);
+    }
+    try {
+      const result = await runReferenceCheck(pipeline, templateId);
+      return c.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err, templateId }, 'admin reference check failed');
+      return c.json({ error: message }, 500);
+    }
   });
 
   return app;

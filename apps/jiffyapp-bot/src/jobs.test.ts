@@ -722,6 +722,36 @@ test('setStatus transitions and countDone/listByTool scope by tool and time', as
   assert.deepEqual(byTool.map((r) => r.requestId).sort(), ['req-1', 'req-2']);
 });
 
+test('listClaimedOlderThan returns only still-claimed rows for the tool older than the cutoff', async () => {
+  const db = await freshDb();
+  let ms = Date.UTC(2026, 0, 1, 0, 0, 0);
+  const store = createEditRequestStore(db, () => new Date(ms));
+
+  // req-1: claimed at t0 (stale), keeps its quota ref.
+  await store.claim({ requestId: 'req-1', toolId: 'tool-a', contractId: 'hc-1', instruction: 'a' });
+  await store.setQuotaRef('req-1', 'edit:tool-a', 'hc-1');
+  // req-2: claimed at t0 (stale) but already advanced to 'done' — must be excluded.
+  await store.claim({ requestId: 'req-2', toolId: 'tool-a', contractId: 'hc-1', instruction: 'b' });
+  await store.setStatus('req-2', 'done');
+  // req-3: a different tool — must be excluded even though it is stale + claimed.
+  await store.claim({ requestId: 'req-3', toolId: 'tool-b', contractId: 'hc-2', instruction: 'c' });
+
+  // Advance 40 minutes, then claim req-4 fresh (must be excluded by the 30-min cutoff).
+  ms += 40 * 60_000;
+  await store.claim({ requestId: 'req-4', toolId: 'tool-a', contractId: 'hc-1', instruction: 'd' });
+
+  const cutoff = new Date(ms - 30 * 60_000).toISOString();
+  const stale = await store.listClaimedOlderThan('tool-a', cutoff);
+  assert.deepEqual(
+    stale.map((r) => r.requestId),
+    ['req-1'],
+  );
+  assert.equal(stale[0].contractId, 'hc-1');
+  assert.equal(stale[0].instruction, 'a');
+  assert.equal(stale[0].quotaScope, 'edit:tool-a');
+  assert.equal(stale[0].quotaPeriod, 'hc-1');
+});
+
 // --- RelayStore ------------------------------------------------------------
 
 test('ensure creates a fresh unverified relay; recipient change resets verification', async () => {

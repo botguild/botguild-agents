@@ -802,6 +802,24 @@ export interface EditRequestStore {
     toolId: string,
     sinceIso: string,
   ): Promise<Array<{ requestId: string; instruction: string; status: string }>>;
+  /**
+   * Reconciliation backstop: 'claimed' edit requests for a tool whose claim predates `cutoffIso`
+   * (created_at < cutoffIso). The orphaned-edit sweep uses this to re-drive a request that was
+   * claimed but never enqueued (a crash between `claim` and `queue.send`, or a reservation that
+   * never produced a job) — closing the buyer's silently-stalled edit and the leaked quota slot.
+   */
+  listClaimedOlderThan(
+    toolId: string,
+    cutoffIso: string,
+  ): Promise<
+    Array<{
+      requestId: string;
+      contractId: string;
+      instruction: string;
+      quotaScope: string | null;
+      quotaPeriod: string | null;
+    }>
+  >;
 }
 
 export function createEditRequestStore(
@@ -881,6 +899,28 @@ export function createEditRequestStore(
         requestId: r.request_id,
         instruction: r.instruction,
         status: r.status,
+      }));
+    },
+
+    async listClaimedOlderThan(toolId, cutoffIso) {
+      const { results } = await db
+        .prepare(
+          "SELECT request_id, contract_id, instruction, quota_scope, quota_period FROM edit_requests WHERE tool_id = ? AND status = 'claimed' AND created_at < ? ORDER BY created_at ASC",
+        )
+        .bind(toolId, cutoffIso)
+        .all<{
+          request_id: string;
+          contract_id: string;
+          instruction: string;
+          quota_scope: string | null;
+          quota_period: string | null;
+        }>();
+      return results.map((r) => ({
+        requestId: r.request_id,
+        contractId: r.contract_id,
+        instruction: r.instruction,
+        quotaScope: r.quota_scope,
+        quotaPeriod: r.quota_period,
       }));
     },
   };

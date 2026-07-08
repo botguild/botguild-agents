@@ -18,7 +18,7 @@ import {
   jobKeyFor,
   sha256Hex,
 } from './jobs.js';
-import { EDITS_PER_CYCLE } from './config.js';
+import { EDITS_PER_CYCLE, ORPHAN_EDIT_CLAIM_MINUTES } from './config.js';
 import type { ThreadMessage, ThreadReader } from './threads.js';
 import type { QueueLike } from './pipeline.js';
 import type { JobMessage } from './types.js';
@@ -284,4 +284,101 @@ test('pollEditRequests: the bot own edit-shaped posts are ignored', async () => 
   assert.equal(h.queueSent.length, 0);
   assert.equal(await h.edits.get('m-bot'), null);
   assert.equal(await h.usage.getUsed('edit:tool-5', 'c-cyc-5'), 0);
+});
+
+// =============================================================================
+// Orphaned-edit-claim backstop (Task 23 / PART C)
+// =============================================================================
+
+const ORPHAN_START = '2026-01-25T00:00:00.000Z';
+async function seedOrphanCycle(
+  h: Harness,
+  opts: { contractId: string; toolId: string },
+): Promise<void> {
+  await h.seedOpenCycle({
+    contractId: opts.contractId,
+    toolId: opts.toolId,
+    windowStart: '2026-01-20T00:00:00.000Z',
+    windowEnd: '2026-02-20T00:00:00.000Z',
+  });
+}
+
+test('orphan backstop: a claimed+reserved request with no job row past the cutoff is re-enqueued once, not re-reserved', async () => {
+  const h = await makeHarness(ORPHAN_START);
+  await seedOrphanCycle(h, { contractId: 'c-orph-1', toolId: 'tool-o1' });
+  // Simulate a crash between reserve/setQuotaRef and queue.send: the request reserved its slot
+  // but never produced a job.
+  await h.edits.claim({
+    requestId: 'm-orph',
+    toolId: 'tool-o1',
+    contractId: 'c-orph-1',
+    instruction: 'change headline',
+  });
+  await h.usage.reserve('edit:tool-o1', 'c-orph-1', EDITS_PER_CYCLE);
+  await h.edits.setQuotaRef('m-orph', 'edit:tool-o1', 'c-orph-1');
+
+  // Still fresh (< 30 min): the backstop leaves it alone.
+  await pollEditRequests(h.services);
+  assert.equal(h.queueSent.length, 0);
+
+  // Past the cutoff: the backstop re-drives it exactly once.
+  h.setNow(new Date(new Date(ORPHAN_START).getTime() + (ORPHAN_EDIT_CLAIM_MINUTES + 1) * 60_000));
+  await pollEditRequests(h.services);
+  assert.equal(h.queueSent.length, 1);
+  assert.equal(h.queueSent[0].requestId, 'm-orph');
+  assert.equal(h.queueSent[0].kind, 'edit');
+  // Reservation was NOT doubled (it kept its existing slot).
+  assert.equal(await h.usage.getUsed('edit:tool-o1', 'c-orph-1'), 1);
+
+  // A subsequent sweep does not re-enqueue (the job row now exists).
+  await pollEditRequests(h.services);
+  assert.equal(h.queueSent.length, 1);
+});
+
+test('orphan backstop: a claimed request that never reserved is reserved then enqueued', async () => {
+  const h = await makeHarness(ORPHAN_START);
+  await seedOrphanCycle(h, { contractId: 'c-orph-2', toolId: 'tool-o2' });
+  // Crash right after claim — no reservation, no quota ref.
+  await h.edits.claim({
+    requestId: 'm-orph2',
+    toolId: 'tool-o2',
+    contractId: 'c-orph-2',
+    instruction: 'make it blue',
+  });
+
+  h.setNow(new Date(new Date(ORPHAN_START).getTime() + (ORPHAN_EDIT_CLAIM_MINUTES + 1) * 60_000));
+  await pollEditRequests(h.services);
+
+  assert.equal(h.queueSent.length, 1);
+  assert.equal(h.queueSent[0].requestId, 'm-orph2');
+  assert.equal(await h.usage.getUsed('edit:tool-o2', 'c-orph-2'), 1);
+  const row = await h.edits.get('m-orph2');
+  assert.equal(row?.quotaScope, 'edit:tool-o2');
+  assert.equal(row?.quotaPeriod, 'c-orph-2');
+});
+
+test('orphan backstop: a request that already has a job row is not re-enqueued', async () => {
+  const h = await makeHarness(ORPHAN_START);
+  await seedOrphanCycle(h, { contractId: 'c-orph-3', toolId: 'tool-o3' });
+  await h.edits.claim({
+    requestId: 'm-orph3',
+    toolId: 'tool-o3',
+    contractId: 'c-orph-3',
+    instruction: 'x',
+  });
+  await h.usage.reserve('edit:tool-o3', 'c-orph-3', EDITS_PER_CYCLE);
+  await h.edits.setQuotaRef('m-orph3', 'edit:tool-o3', 'c-orph-3');
+  // The job WAS enqueued — its row exists, so this is not orphaned.
+  const hash = await sha256Hex('c-orph-3');
+  await h.jobs.claim({
+    jobKey: jobKeyFor(hash, 'edit:m-orph3'),
+    contractId: 'c-orph-3',
+    kind: 'edit',
+    toolId: 'tool-o3',
+  });
+
+  h.setNow(new Date(new Date(ORPHAN_START).getTime() + (ORPHAN_EDIT_CLAIM_MINUTES + 1) * 60_000));
+  await pollEditRequests(h.services);
+
+  assert.equal(h.queueSent.length, 0);
 });
