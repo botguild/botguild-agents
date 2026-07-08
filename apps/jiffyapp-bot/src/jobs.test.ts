@@ -351,6 +351,32 @@ test('create resumes cleanly on a redelivered claim for the same toolId (PK conf
   assert.equal(count?.slug, 'acme');
 });
 
+test('create resumes on a redelivered claim even with a single-candidate list (exact-duplicate row conflict)', async () => {
+  const { store, db } = await freshToolStore();
+  const first = await store.create({
+    ...toolArgsBase,
+    toolId: 'tool-a',
+    slugCandidates: ['acme'],
+  });
+  assert.equal(first, 'acme');
+  // Redelivery retries the exact same (tool_id, slug) pair — SQLite may
+  // report this as a `slug` UNIQUE conflict even though it's a self-conflict.
+  const resumed = await store.create({
+    ...toolArgsBase,
+    toolId: 'tool-a',
+    slugCandidates: ['acme'],
+  });
+  assert.equal(resumed, 'acme');
+
+  const row = await store.get('tool-a');
+  assert.equal(row?.slug, 'acme');
+  const { results } = await db
+    .prepare('SELECT COUNT(*) AS n FROM tools WHERE tool_id = ?')
+    .bind('tool-a')
+    .all<{ n: number }>();
+  assert.equal(results[0]?.n, 1);
+});
+
 test('getByBuildContract and getBySlug resolve the same row', async () => {
   const { store } = await freshToolStore();
   await store.create({ ...toolArgsBase, toolId: 'tool-a', slugCandidates: ['acme'] });

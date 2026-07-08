@@ -369,19 +369,21 @@ function toToolRow(raw: RawToolRow): ToolRow {
   };
 }
 
-/** Narrower than a generic UNIQUE-violation check: only the `slug` index conflicted. */
-const isSlugViolation = (err: unknown): boolean =>
-  err instanceof Error && /UNIQUE constraint failed.*slug/i.test(err.message);
-
 export interface ToolStore {
   /**
    * Reserves the first free slug from slugCandidates (INSERT wins, or
    * UNIQUE-conflicts and tries the next); inserts the row with status
-   * 'building'; returns the reserved slug. A conflict that is NOT on `slug`
-   * (i.e. the tool_id primary key) means this is a redelivered claim retrying
-   * a tool that already won a slug on a prior attempt — resume by returning
-   * the existing row's slug instead of erroring. Throws if every candidate
-   * is genuinely taken by a different tool.
+   * 'building'; returns the reserved slug. SQLite's constraint-name text in
+   * the error is NOT trustworthy for telling a slug collision apart from a
+   * redelivered claim retrying the same tool_id: an exact-duplicate row
+   * (same tool_id AND slug, e.g. a resumed job replaying its own prior
+   * attempt) can still be reported as a `slug` conflict. So on ANY
+   * UNIQUE-constraint violation inside the loop, first check whether a
+   * tools row for this tool_id already exists — if so, this is a resume,
+   * and the existing row's slug is returned immediately instead of trying
+   * more candidates. Only when no such row exists is the conflict treated
+   * as a genuine slug collision, and the next candidate is tried. Throws if
+   * every candidate is genuinely taken by a different tool.
    */
   create(row: {
     toolId: string;
@@ -454,12 +456,14 @@ export function createToolStore(db: D1Like, now: () => Date = () => new Date()):
           return slug;
         } catch (err) {
           if (!isUniqueViolation(err)) throw err;
-          if (isSlugViolation(err)) continue; // this candidate is taken — try the next one
-          // Conflict was on tool_id, not slug: a redelivered claim retrying
-          // the same tool after a prior attempt already won a slug. Resume.
+          // Don't trust which index SQLite named in the message: a resumed
+          // redelivery of the same tool_id can report a `slug` conflict even
+          // though the row is an exact duplicate of one this tool_id already
+          // owns. Always check for that resume case first.
           const existing = await get(row.toolId);
           if (existing) return existing.slug;
-          throw err;
+          // No existing row for this tool_id — a different tool genuinely
+          // holds this slug. Try the next candidate.
         }
       }
       throw new Error(
