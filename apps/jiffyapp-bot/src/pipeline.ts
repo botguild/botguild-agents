@@ -449,7 +449,11 @@ export async function promoteAndDeliver(
   let relayProof: { messageId: string | null } | undefined;
   if (isRelayTemplate(def, brief)) {
     const recipient = brief.notifyEmail as string;
-    const priorTest = await cfg.relay.latestEvent(tool.toolId, 'test');
+    // Filter on status 'sent' (F3): golden runs at ?jiffytest=1 record {kind:'test'} events, so an
+    // unfiltered lookup finds a golden validation and wrongly SKIPS the real delivery-proof send.
+    // Only a prior REAL send (recorded {kind:'test', status:'sent'} below) may be reused, which keeps
+    // this exactly-once across a promote retry while ignoring golden validations.
+    const priorTest = await cfg.relay.latestEvent(tool.toolId, 'test', 'sent');
     if (priorTest) {
       relayProof = { messageId: priorTest.messageId };
       await cfg.buildLog.append(

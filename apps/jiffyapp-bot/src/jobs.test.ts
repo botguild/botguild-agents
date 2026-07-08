@@ -814,6 +814,23 @@ test('recordEvent + latestEvent scoped by kind', async () => {
   assert.equal(await store.latestEvent('tool-a', 'test'), null);
 });
 
+test('latestEvent filters by status when provided (F3: real send vs golden validation)', async () => {
+  const db = await freshDb();
+  const store = createRelayStore(db);
+  await store.recordEvent({ toolId: 'tool-x', kind: 'test', status: 'validated' });
+  await store.recordEvent({ toolId: 'tool-x', kind: 'test', status: 'sent', messageId: 'm-sent' });
+  await store.recordEvent({ toolId: 'tool-x', kind: 'test', status: 'validated' });
+
+  // No status filter: the most recent 'test' row (a later 'validated') wins.
+  assert.equal((await store.latestEvent('tool-x', 'test'))?.status, 'validated');
+  // status 'sent': only the real send matches, regardless of later 'validated' rows.
+  const sent = await store.latestEvent('tool-x', 'test', 'sent');
+  assert.equal(sent?.status, 'sent');
+  assert.equal(sent?.messageId, 'm-sent');
+  // A status with no matching row is null.
+  assert.equal(await store.latestEvent('tool-x', 'test', 'confirmed'), null);
+});
+
 test('pruneEvents deletes only rows older than the cutoff', async () => {
   let clock = new Date('2026-07-01T00:00:00Z');
   const db = await freshDb();

@@ -975,6 +975,9 @@ export interface RelayStore {
   latestEvent(
     toolId: string,
     kind: string,
+    /** When given, only rows with this `status` match (e.g. a real 'sent' proof, not a golden-run
+     *  'validated' event) — otherwise the most recent row of this kind regardless of status. */
+    status?: string,
   ): Promise<{ messageId: string | null; status: string; createdAt: string } | null>;
   pruneEvents(olderThan: Date): Promise<void>;
 }
@@ -1055,12 +1058,20 @@ export function createRelayStore(db: D1Like, now: () => Date = () => new Date())
         .run();
     },
 
-    async latestEvent(toolId, kind) {
+    async latestEvent(toolId, kind, status) {
+      const clauses = ['tool_id = ?', 'kind = ?'];
+      const binds: string[] = [toolId, kind];
+      if (status !== undefined) {
+        clauses.push('status = ?');
+        binds.push(status);
+      }
       const raw = await db
         .prepare(
-          'SELECT message_id, status, created_at FROM relay_events WHERE tool_id = ? AND kind = ? ORDER BY id DESC LIMIT 1',
+          `SELECT message_id, status, created_at FROM relay_events WHERE ${clauses.join(
+            ' AND ',
+          )} ORDER BY id DESC LIMIT 1`,
         )
-        .bind(toolId, kind)
+        .bind(...binds)
         .first<{ message_id: string | null; status: string; created_at: string }>();
       return raw
         ? { messageId: raw.message_id, status: raw.status, createdAt: raw.created_at }

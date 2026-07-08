@@ -1000,6 +1000,78 @@ test('form-family happy path: exactly one live relay test submission + relayProo
   assert.equal(h.deliverMilestoneCalls.length, 1);
 });
 
+test('relay delivery proof: a prior test-mode "validated" event does NOT suppress the real send (F3)', async () => {
+  const h = await makeHarness();
+  const { msg, token, contractId } = await h.seedBuildGig({
+    templateId: 'form',
+    brief: FORM_BRIEF,
+    goldens: FORM_GOLDENS,
+  });
+
+  // First invocation parks awaiting double opt-in.
+  await processJobMessage(h.cfg, msg);
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const relayRow = await h.stores.relay.get(tool!.toolId);
+  await h.stores.relay.verifyByToken(relayRow!.verifyToken);
+  h.verifiedDestinations.add('owner@example.com');
+  h.setPage(formLivePage());
+  h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
+  await h.stores.jobs.unpark(msg.jobKey);
+
+  // Simulate what the live golden run (?jiffytest=1) records: a test-mode relay submission writes a
+  // {kind:'test', status:'validated'} event BEFORE stage (d). The fake PageDriver never runs tool
+  // JS, so record it by hand — this is the exact event that masked the real send before F3.
+  await h.stores.relay.recordEvent({ toolId: tool!.toolId, kind: 'test', status: 'validated' });
+
+  await processJobMessage(h.cfg, msg); // delivers
+
+  // The real delivery-proof email STILL fires despite the prior 'validated' event.
+  const testSubmissions = h.mailerSent.filter((m) => /delivery verification/i.test(m.subject));
+  assert.equal(testSubmissions.length, 1);
+  // A real 'sent' event exists and the evidence report carries a PASSING relay proof with a msgId.
+  const sentEvt = await h.stores.relay.latestEvent(tool!.toolId, 'test', 'sent');
+  assert.equal(sentEvt?.status, 'sent');
+  assert.ok(sentEvt?.messageId);
+  const report = JSON.parse(String(h.deliverables.get(`${token}/report.json`)!.value));
+  assert.equal(report.liveGates.relayProof.pass, true);
+  assert.ok(report.liveGates.relayProof.messageId);
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+});
+
+test('relay delivery proof: a prior real "sent" event IS reused — exactly-once (F3)', async () => {
+  const h = await makeHarness();
+  const { msg, contractId } = await h.seedBuildGig({
+    templateId: 'form',
+    brief: FORM_BRIEF,
+    goldens: FORM_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg); // parks awaiting double opt-in
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const relayRow = await h.stores.relay.get(tool!.toolId);
+  await h.stores.relay.verifyByToken(relayRow!.verifyToken);
+  h.verifiedDestinations.add('owner@example.com');
+  h.setPage(formLivePage());
+  h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
+  await h.stores.jobs.unpark(msg.jobKey);
+
+  // A real 'sent' proof already recorded on a prior promote attempt must be REUSED, not re-sent.
+  await h.stores.relay.recordEvent({
+    toolId: tool!.toolId,
+    kind: 'test',
+    status: 'sent',
+    messageId: 'prior-sent-id',
+  });
+
+  await processJobMessage(h.cfg, msg); // delivers
+
+  // No new delivery-proof email — the prior 'sent' event is reused.
+  const testSubmissions = h.mailerSent.filter((m) => /delivery verification/i.test(m.subject));
+  assert.equal(testSubmissions.length, 0);
+  const audits = (await h.stores.audit.listByScope(contractId)).filter((a) => a.gate === 'relay');
+  assert.ok(audits.some((a) => a.result === 'reused'));
+});
+
 test('PSI outage parks psi_outage (resumable), never delivering', async () => {
   const h = await makeHarness();
   h.setPage(calcLivePage('$100.00'));
