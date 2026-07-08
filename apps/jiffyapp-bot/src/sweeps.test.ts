@@ -28,7 +28,8 @@ import { createGigStore } from './gigStore.js';
 import { getTemplate } from './templates/registry.js';
 import { createJiffyProposer } from './proposer.js';
 import type { ThreadMessage, ThreadReader } from './threads.js';
-import type { EmailRoutingClient, QueueLike } from './pipeline.js';
+import type { QueueLike } from './pipeline.js';
+import type { EmailRoutingClient } from './relay.js';
 import type { GoldenSet, JobKind, JobMessage } from './types.js';
 import { maybePropose, runFifteenMinuteSweep, type SweepServices } from './sweeps.js';
 

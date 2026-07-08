@@ -7,8 +7,10 @@
 // directly rather than through this file, to avoid a runtime import cycle between pipeline.ts
 // and hosting.ts (hosting.ts only needs `PipelineConfig`'s *type*, which is erased at compile
 // time either way, but keeping the dependency one-directional keeps the layering honest).
-// `edit` jobs are logged and skipped until Task 22 wires them (its typed stub `processEditJob`
-// is exported for that task to replace).
+// `edit` jobs are handled by `processEditJob` (FR-14): recompile only the invalidated goldens,
+// regenerate constrained from the tool's current live slots through the shared repair loop, then
+// promote over the live slug and re-run the full live-gate suite — restoring the last-good version
+// on any live-gate failure so a failed edit never leaves the live tool changed.
 //
 // The build job is CHECKPOINTED and CAPPED: every stage transition appends to the public
 // build log and records a gate-audit row, and every controlled exit (park, re-enqueue
@@ -61,6 +63,7 @@ import type { Codegen } from './codegen.js';
 import type { ToolDeployer } from './deploy.js';
 import type { ModerationClient } from './moderation.js';
 import type { PsiResult } from './psi.js';
+import type { EmailRoutingClient, RelayMailer } from './relay.js';
 import { proposalBindable, type GoldenCompiler } from './goldenCompiler.js';
 import { formatBriefErrors } from './brief.js';
 import { classifyGig } from './proposer.js';
@@ -98,22 +101,8 @@ import type {
 } from './types.js';
 
 // --- Config seams ------------------------------------------------------------
-
-/** Task 19 supplies the real Cloudflare Email Sending mailer; the type lives here. */
-export interface RelayMailer {
-  send(msg: {
-    to: string;
-    from: string;
-    subject: string;
-    text: string;
-  }): Promise<{ messageId: string | null }>;
-}
-
-/** Cloudflare Email Routing destination-address verification (Task 19 implements it). */
-export interface EmailRoutingClient {
-  ensureDestination(email: string): Promise<void>;
-  isDestinationVerified(email: string): Promise<boolean>;
-}
+// `RelayMailer` (Cloudflare Email Sending) and `EmailRoutingClient` (destination verification)
+// are defined once in relay.ts (their real implementations live there) and re-used here.
 
 export interface QueueLike {
   send(msg: JobMessage): Promise<unknown>;

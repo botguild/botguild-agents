@@ -12,7 +12,9 @@
 //              GET  /abuse + POST /abuse (report-a-tool form)
 //              POST /admin/register (protected; runs registration once at deploy)
 //   queue:     jiffyapp-jobs consumer — the full build pipeline (Tasks 17/18) + DLQ alerting.
-//   scheduled: registration backstop + sweep stub (Tasks 20/21 wire the sweeps).
+//   scheduled: the daily cron runs runDailySweep; every other trigger runs a registration
+//              backstop then runFifteenMinuteSweep (hosting expiry/grace/suspend, cycle reports,
+//              relay re-sends, parked-job re-enqueue).
 // ---------------------------------------------------------------------------
 
 import { Hono } from 'hono';

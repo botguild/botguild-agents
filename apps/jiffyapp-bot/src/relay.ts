@@ -153,10 +153,11 @@ export async function handleRelaySubmission(
   const { fields, subject: rawSubject, test } = validated.parsed;
 
   // Test mode (staging repair rounds; live golden re-runs): validate exactly like a live
-  // submission (token/recipient/body already checked above), record a metadata-only event, and
-  // SKIP both the mailer and the rate counters — golden runs never email the buyer or burn caps.
+  // submission (token/recipient/body already checked above), then return WITHOUT recording an
+  // event or reserving caps (F6). Golden runs never email the buyer or burn caps; the 'validated'
+  // event this used to write is vestigial after F3 (nothing reads it) and, driven off the public
+  // per-tool token, was an unbounded relay_events write-amplification vector.
   if (test === true) {
-    await deps.relay.recordEvent({ toolId, kind: 'test', status: 'validated' });
     return { status: 200, body: { ok: true, test: true } };
   }
 

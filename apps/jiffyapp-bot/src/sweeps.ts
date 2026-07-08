@@ -41,7 +41,8 @@ import type {
   UsageStore,
 } from './jobs.js';
 import type { GigStore } from './gigStore.js';
-import type { EmailRoutingClient, QueueLike } from './pipeline.js';
+import type { QueueLike } from './pipeline.js';
+import type { EmailRoutingClient } from './relay.js';
 import type { JobMessage } from './types.js';
 
 export interface SweepServices {

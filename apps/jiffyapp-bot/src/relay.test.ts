@@ -122,7 +122,7 @@ test('unverified recipient -> 409', async () => {
 
 // --- test mode ------------------------------------------------------------------
 
-test('test mode validates like live, records a metadata-only event, and skips mailer + counters', async () => {
+test('test mode validates like live but records NO event and skips mailer + counters (F6)', async () => {
   const db = await freshDb();
   const token = await verifiedRelay(db, 'tool-c');
   const mailer = fakeMailer();
@@ -142,13 +142,14 @@ test('test mode validates like live, records a metadata-only event, and skips ma
   assert.equal(await usage.getUsed(`relay-min:tool-c`, minutePeriod(now())), 0);
   assert.equal(await usage.getUsed(`relay-day:tool-c`, dayPeriod(now())), 0);
 
+  // F6: test-mode no longer writes a relay_events row. The 'validated' event it used to record is
+  // vestigial after F3 (nothing reads it), and writing it via the public per-tool token was an
+  // unbounded relay_events write-amplification vector.
   const { results } = await db
     .prepare('SELECT kind, status FROM relay_events WHERE tool_id = ?')
     .bind('tool-c')
     .all<{ kind: string; status: string }>();
-  assert.equal(results.length, 1);
-  assert.equal(results[0]?.kind, 'test');
-  assert.equal(results[0]?.status, 'validated');
+  assert.equal(results.length, 0);
 });
 
 test('test mode still 403s on a bad token', async () => {
