@@ -184,6 +184,57 @@ test('the forced tool_choice names report_golden_examples', async () => {
   assert.deepEqual(captured[0]?.body.tool_choice, { type: 'tool', name: 'report_golden_examples' });
 });
 
+// ---- recompileForEdit (Task 22) ----
+
+test('recompileForEdit: valid updated set on the first attempt, edit-update suffix in the system prompt', async () => {
+  const captured: CapturedRequest[] = [];
+  const compiler = createGoldenCompiler({
+    apiKey: 'test-key',
+    logger: silentLogger,
+    fetchImpl: stubFetch([toolUseResponse(VALID_SET)], captured),
+  });
+
+  const result = await compiler.recompileForEdit({
+    brief: CALCULATOR.referenceBrief,
+    instruction: 'change the headline copy',
+    currentGoldens: VALID_SET,
+    def: CALCULATOR,
+    bindable,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(captured.length, 1);
+  // The forced tool + cached system prompt are unchanged, with the edit-update instruction appended.
+  assert.deepEqual(captured[0]?.body.tool_choice, { type: 'tool', name: 'report_golden_examples' });
+  assert.deepEqual(captured[0]?.body.system?.[0]?.cache_control, { type: 'ephemeral' });
+  assert.match(captured[0]?.body.system?.[0]?.text ?? '', /UPDATING an existing golden set/i);
+  assert.match(captured[0]?.body.messages?.[0]?.content ?? '', /change the headline copy/);
+});
+
+test('recompileForEdit: first attempt invalid, retry valid — 2 fetches, ok true', async () => {
+  const captured: CapturedRequest[] = [];
+  const compiler = createGoldenCompiler({
+    apiKey: 'test-key',
+    logger: silentLogger,
+    fetchImpl: stubFetch([toolUseResponse(INVALID_SET), toolUseResponse(VALID_SET)], captured),
+  });
+
+  const result = await compiler.recompileForEdit({
+    brief: CALCULATOR.referenceBrief,
+    instruction: 'tweak a label',
+    currentGoldens: VALID_SET,
+    def: CALCULATOR,
+    bindable,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(captured.length, 2);
+  assert.match(
+    captured[1]?.body.messages?.[0]?.content ?? '',
+    /previous attempt failed validation/i,
+  );
+});
+
 // ---- proposalBindable ----
 
 test('proposalBindable(calculator) widens the reference surface with input- alongside breakdown-', () => {

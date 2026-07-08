@@ -25,6 +25,7 @@ import {
   scorerConfig,
 } from './config.js';
 import { parseJiffyBrief } from './brief.js';
+import { pollEditRequests } from './edits.js';
 import { classifyGig, createJiffyProposer, pricingCalcWithClassifier } from './proposer.js';
 import { findLatestCorrection, type ThreadReader } from './threads.js';
 import { saveReputationSnapshot } from './jobs.js';
@@ -72,19 +73,27 @@ export interface SweepServices {
   now?: () => Date;
 }
 
-/** Rebuild the queue message a parked job's row would have carried at claim time. */
+/** Rebuild the queue message a parked job's row would have carried at claim time. For an edit
+ *  job the requestId is recovered from the job key itself (`<hash>:edit:<requestId>`), since the
+ *  jobs table doesn't store it separately but `processEditJob` needs it to load the request row. */
 function toJobMessage(job: {
   kind: JobMessage['kind'];
   contractId: string;
   jobKey: string;
   toolId: string | null;
 }): JobMessage {
-  return {
+  const base: JobMessage = {
     kind: job.kind,
     contractId: job.contractId,
     jobKey: job.jobKey,
     toolId: job.toolId ?? undefined,
   };
+  if (job.kind === 'edit') {
+    const marker = ':edit:';
+    const at = job.jobKey.indexOf(marker);
+    if (at >= 0) base.requestId = job.jobKey.slice(at + marker.length);
+  }
+  return base;
 }
 
 /**
@@ -207,11 +216,6 @@ async function pollBriefCorrections(s: SweepServices): Promise<void> {
       logger.warn({ err }, 'brief-correction poll failed for job; retrying next sweep');
     }
   }
-}
-
-/** Thread-driven edit re-gate (Task 22 replaces this stub). */
-export async function pollEditRequests(s: SweepServices): Promise<void> {
-  s.logger.info('pollEditRequests: not wired (Task 22)');
 }
 
 /** The 15-minute cron sweep. Every step is awaited and isolated in its own try/catch: a

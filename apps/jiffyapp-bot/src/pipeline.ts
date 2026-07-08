@@ -79,6 +79,7 @@ import type {
   BuildCheckpoint,
   BuildLogStore,
   CycleStore,
+  EditRequestRow,
   EditRequestStore,
   JobRow,
   JobStore,
@@ -684,11 +685,484 @@ export async function abortJob(
   }
 }
 
-/** Thread-driven edit re-gate (Task 22). */
-export async function processEditJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> {
-  void cfg;
-  void msg;
-  throw new Error('not implemented: edit job (Task 22)');
+// --- Thread-driven bounded edits (Task 22 / FR-14) ---------------------------
+
+function editToolMissingMessage(toolId: string | undefined): string {
+  return (
+    `We couldn't apply your edit: the tool (toolId ${toolId ?? '(none)'}) is not currently live, ` +
+    'so there is nothing to edit. Fund a new hosting gig to bring it back, then re-post the edit — ' +
+    'this request was NOT counted against your included edits.'
+  );
+}
+
+function editRephraseMessage(errors: string[]): string {
+  return [
+    "We couldn't turn your edit request into updated acceptance checks for this tool, so we " +
+      "haven't changed anything and this edit did NOT use one of your included edits.",
+    '',
+    'Please re-post it (starting with "edit:") describing the change in terms of what should be ' +
+      `visible or should happen on the page. Details: ${errors.join('; ')}`,
+  ].join('\n');
+}
+
+function editTemplateMismatchMessage(): string {
+  return (
+    "We couldn't apply your edit right now: this tool is pinned to a template version that no " +
+    'longer matches our current catalog, so re-rendering it safely needs a human operator. Your ' +
+    'edit was NOT counted against your included edits — reply here and an operator will look into it.'
+  );
+}
+
+function editAbortMessage(buildLogUrl: string): string {
+  return [
+    'We tried to apply your edit but could not get it to pass its acceptance checks within our ' +
+      'build budget, so we stopped. The live tool is UNCHANGED and keeps serving, and this edit ' +
+      'did NOT consume one of your included edits.',
+    '',
+    `Full build log: ${buildLogUrl}`,
+    '',
+    'Try re-posting the edit with a more specific description of the change you want.',
+  ].join('\n');
+}
+
+function editDeliveredMessage(args: {
+  name: string;
+  liveUrl: string;
+  goldenCount: number;
+  buildLogUrl: string;
+}): string {
+  return [
+    `Your edit to "${args.name}" is live: ${args.liveUrl}`,
+    '',
+    `It re-passed all ${args.goldenCount} golden assertions on the live URL, so the updated set is ` +
+      'now the acceptance and warranty scope for this tool. Fresh screenshots and the full gate ' +
+      `log are on the build-log page: ${args.buildLogUrl}`,
+  ].join('\n');
+}
+
+/**
+ * Quota-release invariant (FR-14): a FAILED / rejected / aborted edit releases exactly the
+ * (scope, period) pair it reserved, and only while the request is still in its reserved
+ * `claimed` state — so a redelivery whose request already went `failed`/`done` never
+ * double-releases (usage.release floors at 0, but an over-release would still corrupt the count).
+ */
+async function releaseEditQuota(cfg: PipelineConfig, request: EditRequestRow): Promise<void> {
+  if (request.status !== 'claimed') return;
+  if (!request.quotaScope || !request.quotaPeriod) return;
+  await cfg.usage.release(request.quotaScope, request.quotaPeriod);
+}
+
+/**
+ * Edit promote + live gates: deploy the green-staging script over the LIVE slug, re-run the full
+ * §9 live-gate suite (goldens on the live url + element census + PSI) against the UPDATED golden
+ * set, then flip the tool's slots + goldens, mark the request done, and tell the buyer. The
+ * relay-family test submission is intentionally SKIPPED (the recipient was already proven at build
+ * time). A PSI outage parks (`psi_outage`) resumably; any other gate failure THROWS so the queue
+ * retries and the edit staged short-circuit (in `processEditJob`) resumes cheaply.
+ */
+async function promoteEdit(
+  cfg: PipelineConfig,
+  args: {
+    job: JobRow;
+    tool: ToolRow;
+    def: TemplateDefinition;
+    request: EditRequestRow;
+    requestId: string;
+    goldens: GoldenSet;
+    slots: SlotValues;
+    script: string;
+    checkpoint: BuildCheckpoint;
+  },
+): Promise<void> {
+  const { job, tool, def, request, requestId, goldens, slots, script, checkpoint } = args;
+  const now = cfg.now ?? ((): Date => new Date());
+  const sleep = cfg.sleep ?? defaultSleep;
+  const scope = job.contractId;
+  const token = job.deliverableToken;
+  const liveUrl = `https://${tool.slug}.${cfg.toolHostSuffix}`;
+  const buildLogUrl = `${cfg.publicBaseUrl}/p/${token}`;
+
+  // Self-contained active-time banking for the one controlled exit (PSI outage park).
+  const baseActiveMs = checkpoint.activeMs;
+  const startMs = now().getTime();
+  const persist = async (): Promise<void> => {
+    checkpoint.activeMs = baseActiveMs + (now().getTime() - startMs);
+    await cfg.jobs.saveCheckpoint(job.jobKey, checkpoint);
+  };
+
+  // ---- Promote over the live slug --------------------------------------------
+  await cfg.deployer.putScript(tool.slug, script);
+  let reach = await cfg.fetchImpl(liveUrl);
+  if (reach.status !== 200) {
+    await sleep(REACHABILITY_RETRY_MS);
+    reach = await cfg.fetchImpl(liveUrl);
+  }
+  if (reach.status !== 200) {
+    await cfg.audit.record({
+      scope,
+      gate: 'reachability',
+      result: 'unreachable',
+      detail: { status: reach.status },
+    });
+    throw new Error(`edit live reachability: ${liveUrl} returned ${reach.status}`);
+  }
+  const reachabilityStatus = reach.status;
+
+  try {
+    await cfg.deployer.deleteScript(stagingSlug(token));
+  } catch (err) {
+    cfg.logger.warn({ err, token }, 'edit promote: staging teardown failed; continuing');
+  }
+
+  // hostedUntil is unchanged — an edit never extends (or resets) the paid hosting window.
+  const hostedUntil =
+    tool.hostedUntil ?? new Date(now().getTime() + HOSTING_WINDOW_DAYS * 86_400_000).toISOString();
+  await cfg.tools.promote(tool.toolId, { slots, hostedUntil });
+  await cfg.buildLog.append(token, 'promote', `edit promoted ${tool.slug} to live`, {
+    slug: tool.slug,
+  });
+  await cfg.audit.record({
+    scope,
+    gate: 'promotion',
+    result: 'live',
+    detail: { slug: tool.slug, edit: request.instruction },
+  });
+
+  // ---- Live gates (goldens + census + PSI), same suite as a build ------------
+  const liveShots = deliverablesAsScreenshotStore(cfg.deliverables);
+  const liveResult = await runGoldens({
+    url: `${liveUrl}/?jiffytest=1`,
+    set: goldens,
+    openPage: cfg.openPage,
+    timeoutMs: ASSERTION_TIMEOUT_MS,
+    screenshots: { store: liveShots.store, keyPrefix: `${token}/` },
+  });
+  if (!liveResult.pass) {
+    const failures = compactFailures(liveResult.outcomes);
+    await cfg.buildLog.append(token, 'live-assert', 'edit goldens failed on the live url', {
+      failures,
+    });
+    await cfg.audit.record({ scope, gate: 'live-assert', result: 'fail', detail: { failures } });
+    throw new Error(`edit live goldens failed on ${liveUrl}`);
+  }
+  await cfg.buildLog.append(token, 'live-assert', 'all goldens passed on the live url');
+  await cfg.audit.record({ scope, gate: 'live-assert', result: 'pass' });
+
+  const censusPage = await cfg.openPage();
+  let missing: string[];
+  try {
+    await censusPage.goto(liveUrl);
+    missing = await censusMissing(censusPage, def.elementContract(slots));
+  } finally {
+    await censusPage.close();
+  }
+  if (missing.length > 0) {
+    await cfg.buildLog.append(token, 'element-contract', 'required elements missing', { missing });
+    await cfg.audit.record({
+      scope,
+      gate: 'element-contract',
+      result: 'fail',
+      detail: { missing },
+    });
+    throw new Error(`edit element-contract: missing ${missing.join(', ')}`);
+  }
+  await cfg.audit.record({ scope, gate: 'element-contract', result: 'pass' });
+
+  const psiResult = await cfg.psi.run(liveUrl);
+  if (!psiResult.ok) {
+    await cfg.buildLog.append(token, 'psi', 'PSI outage; parking (cron re-enqueues)');
+    await cfg.audit.record({
+      scope,
+      gate: 'psi',
+      result: 'outage',
+      detail: { error: psiResult.error },
+    });
+    await persist();
+    await cfg.jobs.park(job.jobKey, 'psi_outage');
+    return;
+  }
+  const performance = psiResult.performance ?? 0;
+  const accessibility = psiResult.accessibility ?? 0;
+  if (performance < PSI_PERFORMANCE_MIN || accessibility < PSI_ACCESSIBILITY_MIN) {
+    await cfg.buildLog.append(token, 'psi', 'PSI below thresholds', { performance, accessibility });
+    await cfg.audit.record({
+      scope,
+      gate: 'psi',
+      result: 'below-threshold',
+      detail: { performance, accessibility },
+    });
+    throw new Error(`edit PSI below thresholds (perf ${performance}, a11y ${accessibility})`);
+  }
+  await cfg.audit.record({
+    scope,
+    gate: 'psi',
+    result: 'pass',
+    detail: { performance, accessibility },
+  });
+
+  // Relay-family: SKIP the test delivery — the recipient was already proven at build time (FR-14).
+
+  // ---- Finalize: the updated goldens ARE the new warranty scope --------------
+  await cfg.tools.setGoldens(tool.toolId, goldens);
+  await cfg.edits.setStatus(requestId, 'done');
+  await cfg.client.sendMessage(
+    scope,
+    editDeliveredMessage({
+      name: tool.name,
+      liveUrl,
+      goldenCount: goldens.goldens.length,
+      buildLogUrl,
+    }),
+  );
+  await cfg.jobs.markDelivered(job.jobKey, 'delivered');
+  await cfg.buildLog.append(token, 'delivered', 'edit delivered', {
+    liveUrl,
+    reachabilityStatus,
+  });
+  await cfg.audit.record({
+    scope,
+    gate: 'delivery',
+    result: 'delivered',
+    detail: { toolId: tool.toolId, edit: request.instruction },
+  });
+}
+
+/**
+ * A thread-posted `edit:` request (Task 22 / FR-14): re-compile only the invalidated goldens,
+ * regenerate constrained from the CURRENT live slots through the shared repair loop, and — on
+ * green — promote over the live slug and re-run the full live-gate suite. The live tool is left
+ * UNCHANGED (and the reserved edit quota released) on any pre-promote failure; the quota is
+ * consumed only by a delivered edit.
+ */
+export async function processEditJob(
+  cfg: PipelineConfig,
+  msg: JobMessage & { kind: 'edit' },
+): Promise<void> {
+  const now = cfg.now ?? ((): Date => new Date());
+  const startMs = now().getTime();
+  const { requestId } = msg;
+
+  // ---- Load + guard ----------------------------------------------------------
+  const job = await cfg.jobs.get(msg.jobKey);
+  if (!job) {
+    cfg.logger.warn({ jobKey: msg.jobKey }, 'edit job: no such job row; dropping');
+    return;
+  }
+  if (job.status === 'delivered') {
+    cfg.logger.info({ jobKey: msg.jobKey }, 'edit job: already delivered; replay ignored');
+    return;
+  }
+  if (job.status === 'parked') {
+    cfg.logger.info(
+      { jobKey: msg.jobKey, parkReason: job.parkReason },
+      'edit job: parked; a sweep re-enqueues it',
+    );
+    return;
+  }
+
+  const token = job.deliverableToken;
+  const scope = msg.contractId;
+
+  const checkpoint: BuildCheckpoint = job.checkpoint ?? {
+    slotValues: null,
+    round: 0,
+    spendUsd: job.spentUsd ?? 0,
+    activeMs: 0,
+    staged: false,
+    lastFailures: [],
+    bankedRound: null,
+  };
+  checkpoint.bankedRound = checkpoint.bankedRound ?? null;
+  const baselineActiveMs = checkpoint.activeMs;
+  const firstEntry = job.checkpoint === null;
+  if (firstEntry) await cfg.jobs.setInProgress(msg.jobKey, {});
+
+  // ---- Edit request row (a null row is inconsistent state, not a rejection) --
+  const request = requestId ? await cfg.edits.get(requestId) : null;
+  if (!request || !requestId) {
+    cfg.logger.warn({ jobKey: msg.jobKey, requestId }, 'edit job: no edit_requests row; parking');
+    await cfg.audit.record({
+      scope,
+      gate: 'edit',
+      result: 'request-missing',
+      detail: { requestId: requestId ?? null },
+    });
+    await cfg.jobs.park(msg.jobKey, 'edit_request_missing');
+    return;
+  }
+
+  // ---- Tool must be live/grace (else park; quota released, request failed) ----
+  const tool = msg.toolId ? await cfg.tools.get(msg.toolId) : null;
+  if (!tool || (tool.status !== 'live' && tool.status !== 'grace')) {
+    await cfg.client.sendMessage(scope, editToolMissingMessage(msg.toolId));
+    await cfg.audit.record({
+      scope,
+      gate: 'edit',
+      result: 'tool-missing',
+      detail: { toolId: msg.toolId ?? null, status: tool?.status ?? null },
+    });
+    await releaseEditQuota(cfg, request);
+    await cfg.edits.setStatus(requestId, 'failed');
+    await cfg.jobs.park(msg.jobKey, 'tool_missing');
+    return;
+  }
+
+  const def = getTemplate(tool.templateId);
+
+  // ---- Template-version pin (templates PRD §4): a registry bump must never silently
+  //      re-render a delivered tool. Quota is NOT consumed — release it. --------
+  if (def.version !== tool.templateVersion) {
+    cfg.logger.warn(
+      {
+        jobKey: msg.jobKey,
+        toolId: tool.toolId,
+        pinned: tool.templateVersion,
+        current: def.version,
+      },
+      'edit job: template version mismatch; parking',
+    );
+    await cfg.client.sendMessage(scope, editTemplateMismatchMessage());
+    await cfg.audit.record({
+      scope,
+      gate: 'edit',
+      result: 'template-version-mismatch',
+      detail: { pinned: tool.templateVersion, current: def.version },
+    });
+    await releaseEditQuota(cfg, request);
+    await cfg.edits.setStatus(requestId, 'failed');
+    await cfg.jobs.park(msg.jobKey, 'template_version_mismatch');
+    return;
+  }
+
+  const relay = isRelayTemplate(def, tool.brief) ? await cfg.relay.get(tool.toolId) : null;
+  const relayCtx = relay ? { toolId: tool.toolId, token: relay.token } : null;
+
+  // ---- Staged short-circuit (mirror the build resume): green staging already reached, a
+  //      transient promote/live-gate throw is being retried — re-render from the banked slots
+  //      and jump straight back to promote. -------------------------------------
+  if (checkpoint.staged && checkpoint.slotValues && job.goldens) {
+    const ctx: RenderContext = {
+      slug: tool.slug,
+      toolUrl: `https://${tool.slug}.${cfg.toolHostSuffix}`,
+      publicBaseUrl: cfg.publicBaseUrl,
+      relay: relayCtx,
+    };
+    const files = def.render(checkpoint.slotValues, ctx);
+    const script = buildToolWorkerScript(files, cspFor(ctx, { frameable: def.id === 'widget' }));
+    await cfg.buildLog.append(
+      token,
+      'resume',
+      'edit green staging already reached; resuming at promote',
+    );
+    await promoteEdit(cfg, {
+      job,
+      tool,
+      def,
+      request,
+      requestId,
+      goldens: job.goldens,
+      slots: checkpoint.slotValues,
+      script,
+      checkpoint,
+    });
+    return;
+  }
+
+  // ---- Recompile the goldens ONCE (persisted on the job row so a resume never re-spends) ----
+  let updatedSet: GoldenSet;
+  if (job.goldens) {
+    updatedSet = job.goldens;
+  } else {
+    const recompiled = await cfg.compiler.recompileForEdit({
+      brief: tool.brief,
+      instruction: request.instruction,
+      currentGoldens: tool.goldens,
+      def,
+      bindable: proposalBindable(def, tool.brief),
+    });
+    checkpoint.spendUsd += recompiled.costUsd;
+    if (!recompiled.ok) {
+      await cfg.buildLog.append(token, 'edit-goldens', 'could not recompile goldens for the edit', {
+        errors: recompiled.errors,
+      });
+      await cfg.audit.record({
+        scope,
+        gate: 'edit-goldens',
+        result: 'invalid',
+        detail: { errors: recompiled.errors },
+      });
+      await releaseEditQuota(cfg, request);
+      await cfg.edits.setStatus(requestId, 'failed');
+      await cfg.client.sendMessage(scope, editRephraseMessage(recompiled.errors));
+      await cfg.jobs.markDelivered(msg.jobKey, 'rejected');
+      return;
+    }
+    updatedSet = recompiled.set;
+    await cfg.jobs.setInProgress(msg.jobKey, { goldensJson: JSON.stringify(updatedSet) });
+    await cfg.buildLog.append(token, 'edit-goldens', 'recompiled goldens for the edit', {
+      count: updatedSet.goldens.length,
+    });
+    await cfg.audit.record({
+      scope,
+      gate: 'edit-goldens',
+      result: 'ok',
+      detail: { count: updatedSet.goldens.length },
+    });
+  }
+
+  // Seed the repair loop from the CURRENT live slots — an edit MODIFIES, it doesn't regenerate.
+  if (firstEntry) checkpoint.slotValues = tool.slots;
+
+  // ---- Constrained codegen / repair loop (shared with the build path) --------
+  const loopResult = await runBuildLoop(cfg, {
+    job,
+    tool,
+    def,
+    brief: tool.brief,
+    goldens: updatedSet,
+    checkpoint,
+    msg,
+    relayCtx,
+    instruction: request.instruction,
+    invocationStart: startMs,
+    baselineActiveMs,
+  });
+
+  if (loopResult.outcome === 'green') {
+    await promoteEdit(cfg, {
+      job,
+      tool,
+      def,
+      request,
+      requestId,
+      goldens: updatedSet,
+      slots: loopResult.slots,
+      script: loopResult.script,
+      checkpoint,
+    });
+    return;
+  }
+  if (loopResult.outcome === 'caps-exhausted') {
+    // Edit abort: the live tool is UNCHANGED (never promoted). Tear down staging, release the
+    // reserved quota, and tell the buyer nothing changed.
+    try {
+      await cfg.deployer.deleteScript(stagingSlug(token));
+    } catch (err) {
+      cfg.logger.warn({ err, token }, 'edit abort: staging teardown failed; continuing');
+    }
+    await releaseEditQuota(cfg, request);
+    await cfg.edits.setStatus(requestId, 'failed');
+    await cfg.client.sendMessage(scope, editAbortMessage(`${cfg.publicBaseUrl}/p/${token}`));
+    await cfg.jobs.markDelivered(msg.jobKey, 'aborted');
+    await cfg.audit.record({
+      scope,
+      gate: 'edit',
+      result: 'aborted',
+      detail: { toolId: tool.toolId, reason: loopResult.reason },
+    });
+    return;
+  }
+  // 'continuation' | 'parked' — runBuildLoop already re-enqueued or parked; nothing more to do.
 }
 
 // --- Dispatch ----------------------------------------------------------------
@@ -705,7 +1179,7 @@ export async function processJobMessage(cfg: PipelineConfig, msg: JobMessage): P
     );
     return;
   }
-  cfg.logger.info({ jobKey: msg.jobKey }, 'edit job not yet wired (Task 22); skipping');
+  return processEditJob(cfg, msg as JobMessage & { kind: 'edit' });
 }
 
 // --- Helpers -----------------------------------------------------------------
@@ -790,6 +1264,289 @@ async function rehostImages(
     slots[spec.name] = fetched.dataUrl;
   }
   return 'ok';
+}
+
+// --- Shared codegen / repair loop (build + edit) -----------------------------
+
+interface RunBuildLoopArgs {
+  job: JobRow;
+  tool: ToolRow;
+  def: TemplateDefinition;
+  brief: JiffyBrief;
+  goldens: GoldenSet;
+  checkpoint: BuildCheckpoint;
+  msg: JobMessage;
+  relayCtx: { toolId: string; token: string } | null;
+  /** Threaded into codegen for edit jobs; absent for a build. */
+  instruction?: string;
+  /** Wall-clock start of THIS invocation (soft-budget continuation basis). */
+  invocationStart: number;
+  /** Persisted ACTIVE ms from prior invocations (FR-6 cap basis; recomputed additively here). */
+  baselineActiveMs: number;
+}
+
+type RunBuildLoopResult =
+  | { outcome: 'green'; script: string; slots: SlotValues }
+  | { outcome: 'continuation' }
+  | { outcome: 'parked' }
+  | { outcome: 'caps-exhausted'; reason: 'deadline' | 'caps-exhausted' };
+
+/**
+ * The FR-4→FR-6 core: codegen → moderate → render → stage → assert, repaired up to
+ * MAX_REPAIR_ROUNDS and capped by spend + active-time budgets. Shared by `runBuildJob` (from a
+ * blank slate) and `processEditJob` (seeded from the tool's current slots, with the edit
+ * instruction threaded into codegen). Returns the CONTROL DECISION rather than acting on it:
+ * `green` (with the staged script + slots — the caller promotes), `continuation` (already
+ * checkpointed + re-enqueued past the soft budget), `parked` (a moderation/image outage already
+ * parked the job), or `caps-exhausted` (the caller aborts). A transient deploy/serve throw
+ * propagates so the queue retries the whole message.
+ */
+async function runBuildLoop(
+  cfg: PipelineConfig,
+  args: RunBuildLoopArgs,
+): Promise<RunBuildLoopResult> {
+  const { job, tool, def, brief, goldens, checkpoint, msg, relayCtx, instruction } = args;
+  const now = cfg.now ?? ((): Date => new Date());
+  const elapsed = (): number => now().getTime() - args.invocationStart;
+  const token = job.deliverableToken;
+  const scope = msg.contractId;
+
+  const refreshActive = (): void => {
+    checkpoint.activeMs = args.baselineActiveMs + elapsed();
+  };
+  const persist = async (): Promise<void> => {
+    refreshActive();
+    await cfg.jobs.saveCheckpoint(msg.jobKey, checkpoint);
+  };
+  const parkModerationOutage = async (stage: string): Promise<void> => {
+    const attempts = await cfg.jobs.incrementModerationAttempts(msg.jobKey);
+    await cfg.buildLog.append(token, stage, 'content-safety vendor outage; parked (fail-closed)');
+    await cfg.audit.record({
+      scope,
+      gate: 'moderation',
+      result: 'outage',
+      detail: { stage, attempts },
+    });
+    if (attempts === MODERATION_ATTEMPTS_BEFORE_NOTICE) {
+      await cfg.client.sendMessage(scope, MODERATION_OUTAGE_NOTICE);
+    }
+    await persist();
+    await cfg.jobs.park(msg.jobKey, 'moderation_outage');
+  };
+
+  const stgSlug = stagingSlug(job.deliverableToken);
+  const ctx: RenderContext = {
+    slug: tool.slug,
+    toolUrl: `https://${tool.slug}.${cfg.toolHostSuffix}`,
+    publicBaseUrl: cfg.publicBaseUrl,
+    relay: relayCtx,
+  };
+
+  let round = checkpoint.round;
+  let slotValues: SlotValues | null = checkpoint.slotValues;
+  let lastFailures: string[] = checkpoint.lastFailures;
+
+  while (round <= MAX_REPAIR_ROUNDS) {
+    // Hard active-time cap between rounds ⇒ abort.
+    refreshActive();
+    if (checkpoint.activeMs > CAP_MS) {
+      await cfg.buildLog.append(token, 'deadline', 'active-time cap exceeded between rounds');
+      await cfg.audit.record({
+        scope,
+        gate: 'deadline',
+        result: 'exceeded',
+        detail: { activeMs: checkpoint.activeMs, round },
+      });
+      await persist();
+      return { outcome: 'caps-exhausted', reason: 'deadline' };
+    }
+
+    // Soft per-invocation budget ⇒ checkpoint + re-enqueue continuation (designed, not abort).
+    if (elapsed() > CONSUMER_SOFT_BUDGET_MS) {
+      await cfg.buildLog.append(token, 'continuation', 'soft budget reached; re-enqueuing', {
+        round,
+      });
+      await persist();
+      await cfg.queue.send(msg);
+      return { outcome: 'continuation' };
+    }
+
+    // Spend cap ⇒ break to abort.
+    if (checkpoint.spendUsd >= MAX_SPEND_USD) break;
+
+    // Codegen — UNLESS this round's slots + spend were already banked (a queue retry after a
+    // transient stage/deploy/moderation-outage throw re-enters here; re-generating would
+    // double-spend the FR-6 budget). A banked round re-uses `slotValues` and does NOT re-spend.
+    if (checkpoint.bankedRound === round && slotValues !== null) {
+      cfg.logger.info(
+        { jobKey: msg.jobKey, round },
+        'build job: re-using banked slots (no re-spend)',
+      );
+    } else {
+      const gen = await cfg.codegen.generate({
+        def,
+        brief,
+        goldens,
+        priorSlots: slotValues ?? undefined,
+        failures: lastFailures.length > 0 ? lastFailures : undefined,
+        escalate: round === MAX_REPAIR_ROUNDS,
+        instruction,
+      });
+      checkpoint.spendUsd += gen.costUsd;
+      await cfg.buildLog.append(token, 'codegen', `codegen round ${round} via ${gen.model}`, {
+        ok: gen.ok,
+        costUsd: gen.costUsd,
+      });
+      await cfg.audit.record({
+        scope,
+        gate: 'codegen',
+        result: gen.ok ? 'ok' : 'invalid',
+        detail: { round, model: gen.model },
+      });
+
+      if (!gen.ok) {
+        lastFailures =
+          gen.errors && gen.errors.length > 0 ? gen.errors : ['codegen produced no valid slots'];
+        checkpoint.lastFailures = lastFailures;
+        round += 1;
+        checkpoint.round = round;
+        await persist();
+        continue;
+      }
+
+      // BANK the spend + slots BEFORE render/deploy so a transient throw below doesn't lose them.
+      slotValues = gen.slots ?? {};
+      checkpoint.slotValues = slotValues;
+      checkpoint.bankedRound = round;
+      await persist();
+    }
+
+    // Image re-hosting (link-in-bio avatar / OG images carried as URLs).
+    const rehost = await rehostImages(cfg, def, slotValues, scope);
+    if (rehost === 'outage') {
+      await parkModerationOutage('image');
+      return { outcome: 'parked' };
+    }
+
+    // Generated visible copy moderation (fail-closed).
+    const copyText = def.slots
+      .filter((spec) => spec.kind === 'copy')
+      .map((spec) => slotValues?.[spec.name])
+      .filter((value): value is string => typeof value === 'string')
+      .join('\n');
+    if (copyText.length > 0) {
+      const copyMod = await cfg.moderation.moderate(copyText);
+      if (!copyMod.ok) {
+        await parkModerationOutage('copy');
+        return { outcome: 'parked' };
+      }
+      if (copyMod.verdict.flagged) {
+        lastFailures = ['generated copy flagged by moderation — rewrite the flagged copy'];
+        checkpoint.lastFailures = lastFailures;
+        round += 1;
+        checkpoint.round = round;
+        await persist();
+        continue;
+      }
+    }
+
+    // Render.
+    let files: FileSet;
+    try {
+      files = def.render(slotValues, ctx);
+    } catch (err) {
+      if (err instanceof SlotError) {
+        lastFailures = err.errors;
+        checkpoint.lastFailures = lastFailures;
+        round += 1;
+        checkpoint.round = round;
+        await persist();
+        continue;
+      }
+      throw err;
+    }
+
+    // Build the worker script and stage it (a throw here is a transient deploy failure — let
+    // the queue retry the whole message; do NOT bank active time for the failed attempt).
+    const script = buildToolWorkerScript(files, cspFor(ctx, { frameable: def.id === 'widget' }));
+    await cfg.deployer.putScript(stgSlug, script);
+    const serves = await cfg.deployer.checkServes(stgSlug);
+    if (!serves.ok) {
+      throw new Error(`build job: staging slug ${stgSlug} did not serve (status ${serves.status})`);
+    }
+    await cfg.buildLog.append(token, 'stage', `staged round ${round} to ${stgSlug}`);
+    await cfg.audit.record({
+      scope,
+      gate: 'stage',
+      result: 'deployed',
+      detail: { slug: stgSlug, round },
+    });
+
+    // Assert the goldens against the browser-reachable staging URL (test mode on).
+    const result = await runGoldens({
+      url: `https://${stgSlug}.${cfg.toolHostSuffix}/?jiffytest=1`,
+      set: goldens,
+      openPage: cfg.openPage,
+      timeoutMs: ASSERTION_TIMEOUT_MS,
+      screenshots: {
+        store: deliverablesAsScreenshotStore(cfg.deliverables).store,
+        keyPrefix: `${token}/stg-r${round}-`,
+      },
+    });
+    const shots = result.outcomes
+      .map((outcome) => outcome.screenshotKey)
+      .filter((key): key is string => key !== undefined);
+
+    if (result.pass) {
+      checkpoint.slotValues = slotValues;
+      checkpoint.round = round;
+      checkpoint.staged = true;
+      checkpoint.lastFailures = [];
+      // Assertions ran for this round; the banked-round guard is spent (a re-entry now uses the
+      // staged short-circuit, not the codegen loop).
+      checkpoint.bankedRound = null;
+      await persist();
+      await cfg.buildLog.append(token, 'assert', `all goldens passed on round ${round}`, {
+        screenshots: shots,
+      });
+      await cfg.audit.record({
+        scope,
+        gate: 'assert',
+        result: 'staging-green',
+        detail: { round, screenshots: shots },
+      });
+      return { outcome: 'green', script, slots: slotValues };
+    }
+
+    lastFailures = compactFailures(result.outcomes);
+    checkpoint.lastFailures = lastFailures;
+    // Assertions ran (and failed) for this round; repair regenerates, so clear the banked guard.
+    checkpoint.bankedRound = null;
+    round += 1;
+    checkpoint.round = round;
+    await persist();
+    await cfg.buildLog.append(token, 'assert', `goldens failed on round ${round - 1}`, {
+      screenshots: shots,
+      failures: lastFailures,
+    });
+    await cfg.audit.record({
+      scope,
+      gate: 'assert',
+      result: 'failed',
+      detail: { round: round - 1, failures: lastFailures },
+    });
+  }
+
+  // Caps exhausted (spend cap or repair rounds) ⇒ abort.
+  await cfg.buildLog.append(token, 'caps', 'repair budget exhausted without green staging');
+  await cfg.audit.record({
+    scope,
+    gate: 'caps',
+    result: 'cap-exhausted',
+    detail: { round, spendUsd: checkpoint.spendUsd },
+  });
+  await persist();
+  return { outcome: 'caps-exhausted', reason: 'caps-exhausted' };
 }
 
 // --- Build job ---------------------------------------------------------------
@@ -1085,229 +1842,37 @@ async function runBuildJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> 
     }
   }
 
-  // ---- Stage 5: codegen / repair loop ----------------------------------------
-  const stgSlug = stagingSlug(job.deliverableToken);
-  const ctx: RenderContext = {
-    slug: tool.slug,
-    toolUrl: `https://${tool.slug}.${cfg.toolHostSuffix}`,
-    publicBaseUrl: cfg.publicBaseUrl,
-    relay: relayCtx,
-  };
-
-  let round = checkpoint.round;
-  let slotValues: SlotValues | null = checkpoint.slotValues;
-  let lastFailures: string[] = checkpoint.lastFailures;
-
-  while (round <= MAX_REPAIR_ROUNDS) {
-    // Hard active-time cap between rounds ⇒ abort.
-    refreshActive();
-    if (checkpoint.activeMs > CAP_MS) {
-      await cfg.buildLog.append(token, 'deadline', 'active-time cap exceeded between rounds');
-      await cfg.audit.record({
-        scope,
-        gate: 'deadline',
-        result: 'exceeded',
-        detail: { activeMs: checkpoint.activeMs, round },
-      });
-      await persist();
-      await abortJob(cfg, { job, tool, reason: 'deadline', checkpoint });
-      return;
-    }
-
-    // Soft per-invocation budget ⇒ checkpoint + re-enqueue continuation (designed, not abort).
-    if (elapsed() > CONSUMER_SOFT_BUDGET_MS) {
-      await cfg.buildLog.append(token, 'continuation', 'soft budget reached; re-enqueuing', {
-        round,
-      });
-      await persist();
-      await cfg.queue.send(msg);
-      return;
-    }
-
-    // Spend cap ⇒ break to abort.
-    if (checkpoint.spendUsd >= MAX_SPEND_USD) break;
-
-    // Codegen — UNLESS this round's slots + spend were already banked (a queue retry after a
-    // transient stage/deploy/moderation-outage throw re-enters here; re-generating would
-    // double-spend the FR-6 budget). A banked round re-uses `slotValues` and does NOT re-spend.
-    if (checkpoint.bankedRound === round && slotValues !== null) {
-      cfg.logger.info(
-        { jobKey: msg.jobKey, round },
-        'build job: re-using banked slots (no re-spend)',
-      );
-    } else {
-      const gen = await cfg.codegen.generate({
-        def,
-        brief,
-        goldens,
-        priorSlots: slotValues ?? undefined,
-        failures: lastFailures.length > 0 ? lastFailures : undefined,
-        escalate: round === MAX_REPAIR_ROUNDS,
-      });
-      checkpoint.spendUsd += gen.costUsd;
-      await cfg.buildLog.append(token, 'codegen', `codegen round ${round} via ${gen.model}`, {
-        ok: gen.ok,
-        costUsd: gen.costUsd,
-      });
-      await cfg.audit.record({
-        scope,
-        gate: 'codegen',
-        result: gen.ok ? 'ok' : 'invalid',
-        detail: { round, model: gen.model },
-      });
-
-      if (!gen.ok) {
-        lastFailures =
-          gen.errors && gen.errors.length > 0 ? gen.errors : ['codegen produced no valid slots'];
-        checkpoint.lastFailures = lastFailures;
-        round += 1;
-        checkpoint.round = round;
-        await persist();
-        continue;
-      }
-
-      // BANK the spend + slots BEFORE render/deploy so a transient throw below doesn't lose them.
-      slotValues = gen.slots ?? {};
-      checkpoint.slotValues = slotValues;
-      checkpoint.bankedRound = round;
-      await persist();
-    }
-
-    // Image re-hosting (link-in-bio avatar / OG images carried as URLs).
-    const rehost = await rehostImages(cfg, def, slotValues, scope);
-    if (rehost === 'outage') {
-      await parkModerationOutage('image');
-      return;
-    }
-
-    // Generated visible copy moderation (fail-closed).
-    const copyText = def.slots
-      .filter((spec) => spec.kind === 'copy')
-      .map((spec) => slotValues?.[spec.name])
-      .filter((value): value is string => typeof value === 'string')
-      .join('\n');
-    if (copyText.length > 0) {
-      const copyMod = await cfg.moderation.moderate(copyText);
-      if (!copyMod.ok) {
-        await parkModerationOutage('copy');
-        return;
-      }
-      if (copyMod.verdict.flagged) {
-        lastFailures = ['generated copy flagged by moderation — rewrite the flagged copy'];
-        checkpoint.lastFailures = lastFailures;
-        round += 1;
-        checkpoint.round = round;
-        await persist();
-        continue;
-      }
-    }
-
-    // Render.
-    let files: FileSet;
-    try {
-      files = def.render(slotValues, ctx);
-    } catch (err) {
-      if (err instanceof SlotError) {
-        lastFailures = err.errors;
-        checkpoint.lastFailures = lastFailures;
-        round += 1;
-        checkpoint.round = round;
-        await persist();
-        continue;
-      }
-      throw err;
-    }
-
-    // Build the worker script and stage it (a throw here is a transient deploy failure — let
-    // the queue retry the whole message; do NOT bank active time for the failed attempt).
-    const script = buildToolWorkerScript(files, cspFor(ctx, { frameable: def.id === 'widget' }));
-    await cfg.deployer.putScript(stgSlug, script);
-    const serves = await cfg.deployer.checkServes(stgSlug);
-    if (!serves.ok) {
-      throw new Error(`build job: staging slug ${stgSlug} did not serve (status ${serves.status})`);
-    }
-    await cfg.buildLog.append(token, 'stage', `staged round ${round} to ${stgSlug}`);
-    await cfg.audit.record({
-      scope,
-      gate: 'stage',
-      result: 'deployed',
-      detail: { slug: stgSlug, round },
-    });
-
-    // Assert the goldens against the browser-reachable staging URL (test mode on).
-    const result = await runGoldens({
-      url: `https://${stgSlug}.${cfg.toolHostSuffix}/?jiffytest=1`,
-      set: goldens,
-      openPage: cfg.openPage,
-      timeoutMs: ASSERTION_TIMEOUT_MS,
-      screenshots: {
-        store: deliverablesAsScreenshotStore(cfg.deliverables).store,
-        keyPrefix: `${token}/stg-r${round}-`,
-      },
-    });
-    const shots = result.outcomes
-      .map((outcome) => outcome.screenshotKey)
-      .filter((key): key is string => key !== undefined);
-
-    if (result.pass) {
-      checkpoint.slotValues = slotValues;
-      checkpoint.round = round;
-      checkpoint.staged = true;
-      checkpoint.lastFailures = [];
-      // Assertions ran for this round; the banked-round guard is spent (a re-entry now uses the
-      // staged short-circuit, not the codegen loop).
-      checkpoint.bankedRound = null;
-      await persist();
-      await cfg.buildLog.append(token, 'assert', `all goldens passed on round ${round}`, {
-        screenshots: shots,
-      });
-      await cfg.audit.record({
-        scope,
-        gate: 'assert',
-        result: 'staging-green',
-        detail: { round, screenshots: shots },
-      });
-      await promoteAndDeliver(cfg, {
-        job,
-        tool,
-        def,
-        brief,
-        goldens,
-        slots: slotValues,
-        script,
-        contract,
-        checkpoint,
-      });
-      return;
-    }
-
-    lastFailures = compactFailures(result.outcomes);
-    checkpoint.lastFailures = lastFailures;
-    // Assertions ran (and failed) for this round; repair regenerates, so clear the banked guard.
-    checkpoint.bankedRound = null;
-    round += 1;
-    checkpoint.round = round;
-    await persist();
-    await cfg.buildLog.append(token, 'assert', `goldens failed on round ${round - 1}`, {
-      screenshots: shots,
-      failures: lastFailures,
-    });
-    await cfg.audit.record({
-      scope,
-      gate: 'assert',
-      result: 'failed',
-      detail: { round: round - 1, failures: lastFailures },
-    });
-  }
-
-  // ---- Stage 6: caps exhausted ⇒ abort ---------------------------------------
-  await cfg.buildLog.append(token, 'caps', 'repair budget exhausted without green staging');
-  await cfg.audit.record({
-    scope,
-    gate: 'caps',
-    result: 'cap-exhausted',
-    detail: { round, spendUsd: checkpoint.spendUsd },
+  // ---- Stage 5: codegen → stage → assert → repair loop -----------------------
+  const loopResult = await runBuildLoop(cfg, {
+    job,
+    tool,
+    def,
+    brief,
+    goldens,
+    checkpoint,
+    msg,
+    relayCtx,
+    invocationStart: startMs,
+    baselineActiveMs,
   });
-  await persist();
-  await abortJob(cfg, { job, tool, reason: 'caps-exhausted', checkpoint });
+
+  if (loopResult.outcome === 'green') {
+    await promoteAndDeliver(cfg, {
+      job,
+      tool,
+      def,
+      brief,
+      goldens,
+      slots: loopResult.slots,
+      script: loopResult.script,
+      contract,
+      checkpoint,
+    });
+    return;
+  }
+  if (loopResult.outcome === 'caps-exhausted') {
+    await abortJob(cfg, { job, tool, reason: loopResult.reason, checkpoint });
+    return;
+  }
+  // 'continuation' | 'parked' — runBuildLoop already re-enqueued or parked; nothing more to do.
 }

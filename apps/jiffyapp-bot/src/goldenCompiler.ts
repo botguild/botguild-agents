@@ -100,14 +100,28 @@ export function proposalBindable(def: TemplateDefinition, brief: JiffyBrief): Bi
 
 // ---- compiler ----
 
+export type GoldenCompileResult =
+  | { ok: true; set: GoldenSet; costUsd: number }
+  | { ok: false; errors: string[]; costUsd: number };
+
 export interface GoldenCompiler {
   compile(
     brief: JiffyBrief,
     def: TemplateDefinition,
     bindable: BindableSurface,
-  ): Promise<
-    { ok: true; set: GoldenSet; costUsd: number } | { ok: false; errors: string[]; costUsd: number }
-  >;
+  ): Promise<GoldenCompileResult>;
+  /**
+   * Update an existing golden set for a bounded edit (Task 22 / FR-14). Same forced tool and
+   * validation as `compile`, but the model is told to change ONLY the goldens the edit
+   * instruction invalidates and keep every other one byte-identical. One retry on invalid output.
+   */
+  recompileForEdit(args: {
+    brief: JiffyBrief;
+    instruction: string;
+    currentGoldens: GoldenSet;
+    def: TemplateDefinition;
+    bindable: BindableSurface;
+  }): Promise<GoldenCompileResult>;
 }
 
 export interface GoldenCompilerConfig {
@@ -224,6 +238,12 @@ Hard rules, no exceptions:
 
 Always call report_golden_examples. Never respond with prose.`;
 
+/** Appended to SYSTEM_PROMPT for an edit recompile (Task 22): the model updates the existing
+ *  set in place rather than compiling a fresh one. */
+const EDIT_SYSTEM_SUFFIX =
+  'You are UPDATING an existing golden set for an edit. Update ONLY the goldens invalidated by ' +
+  'the edit instruction; keep every other golden byte-identical.';
+
 function buildUserPrompt(
   brief: JiffyBrief,
   def: TemplateDefinition,
@@ -239,19 +259,39 @@ function buildUserPrompt(
   return sections.join('\n\n');
 }
 
+/** User message for an edit recompile: the edit instruction, the current golden set to update,
+ *  the brief, and the bindable-testid surface the updated goldens must stay within. */
+function buildEditUserPrompt(args: {
+  instruction: string;
+  currentGoldens: GoldenSet;
+  brief: JiffyBrief;
+  bindable: BindableSurface;
+}): string {
+  return [
+    `Edit instruction: ${args.instruction}`,
+    `Current golden set:\n\`\`\`json\n${JSON.stringify(args.currentGoldens, null, 2)}\n\`\`\``,
+    `Brief:\n\`\`\`json\n${JSON.stringify(args.brief, null, 2)}\n\`\`\``,
+    `Bindable testids: exact [${args.bindable.exact.join(', ')}], prefixes [${args.bindable.prefixes.join(', ')}]`,
+  ].join('\n\n');
+}
+
 export function createGoldenCompiler(config: GoldenCompilerConfig): GoldenCompiler {
   const anthropic = new Anthropic({
     apiKey: config.apiKey,
     ...(config.fetchImpl ? { fetch: config.fetchImpl } : {}),
   });
 
-  async function callHaiku(userText: string): Promise<{ toolInput: unknown; costUsd: number }> {
+  async function callHaiku(
+    userText: string,
+    systemExtra?: string,
+  ): Promise<{ toolInput: unknown; costUsd: number }> {
+    const systemText = systemExtra ? `${SYSTEM_PROMPT}\n\n${systemExtra}` : SYSTEM_PROMPT;
     const response = await anthropic.messages.create({
       model: HAIKU_MODEL_ID,
       max_tokens: 2000,
       tools: [GOLDEN_SET_TOOL],
       tool_choice: { type: 'tool', name: GOLDEN_SET_TOOL.name },
-      system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+      system: [{ type: 'text', text: systemText, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userText }],
     });
 
@@ -324,6 +364,58 @@ export function createGoldenCompiler(config: GoldenCompilerConfig): GoldenCompil
       config.logger.warn(
         { templateId: def.id, errors: retryResult.errors },
         'golden compiler: retry still invalid, giving up',
+      );
+      return { ok: false, errors: retryResult.errors, costUsd };
+    },
+
+    async recompileForEdit({ brief, instruction, currentGoldens, def, bindable }) {
+      const userPrompt = buildEditUserPrompt({ instruction, currentGoldens, brief, bindable });
+      let costUsd = 0;
+
+      let firstInput: unknown;
+      try {
+        const first = await callHaiku(userPrompt, EDIT_SYSTEM_SUFFIX);
+        firstInput = first.toolInput;
+        costUsd += first.costUsd;
+      } catch (err) {
+        config.logger.warn({ err, templateId: def.id }, 'golden recompile: first call failed');
+        return { ok: false, errors: [`model call failed: ${(err as Error).message}`], costUsd };
+      }
+
+      const firstResult = validateGoldenSet(firstInput, bindable);
+      if (firstResult.ok) {
+        return { ok: true, set: firstResult.set, costUsd };
+      }
+
+      config.logger.info(
+        { templateId: def.id, errors: firstResult.errors },
+        'golden recompile: first attempt invalid, retrying once',
+      );
+
+      const retryPrompt = `${userPrompt}\n\nYour previous attempt failed validation: ${firstResult.errors.join('; ')}. Emit a corrected set that fixes every one of these problems.`;
+
+      let retryInput: unknown;
+      try {
+        const retry = await callHaiku(retryPrompt, EDIT_SYSTEM_SUFFIX);
+        retryInput = retry.toolInput;
+        costUsd += retry.costUsd;
+      } catch (err) {
+        config.logger.warn({ err, templateId: def.id }, 'golden recompile: retry call failed');
+        return {
+          ok: false,
+          errors: [...firstResult.errors, `retry failed: ${(err as Error).message}`],
+          costUsd,
+        };
+      }
+
+      const retryResult = validateGoldenSet(retryInput, bindable);
+      if (retryResult.ok) {
+        return { ok: true, set: retryResult.set, costUsd };
+      }
+
+      config.logger.warn(
+        { templateId: def.id, errors: retryResult.errors },
+        'golden recompile: retry still invalid, giving up',
       );
       return { ok: false, errors: retryResult.errors, costUsd };
     },

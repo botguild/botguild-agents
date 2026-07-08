@@ -199,6 +199,9 @@ async function makeHarness(): Promise<Harness> {
       async compile(): Promise<never> {
         throw new Error('compiler: not scripted for this test');
       },
+      async recompileForEdit(): Promise<never> {
+        throw new Error('recompileForEdit: not scripted for this test');
+      },
     },
     emailRouting,
     openPage: async () => {

@@ -151,6 +151,9 @@ async function makeHarness(): Promise<Harness> {
     async compile() {
       return compileResult.value;
     },
+    async recompileForEdit() {
+      throw new Error('recompileForEdit: not used by the sweep tests');
+    },
   };
   const baseProposer = {
     async generateProposal(): Promise<ProposalDraft> {

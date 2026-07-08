@@ -171,6 +171,9 @@ function stubCompilerOk(): GoldenCompiler {
     async compile() {
       return { ok: true, set: STUB_GOLDENS, costUsd: 0.01 };
     },
+    async recompileForEdit() {
+      throw new Error('recompileForEdit: not used by the proposer');
+    },
   };
 }
 
@@ -178,6 +181,9 @@ function stubCompilerFail(): GoldenCompiler {
   return {
     async compile() {
       return { ok: false, errors: ['bad testid'], costUsd: 0.005 };
+    },
+    async recompileForEdit() {
+      throw new Error('recompileForEdit: not used by the proposer');
     },
   };
 }

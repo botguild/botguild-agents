@@ -27,6 +27,7 @@ import {
   type BuildCheckpoint,
 } from './jobs.js';
 import { createGigStore } from './gigStore.js';
+import { EDITS_PER_CYCLE } from './config.js';
 import { getTemplate } from './templates/registry.js';
 import { stagingSlug } from './slug.js';
 import type { PageDriver } from './assertPlan.js';
@@ -231,6 +232,8 @@ export interface Harness {
     relay: ReturnType<typeof createRelayStore>;
     audit: ReturnType<typeof createAuditStore>;
     buildLog: ReturnType<typeof createBuildLogStore>;
+    edits: ReturnType<typeof createEditRequestStore>;
+    usage: ReturnType<typeof createUsageStore>;
   };
   page: PageState;
   setPage: (state: PageState) => void;
@@ -269,6 +272,13 @@ export interface Harness {
   /** PSI result the fake returns; settable per test (default a passing 96/97). */
   psiResult: { value: PsiResult };
   psiCalls: string[];
+  /** The result the recompileForEdit fake returns (Task 22); settable per test. */
+  recompileResult: {
+    value:
+      | { ok: true; set: GoldenSet; costUsd: number }
+      | { ok: false; errors: string[]; costUsd: number };
+  };
+  recompileCalls: Array<{ instruction: string; currentGoldens: GoldenSet }>;
   seedBuildGig: (opts: {
     templateId: TemplateId;
     brief: JiffyBrief;
@@ -281,6 +291,26 @@ export interface Harness {
     jobKey: string;
     token: string;
     msg: JobMessage;
+  }>;
+  /** Seed a LIVE tool + a claimed+reserved edit request + an `edit` job, ready for
+   *  `processJobMessage` (Task 22). */
+  seedEditJob: (opts: {
+    templateId: TemplateId;
+    brief: JiffyBrief;
+    goldens: GoldenSet;
+    slots: SlotValues;
+    instruction: string;
+    toolId?: string;
+    contractId?: string;
+    requestId?: string;
+    reserveQuota?: boolean;
+  }) => Promise<{
+    toolId: string;
+    contractId: string;
+    requestId: string;
+    jobKey: string;
+    token: string;
+    msg: JobMessage & { kind: 'edit' };
   }>;
 }
 
@@ -422,9 +452,24 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     },
   };
 
+  const recompileResult: Harness['recompileResult'] = {
+    value: { ok: false, errors: ['recompiler not scripted for this test'], costUsd: 0 },
+  };
+  const recompileCalls: Harness['recompileCalls'] = [];
   const compiler = {
     async compile(): Promise<{ ok: false; errors: string[]; costUsd: number }> {
       return { ok: false, errors: ['compiler not scripted for this test'], costUsd: 0 };
+    },
+    async recompileForEdit(args: {
+      brief: JiffyBrief;
+      instruction: string;
+      currentGoldens: GoldenSet;
+    }): Promise<
+      | { ok: true; set: GoldenSet; costUsd: number }
+      | { ok: false; errors: string[]; costUsd: number }
+    > {
+      recompileCalls.push({ instruction: args.instruction, currentGoldens: args.currentGoldens });
+      return recompileResult.value;
     },
   };
 
@@ -506,11 +551,53 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     };
   };
 
+  const seedEditJob: Harness['seedEditJob'] = async (opts) => {
+    seq += 1;
+    const toolId = opts.toolId ?? `tool-edit-${seq}`;
+    const contractId = opts.contractId ?? `c-edit-${seq}`;
+    const requestId = opts.requestId ?? `req-${seq}`;
+    const def = getTemplate(opts.templateId);
+    await tools.create({
+      toolId,
+      slugCandidates: [`edit-tool-${seq}`],
+      templateId: opts.templateId,
+      templateVersion: def.version,
+      buildContractId: `build-${contractId}`,
+      name: opts.brief.name,
+      brief: opts.brief,
+      goldens: opts.goldens,
+      notifyEmail: opts.brief.notifyEmail,
+    });
+    // Promote to LIVE with the current slots + a hosting window well in the future.
+    const hostedUntil = new Date(storeNow().getTime() + 30 * 86_400_000).toISOString();
+    await tools.promote(toolId, { slots: opts.slots, hostedUntil });
+
+    // Claim + reserve the edit request exactly as pollEditRequests would.
+    await edits.claim({ requestId, toolId, contractId, instruction: opts.instruction });
+    if (opts.reserveQuota !== false) {
+      const scope = `edit:${toolId}`;
+      await usage.reserve(scope, contractId, EDITS_PER_CYCLE);
+      await edits.setQuotaRef(requestId, scope, contractId);
+    }
+    const hash = await sha256Hex(contractId);
+    const jobKey = jobKeyFor(hash, `edit:${requestId}`);
+    await jobs.claim({ jobKey, contractId, kind: 'edit', toolId });
+    const job = await jobs.get(jobKey);
+    return {
+      toolId,
+      contractId,
+      requestId,
+      jobKey,
+      token: job!.deliverableToken,
+      msg: { kind: 'edit', contractId, jobKey, toolId, requestId },
+    };
+  };
+
   return {
     cfg,
     db,
     clock,
-    stores: { jobs, tools, gigs, relay, audit, buildLog },
+    stores: { jobs, tools, gigs, relay, audit, buildLog, edits, usage },
     get page() {
       return page;
     },
@@ -539,7 +626,10 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     fetchCalls,
     psiResult,
     psiCalls,
+    recompileResult,
+    recompileCalls,
     seedBuildGig,
+    seedEditJob,
   };
 }
 
@@ -1244,7 +1334,177 @@ test('deliverMilestone retry after platform-side success completes the job', asy
   assert.equal(job?.outcome, 'delivered');
 
   const audits = await h.stores.audit.listByScope(contractId);
-  assert.ok(
-    audits.some((a) => a.gate === 'delivery' && a.result === 'delivery-already-accepted'),
-  );
+  assert.ok(audits.some((a) => a.gate === 'delivery' && a.result === 'delivery-already-accepted'));
+});
+
+// =============================================================================
+// Task 22 — thread-driven bounded edits: the re-gated re-run through processEditJob
+// =============================================================================
+
+// A recompiled golden set that still passes on calcLivePage('$100.00') but differs from
+// CALC_GOLDENS (first title changed), so an assertion that tool.goldens flipped is meaningful.
+const UPDATED_CALC_GOLDENS: GoldenSet = {
+  goldens: [
+    { title: 'updated headline renders', steps: [], expect: [{ titleEquals: 'Rate Estimator' }] },
+    {
+      title: 'computes total',
+      steps: [{ do: 'click', testid: 'calc-submit' }],
+      expect: [{ testid: 'result', equals: '$100.00' }],
+    },
+    { title: 'reset shown', steps: [], expect: [{ testid: 'reset', visible: true }] },
+  ],
+};
+
+test('edit happy path: constrained codegen (instruction + current slots) → promote → live gates → tool updated', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, jobKey, toolId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: calcSlots(),
+    instruction: 'change the headline to Rate Estimator',
+  });
+
+  await processJobMessage(h.cfg, msg); // completes to a delivered edit — no throw
+
+  // Codegen was constrained: it received the edit instruction and started from the tool's slots.
+  assert.equal(h.codegenCalls.length, 1);
+  assert.equal(h.codegenCalls[0].instruction, 'change the headline to Rate Estimator');
+  assert.deepEqual(h.codegenCalls[0].priorSlots, getTemplate('calculator').referenceSlots);
+  // The recompiler saw the tool's current goldens.
+  assert.equal(h.recompileCalls.length, 1);
+  assert.deepEqual(h.recompileCalls[0].currentGoldens, CALC_GOLDENS);
+
+  // Promoted over the LIVE slug and re-ran the live gates (PSI against the live URL).
+  const tool = await h.stores.tools.get(toolId);
+  assert.equal(tool?.status, 'live');
+  assert.ok(h.psiCalls.includes(`https://${tool!.slug}.${TOOL_HOST_SUFFIX}`));
+  assert.ok(h.deployerPuts.some((p) => p.slug === tool!.slug));
+
+  // The tool now carries the updated goldens + slots; the request is done; the job delivered.
+  assert.deepEqual(tool?.goldens, UPDATED_CALC_GOLDENS);
+  assert.deepEqual(tool?.slots, calcSlots());
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'done');
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'delivered');
+  assert.equal(job?.outcome, 'delivered');
+  // No milestone is delivered for an edit — it lands as a thread message.
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  assert.match(h.messages[h.messages.length - 1].content, /is live/i);
+});
+
+test('edit non-convergence: caps exhausted → live tool UNCHANGED, quota released, job aborted', async () => {
+  const h = await makeHarness();
+  h.setPage(calcPage('$0.00')); // staging goldens never pass
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  for (let i = 0; i < 4; i++) h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: calcSlots(),
+    instruction: 'make the result bigger',
+  });
+
+  await processJobMessage(h.cfg, msg); // edit abort is a controlled exit — no throw
+
+  // The live tool is untouched: original goldens, original slots, still live, never re-promoted.
+  const tool = await h.stores.tools.get(toolId);
+  assert.deepEqual(tool?.goldens, CALC_GOLDENS);
+  assert.deepEqual(tool?.slots, calcSlots());
+  assert.ok(!h.deployerPuts.some((p) => p.slug === tool!.slug));
+
+  // The request failed and the reserved quota was released back to 0.
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+
+  // The job aborted; the buyer was told the live tool is unchanged.
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  assert.match(h.messages[h.messages.length - 1].content, /unchanged/i);
+});
+
+test('edit recompile failure: rejected, quota released, buyer asked to rephrase, nothing regenerated', async () => {
+  const h = await makeHarness();
+  h.recompileResult.value = { ok: false, errors: ['cannot map edit to a golden'], costUsd: 0.02 };
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: calcSlots(),
+    instruction: 'do something impossible',
+  });
+
+  await processJobMessage(h.cfg, msg);
+
+  assert.equal(h.codegenCalls.length, 0); // never reached codegen
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'delivered');
+  assert.equal(job?.outcome, 'rejected');
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+  assert.match(h.messages[h.messages.length - 1].content, /re-post|rephrase/i);
+});
+
+test('edit template-version mismatch: parks template_version_mismatch, releases quota, regenerates nothing', async () => {
+  const h = await makeHarness();
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: calcSlots(),
+    instruction: 'change the headline',
+  });
+  // Pin the delivered tool to a stale template version the registry no longer serves.
+  await h.db
+    .prepare('UPDATE tools SET template_version = ? WHERE tool_id = ?')
+    .bind('0.9.0', toolId)
+    .run();
+
+  await processJobMessage(h.cfg, msg);
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'parked');
+  assert.equal(job?.parkReason, 'template_version_mismatch');
+  assert.equal(h.codegenCalls.length, 0);
+  assert.equal(h.recompileCalls.length, 0);
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+});
+
+test('edit re-entry: a promote-time throw resumes via the staged short-circuit without re-codegen/re-recompile', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  h.fetchStatuses.push(404, 404); // both live-reachability probes fail on the first promote
+  const { msg, jobKey, toolId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: calcSlots(),
+    instruction: 'change the headline',
+  });
+
+  // First invocation: green staging, then the reachability gate throws on promote.
+  await assert.rejects(processJobMessage(h.cfg, msg), /reachability/);
+  assert.equal(h.codegenCalls.length, 1);
+  assert.equal(h.recompileCalls.length, 1);
+  assert.equal((await h.stores.jobs.get(jobKey))?.checkpoint?.staged, true);
+
+  // Re-entry: recompile would now FAIL if it ran — proving the staged short-circuit skips it (and
+  // codegen). Reachability defaults to 200, so the edit completes.
+  h.recompileResult.value = { ok: false, errors: ['should not be called'], costUsd: 0 };
+  await processJobMessage(h.cfg, msg);
+
+  assert.equal(h.codegenCalls.length, 1); // no regeneration
+  assert.equal(h.recompileCalls.length, 1); // no re-recompile
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'delivered');
+  assert.deepEqual((await h.stores.tools.get(toolId))?.goldens, UPDATED_CALC_GOLDENS);
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'done');
 });
