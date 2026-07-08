@@ -289,7 +289,9 @@ async function makeHarness(): Promise<Harness> {
     async compile(): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
       return compileResult.value;
     },
-    async recompileForEdit(args: { instruction: string }): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
+    async recompileForEdit(args: {
+      instruction: string;
+    }): Promise<{ ok: true; set: GoldenSet; costUsd: number }> {
       recompileCalls.push(args);
       return recompileResult.value;
     },
