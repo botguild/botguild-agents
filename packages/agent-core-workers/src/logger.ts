@@ -93,7 +93,11 @@ function makeLogger(base: Record<string, unknown>, level: string): WorkersLogger
         serialized = JSON.stringify(line);
       } catch {
         // Circular payload — never let observability throw into bot logic.
-        serialized = JSON.stringify({ level: levelLabel, ...base, msg: entry.msg ?? '[unserializable log entry]' });
+        serialized = JSON.stringify({
+          level: levelLabel,
+          ...base,
+          msg: entry.msg ?? '[unserializable log entry]',
+        });
       }
       console[CONSOLE_METHODS[levelLabel]!](serialized);
     };

@@ -30,7 +30,9 @@ const OFFER = 'offer-1';
 // Fonts + wasm are shared across tests (isolate-singleton wasm init).
 const render: RenderContext = { fonts: await loadFontsNode(), wasm: nodeWasmSources() };
 
-const cleanModerator: Moderator = { moderate: async (): Promise<ModerationOutcome> => ({ status: 'clean' }) };
+const cleanModerator: Moderator = {
+  moderate: async (): Promise<ModerationOutcome> => ({ status: 'clean' }),
+};
 const okProbe: UrlProbe = { probe: async () => ({ status: 200, byteLength: 1, ok: true }) };
 
 /** In-memory R2 double; `corrupt` flips a byte on write to fake a same-length corruption. */
@@ -98,7 +100,9 @@ test('401 on a bad signature and on a stale timestamp', async () => {
 });
 
 test('422 when moderation flags the content, and the reserved cap slot is released', async () => {
-  const flagged: Moderator = { moderate: async (): Promise<ModerationOutcome> => ({ status: 'flagged', reason: 'unsafe' }) };
+  const flagged: Moderator = {
+    moderate: async (): Promise<ModerationOutcome> => ({ status: 'flagged', reason: 'unsafe' }),
+  };
   const { cfg, usage } = await harness({ moderator: flagged });
   const req = await signedRequest(page);
   const res = await handleOgPublish(cfg, OFFER, req.raw, req.signature);
@@ -125,7 +129,11 @@ test('202 in-flight when a fresh pending claim from another invocation exists (r
   const res = await handleOgPublish(cfg, OFFER, req.raw, req.signature);
   assert.equal(res.status, 202);
   const reach = (res.body as { reachability: { r2_verified: boolean } }).reachability;
-  assert.equal(reach.r2_verified, false, 'this invocation stored nothing → r2_verified must be false');
+  assert.equal(
+    reach.r2_verified,
+    false,
+    'this invocation stored nothing → r2_verified must be false',
+  );
 });
 
 test('200 happy path renders, verifies the R2 read-back, and reports r2_verified true; dedupe returns without re-counting', async () => {
@@ -133,7 +141,8 @@ test('200 happy path renders, verifies the R2 read-back, and reports r2_verified
   const req = await signedRequest(page);
   const res = await handleOgPublish(cfg, OFFER, req.raw, req.signature);
   assert.equal(res.status, 200);
-  const reach = (res.body as { reachability: { r2_verified: boolean; url_probe: string } }).reachability;
+  const reach = (res.body as { reachability: { r2_verified: boolean; url_probe: string } })
+    .reachability;
   assert.equal(reach.r2_verified, true);
   assert.equal(reach.url_probe, 'pending');
   if (res.after) await res.after(); // the post-response URL probe
@@ -149,7 +158,10 @@ test('200 happy path renders, verifies the R2 read-back, and reports r2_verified
 test('a same-length R2 corruption is rejected by the byte-equality gate (not accepted as byte-verified)', async () => {
   const { cfg } = await harness({ storage: memStorage(true) });
   const req = await signedRequest(page);
-  await assert.rejects(() => handleOgPublish(cfg, OFFER, req.raw, req.signature), /byte-equality failed/);
+  await assert.rejects(
+    () => handleOgPublish(cfg, OFFER, req.raw, req.signature),
+    /byte-equality failed/,
+  );
 });
 
 function monthKey(): string {

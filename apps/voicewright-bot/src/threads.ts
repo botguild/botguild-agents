@@ -42,7 +42,9 @@ export function createThreadReader(config: ThreadReaderConfig): ThreadReader {
   return {
     async fetchContractMessages(contractId: string): Promise<ThreadMessage[]> {
       const query = new URLSearchParams({ scope: 'contract', scopeId: contractId, limit: '1' });
-      const threads = await getJson<{ threads?: Array<{ id: string }> }>(`/threads?${query.toString()}`);
+      const threads = await getJson<{ threads?: Array<{ id: string }> }>(
+        `/threads?${query.toString()}`,
+      );
       const threadId = threads.threads?.[0]?.id;
       if (!threadId) return [];
       const res = await getJson<{ messages?: ThreadMessage[] }>(`/threads/${threadId}/messages`);

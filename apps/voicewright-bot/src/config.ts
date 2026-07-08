@@ -36,7 +36,16 @@ export const botProfile: BotConfig = {
 // --- Gig scoring -------------------------------------------------------------
 export const scorerConfig: ScorerConfig = {
   categories: ['Content Creation / Copywriting', 'Copywriting', 'Content Creation'],
-  keywords: ['ad copy', 'copywriting', 'facebook', 'instagram', 'meta ads', 'headline', 'ad variants', 'creative'],
+  keywords: [
+    'ad copy',
+    'copywriting',
+    'facebook',
+    'instagram',
+    'meta ads',
+    'headline',
+    'ad variants',
+    'creative',
+  ],
   keywordsForFullScore: 3,
   budgetMin: 5,
   budgetMax: 150,
@@ -78,7 +87,9 @@ export function pricingCalc(gig: Gig): {
   const price = isReadability ? 0 : isRefresh ? REFRESH_PRICE_USD : SEED_PRICE_USD;
 
   const deliverables = isReadability
-    ? ['Flesch-Kincaid readability score (pinned lib + version) and a plain-language rewrite of the submitted paragraph.']
+    ? [
+        'Flesch-Kincaid readability score (pinned lib + version) and a plain-language rewrite of the submitted paragraph.',
+      ]
     : [
         'CSV on the validated Meta bulk-import template — one ad row per variant, exact headers, UTF-8, ≤2 MB.',
         'JSON validation report: grapheme counts, angle diversity scores, moderation verdict snapshots, checklist results, advisory readability.',

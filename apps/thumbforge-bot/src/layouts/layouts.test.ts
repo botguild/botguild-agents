@@ -11,7 +11,10 @@ const brandKit: BrandKit = {
 };
 
 const contains = (outer: { width: number; height: number }, rect: Rect): boolean =>
-  rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= outer.width && rect.y + rect.height <= outer.height;
+  rect.x >= 0 &&
+  rect.y >= 0 &&
+  rect.x + rect.width <= outer.width &&
+  rect.y + rect.height <= outer.height;
 
 test('min font floor scales from the 32px @ 720 baseline', () => {
   assert.equal(minFontForHeight(720), 32);
@@ -25,7 +28,10 @@ test('every layout keeps its safe zone, logo, and swatch rects on-canvas', () =>
     assert.ok(contains(layout, layout.safeZone), `${layout.templateId} safe zone off-canvas`);
     assert.ok(contains(layout, layout.logoRect), `${layout.templateId} logo off-canvas`);
     for (const region of layout.swatchRegions) {
-      assert.ok(contains(layout, region.rect), `${layout.templateId} swatch ${region.role} off-canvas`);
+      assert.ok(
+        contains(layout, region.rect),
+        `${layout.templateId} swatch ${region.role} off-canvas`,
+      );
     }
     assert.equal(layout.minFontPx, minFontForHeight(layout.height));
   }
@@ -57,7 +63,10 @@ test('fitHeadline picks the largest size that fits and clears the floor', () => 
 });
 
 test('an over-long headline falls below the floor and is flagged for reject (FR-6)', () => {
-  const longHeadline = 'This headline is far too long to ever fit inside a single OG safe zone at a legible size no matter how much it wraps because it simply contains too many words'.repeat(6);
+  const longHeadline =
+    'This headline is far too long to ever fit inside a single OG safe zone at a legible size no matter how much it wraps because it simply contains too many words'.repeat(
+      6,
+    );
   const rendered = og.render(brandKit, { headline: longHeadline });
   assert.equal(rendered.headlineFits, false);
   assert.ok(rendered.headlineFontPx < og.minFontPx);

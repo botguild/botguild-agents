@@ -13,7 +13,11 @@ import type { AdBrief, Variant } from '../types.js';
 const brief: AdBrief = {
   brandVoiceGuide: 'friendly',
   offer: 'Spring sale',
-  campaign: { campaignName: 'Q3-Launch-Test', objective: 'OUTCOME_TRAFFIC', adSetName: 'Prospecting-Broad-US' },
+  campaign: {
+    campaignName: 'Q3-Launch-Test',
+    objective: 'OUTCOME_TRAFFIC',
+    adSetName: 'Prospecting-Broad-US',
+  },
   creative: { landingUrl: 'https://example.com/offer', pageId: '1234567890', imageRef: 'hero.png' },
   platform: 'facebook-instagram-feed',
   variantCount: 10,
@@ -71,7 +75,10 @@ test('validateCsvAgainstTemplate accepts our own output', () => {
 
 test('validateCsvAgainstTemplate rejects a wrong or reordered header set', () => {
   const good = buildCsv([variant('v1')], brief);
-  const reordered = good.replace('Campaign Name,Campaign Objective', 'Campaign Objective,Campaign Name');
+  const reordered = good.replace(
+    'Campaign Name,Campaign Objective',
+    'Campaign Objective,Campaign Name',
+  );
   assert.equal(validateCsvAgainstTemplate(reordered).valid, false);
   const renamed = good.replace('Title', 'Headline');
   assert.equal(validateCsvAgainstTemplate(renamed).valid, false);

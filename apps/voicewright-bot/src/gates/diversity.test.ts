@@ -80,10 +80,10 @@ test('near-identical copy within the SAME angle group does not violate the floor
 });
 
 test('fewer distinct angles than required fails even with dissimilar copy', () => {
-  const result = evaluateDiversity(
-    [v('v1', 'a', 'one two three'), v('v2', 'b', 'four five six')],
-    { threshold: 0.5, requiredAngles: 3 },
-  );
+  const result = evaluateDiversity([v('v1', 'a', 'one two three'), v('v2', 'b', 'four five six')], {
+    threshold: 0.5,
+    requiredAngles: 3,
+  });
   assert.equal(result.pass, false);
   assert.equal(result.distinctAngles, 2);
 });

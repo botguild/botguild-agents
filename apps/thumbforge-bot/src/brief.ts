@@ -30,9 +30,10 @@ function rectFromArray(value: unknown): Rect | null {
 
 function parseBrandKit(raw: unknown): BrandKit {
   const kit = (raw ?? {}) as Record<string, unknown>;
-  const palette = Array.isArray(kit.palette) && kit.palette.length > 0
-    ? (kit.palette as unknown[]).map(String)
-    : DEFAULT_PALETTE;
+  const palette =
+    Array.isArray(kit.palette) && kit.palette.length > 0
+      ? (kit.palette as unknown[]).map(String)
+      : DEFAULT_PALETTE;
   const swatchRegions: SwatchRegion[] = Array.isArray(kit.swatch_regions)
     ? (kit.swatch_regions as unknown[])
         .map((entry) => {
@@ -82,7 +83,9 @@ export function parseBrief(description: string): ParsedBrief | null {
   const packRaw = parsed.social_pack as Record<string, unknown> | undefined;
   if (packRaw) {
     const copy = Array.isArray(packRaw.copy) ? (packRaw.copy as unknown[]).map(String) : [];
-    const formats = Array.isArray(packRaw.formats) ? (packRaw.formats as unknown[]).map(String) : ['feed', 'story'];
+    const formats = Array.isArray(packRaw.formats)
+      ? (packRaw.formats as unknown[]).map(String)
+      : ['feed', 'story'];
     const count = Number(packRaw.count);
     brief.socialPack = {
       copy,
@@ -116,7 +119,8 @@ export function buildSocialPackPlan(
   for (let i = 0; i < pack.count; i++) {
     const format = pack.formats[i % pack.formats.length] === 'story' ? 'story' : 'feed';
     const layout = format === 'story' ? socialStory : socialFeed;
-    const headline = pack.copy.length > 0 ? (pack.copy[i % pack.copy.length] as string) : `Graphic ${i + 1}`;
+    const headline =
+      pack.copy.length > 0 ? (pack.copy[i % pack.copy.length] as string) : `Graphic ${i + 1}`;
     graphics.push({
       graphicId: `g${i + 1}`,
       templateId: layout.templateId,

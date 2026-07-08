@@ -1,11 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentClient, Gig } from '@botguild/agent-core';
-import {
-  createKVSeenStore,
-  createMemorySeenStore,
-  runGigPollSweep,
-} from './pollSweep.js';
+import { createKVSeenStore, createMemorySeenStore, runGigPollSweep } from './pollSweep.js';
 import { createMemoryKV } from './testing.js';
 import { createConsoleLogger } from './logger.js';
 

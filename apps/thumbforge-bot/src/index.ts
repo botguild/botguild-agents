@@ -14,7 +14,12 @@
 
 import { Hono } from 'hono';
 import type { Logger } from 'pino';
-import { AgentClient, AgentMcpClient, createCostEstimator, createProposer } from '@botguild/agent-core';
+import {
+  AgentClient,
+  AgentMcpClient,
+  createCostEstimator,
+  createProposer,
+} from '@botguild/agent-core';
 import type { Proposer } from '@botguild/agent-core';
 import {
   createConsoleLogger,
@@ -100,7 +105,11 @@ function getServices(env: Env): Services {
     botId,
     logger,
   });
-  const mcpClient = new AgentMcpClient({ apiUrl: env.BOTGUILD_API_URL, apiKey: env.BOTGUILD_API_KEY, logger });
+  const mcpClient = new AgentMcpClient({
+    apiUrl: env.BOTGUILD_API_URL,
+    apiKey: env.BOTGUILD_API_KEY,
+    logger,
+  });
   const secretStore = createD1WebhookSecretStore(env.DB);
 
   const renderJobs = createRenderJobStore(env.DB);
@@ -216,7 +225,16 @@ function getServices(env: Env): Services {
     logger,
   };
 
-  const app = buildApp(env, { logger, client, secretStore, renderJobs, offers, publicBaseUrl, botId, og });
+  const app = buildApp(env, {
+    logger,
+    client,
+    secretStore,
+    renderJobs,
+    offers,
+    publicBaseUrl,
+    botId,
+    og,
+  });
 
   services = { logger, client, secretStore, pipeline, og, sweeps, app };
   return services;
@@ -251,7 +269,10 @@ function buildApp(
   // Contract-scoped handlers are ownership-filtered: sibling bots' events WILL
   // arrive here (handler-scoped webhooks, §10).
   const handlers = Object.fromEntries(
-    Object.entries(rawHandlers).map(([event, handler]) => [event, withOwnershipFilter(handler, ownership)]),
+    Object.entries(rawHandlers).map(([event, handler]) => [
+      event,
+      withOwnershipFilter(handler, ownership),
+    ]),
   );
 
   const shim = createWorkersWebhookApp({
@@ -315,7 +336,12 @@ function buildApp(
     if (auth !== `Bearer ${env.ADMIN_TOKEN}`) return c.json({ error: 'Unauthorized' }, 401);
     const result = await ensureRegisteredWorkers({
       client,
-      registration: { apiUrl: env.BOTGUILD_API_URL, apiKey: env.BOTGUILD_API_KEY, botConfig: botProfile, logger },
+      registration: {
+        apiUrl: env.BOTGUILD_API_URL,
+        apiKey: env.BOTGUILD_API_KEY,
+        botConfig: botProfile,
+        logger,
+      },
       webhookBaseUrl: `${publicBaseUrl}/botguild`,
       secretStore,
       logger,
@@ -328,7 +354,11 @@ function buildApp(
 
 // --- scheduled / queue ------------------------------------------------------
 
-async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+async function scheduled(
+  controller: ScheduledController,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
   const s = getServices(env);
   s.logger.info({ cron: controller.cron }, 'cron sweep starting');
 
@@ -362,7 +392,11 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
   await runPollSweep(s.sweeps);
 }
 
-async function queue(batch: MessageBatch<RenderMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+async function queue(
+  batch: MessageBatch<RenderMessage>,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
   const s = getServices(env);
 
   // DLQ consumer: messages here exhausted their retries. They do NOT auto-replay
@@ -371,7 +405,12 @@ async function queue(batch: MessageBatch<RenderMessage>, env: Env, _ctx: Executi
   if (batch.queue.endsWith('-dlq')) {
     for (const message of batch.messages) {
       s.logger.error(
-        { queue: batch.queue, body: message.body, messageId: message.id, attempts: message.attempts },
+        {
+          queue: batch.queue,
+          body: message.body,
+          messageId: message.id,
+          attempts: message.attempts,
+        },
         'DEAD-LETTERED RENDER MESSAGE — operator action required (see README runbook)',
       );
       message.ack();

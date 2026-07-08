@@ -42,7 +42,9 @@ function rectsIntersect(a: Rect, b: Rect): boolean {
 export function logoZOrderClear(drawOrder: DrawNode[], logoRect: Rect, logoId: string): boolean {
   const logo = drawOrder.find((node) => node.id === logoId);
   if (!logo) return false;
-  return !drawOrder.some((node) => node.id !== logoId && node.z > logo.z && rectsIntersect(node.rect, logoRect));
+  return !drawOrder.some(
+    (node) => node.id !== logoId && node.z > logo.z && rectsIntersect(node.rect, logoRect),
+  );
 }
 
 /**
@@ -73,8 +75,14 @@ export function checkLogo(
   for (let y = y0; y < y1; y++) {
     for (let x = x0; x < x1; x++) {
       // Map the sampled pixel to the expected raster (same rect, possibly resized).
-      const ex = Math.min(expected.width - 1, Math.floor(((x - logoRect.x) / logoRect.width) * expected.width));
-      const ey = Math.min(expected.height - 1, Math.floor(((y - logoRect.y) / logoRect.height) * expected.height));
+      const ex = Math.min(
+        expected.width - 1,
+        Math.floor(((x - logoRect.x) / logoRect.width) * expected.width),
+      );
+      const ey = Math.min(
+        expected.height - 1,
+        Math.floor(((y - logoRect.y) / logoRect.height) * expected.height),
+      );
       const pi = (y * pixmap.width + x) * 4;
       const ei = (ey * expected.width + ex) * 4;
       const dr = Math.abs((pixmap.data[pi] ?? 0) - (expected.data[ei] ?? 0));
@@ -87,5 +95,11 @@ export function checkLogo(
 
   const similarity = sampled === 0 ? 0 : matched / sampled;
   const zOrderClear = logoZOrderClear(drawOrder, logoRect, logoId);
-  return { pass: similarity >= minSimilarity && zOrderClear, similarity, zOrderClear, matchedPixels: matched, sampledPixels: sampled };
+  return {
+    pass: similarity >= minSimilarity && zOrderClear,
+    similarity,
+    zOrderClear,
+    matchedPixels: matched,
+    sampledPixels: sampled,
+  };
 }

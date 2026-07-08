@@ -8,12 +8,14 @@ const silentLogger = createConsoleLogger({ service: 'test', level: 'silent' });
 
 function stubSource(overrides?: Partial<ReputationSource>): ReputationSource {
   return {
-    getMyReputation: async () => ({
-      handler: { reputationScore: 87, disputeRate: 0.01 },
-    }) as Awaited<ReturnType<ReputationSource['getMyReputation']>>,
-    getMyEarnings: async () => ({
-      summary: { totalEarned: 120 },
-    }) as unknown as Awaited<ReturnType<ReputationSource['getMyEarnings']>>,
+    getMyReputation: async () =>
+      ({
+        handler: { reputationScore: 87, disputeRate: 0.01 },
+      }) as Awaited<ReturnType<ReputationSource['getMyReputation']>>,
+    getMyEarnings: async () =>
+      ({
+        summary: { totalEarned: 120 },
+      }) as unknown as Awaited<ReturnType<ReputationSource['getMyEarnings']>>,
     ...overrides,
   };
 }

@@ -22,7 +22,15 @@ async function freshDb(): Promise<ReturnType<typeof createMemoryD1>> {
 
 const plan: RenderPlan = {
   kind: 'social_pack',
-  graphics: [{ graphicId: 'g1', templateId: 'social-feed', format: 'feed', brandKit: { palette: ['#000'], swatchRegions: [] }, inputs: { headline: 'hi' } }],
+  graphics: [
+    {
+      graphicId: 'g1',
+      templateId: 'social-feed',
+      format: 'feed',
+      brandKit: { palette: ['#000'], swatchRegions: [] },
+      inputs: { headline: 'hi' },
+    },
+  ],
 };
 
 // --- FR-15 atomic usage reservation (#4/#10) ---------------------------------
@@ -65,7 +73,11 @@ async function inProgressJob(): Promise<{ store: RenderJobStore; jobKey: string 
 test('claimForDelivery lets exactly one concurrent invocation win the completion', async () => {
   const { store, jobKey } = await inProgressJob();
   assert.equal(await store.claimForDelivery(jobKey), true, 'first caller wins');
-  assert.equal(await store.claimForDelivery(jobKey), false, 'second caller loses (already delivered)');
+  assert.equal(
+    await store.claimForDelivery(jobKey),
+    false,
+    'second caller loses (already delivered)',
+  );
 });
 
 test('reopenForDelivery undoes an unfinished claim so a retry can re-deliver', async () => {
@@ -97,5 +109,8 @@ test('pruneOlderThan deletes only rows older than the cutoff', async () => {
   const deleted = await audit.pruneOlderThan(new Date('2026-06-01T00:00:00Z'));
   assert.equal(deleted, 1);
   const { results } = await db.prepare('SELECT scope FROM gate_audit').all<{ scope: string }>();
-  assert.deepEqual(results.map((r) => r.scope), ['new']);
+  assert.deepEqual(
+    results.map((r) => r.scope),
+    ['new'],
+  );
 });

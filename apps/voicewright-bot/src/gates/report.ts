@@ -16,7 +16,13 @@ export interface VariantReport {
   primaryText: string;
   description: string;
   status: string;
-  graphemeCounts: Array<{ field: string; graphemes: number; limit: number; marginApplied: boolean; pass: boolean }>;
+  graphemeCounts: Array<{
+    field: string;
+    graphemes: number;
+    limit: number;
+    marginApplied: boolean;
+    pass: boolean;
+  }>;
   diversityPairScores: PairScore[];
   moderation: unknown;
   checklist: unknown;
@@ -123,7 +129,11 @@ export function buildValidationReport(input: BuildReportInput): ValidationReport
         violations: input.diversity.violations,
       },
       priorCycle: input.priorCycle
-        ? { pass: input.priorCycle.pass, threshold: input.priorCycle.threshold, violations: input.priorCycle.violations }
+        ? {
+            pass: input.priorCycle.pass,
+            threshold: input.priorCycle.threshold,
+            violations: input.priorCycle.violations,
+          }
         : null,
       csv: input.csv,
       capsConsumed: {

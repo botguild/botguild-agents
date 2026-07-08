@@ -23,7 +23,15 @@ function passedState(id: string, angle: string, headline: string): VariantState 
     status: 'passed',
     regenAttempts: 1,
     evidence: {
-      length: [{ field: 'headline', graphemes: headline.length, limit: 40, marginApplied: false, pass: true }],
+      length: [
+        {
+          field: 'headline',
+          graphemes: headline.length,
+          limit: 40,
+          marginApplied: false,
+          pass: true,
+        },
+      ],
       checklist: { version: 'v1', pass: true, failures: [] },
       moderation: {
         vendor: 'openai',

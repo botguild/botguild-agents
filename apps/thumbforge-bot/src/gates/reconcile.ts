@@ -16,7 +16,10 @@ export interface ReconcileResult {
 }
 
 /** Assert a 1:1 mapping between input keys and output claims. */
-export function reconcile(inputKeys: string[], outputs: Array<{ inputKey: string }>): ReconcileResult {
+export function reconcile(
+  inputKeys: string[],
+  outputs: Array<{ inputKey: string }>,
+): ReconcileResult {
   const inputs = new Set(inputKeys);
   const counts: Record<string, number> = {};
   for (const key of inputKeys) counts[key] = 0;

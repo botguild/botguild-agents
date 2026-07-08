@@ -86,7 +86,8 @@ export function constraintTerms(constraint: string): string[] {
 export const CHECKLIST_RULES: ChecklistRule[] = [
   {
     id: 'no-personal-attribute-callouts',
-    description: 'Copy must not assert or imply the reader\'s personal attributes (health, finances, identity).',
+    description:
+      "Copy must not assert or imply the reader's personal attributes (health, finances, identity).",
     test: (variant) => !PERSONAL_ATTRIBUTE_PATTERNS.some((re) => re.test(allCopy(variant))),
   },
   {

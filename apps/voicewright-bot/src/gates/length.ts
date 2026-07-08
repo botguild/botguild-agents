@@ -46,11 +46,19 @@ export function checkLength(
   const marginApplied = hasEmojiOrNonLatin(text);
   const effectiveLimit = marginApplied ? marginLimit : limit;
   const graphemes = graphemeLength(text);
-  return { field, graphemes, limit: effectiveLimit, marginApplied, pass: graphemes <= effectiveLimit };
+  return {
+    field,
+    graphemes,
+    limit: effectiveLimit,
+    marginApplied,
+    pass: graphemes <= effectiveLimit,
+  };
 }
 
 /** Run the fit gate over one variant's headline + primary text. */
-export function checkVariantLength(variant: Pick<Variant, 'headline' | 'primaryText'>): LengthCheck[] {
+export function checkVariantLength(
+  variant: Pick<Variant, 'headline' | 'primaryText'>,
+): LengthCheck[] {
   return [
     checkLength('headline', variant.headline, HEADLINE_LIMIT, HEADLINE_LIMIT_MARGIN),
     checkLength('primaryText', variant.primaryText, PRIMARY_TEXT_LIMIT, PRIMARY_TEXT_LIMIT_MARGIN),

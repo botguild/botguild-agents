@@ -19,7 +19,9 @@ export function normalizeText(text: string): string {
 
 /** Word bigrams of the normalized text. Single-word texts yield the word itself. */
 export function wordBigrams(text: string): Set<string> {
-  const words = normalizeText(text).split(' ').filter((w) => w.length > 0);
+  const words = normalizeText(text)
+    .split(' ')
+    .filter((w) => w.length > 0);
   if (words.length === 0) return new Set();
   if (words.length === 1) return new Set([words[0] as string]);
   const bigrams = new Set<string>();
@@ -77,7 +79,10 @@ export function evaluateDiversity(
       const a = variants[i] as Variant;
       const b = variants[j] as Variant;
       if (a.angle === b.angle) continue; // the floor constrains cross-group pairs
-      const similarity = jaccardSimilarity(bigrams.get(a.id) as Set<string>, bigrams.get(b.id) as Set<string>);
+      const similarity = jaccardSimilarity(
+        bigrams.get(a.id) as Set<string>,
+        bigrams.get(b.id) as Set<string>,
+      );
       const score = { aId: a.id, bId: b.id, similarity };
       pairScores.push(score);
       if (similarity > options.threshold) violations.push(score);

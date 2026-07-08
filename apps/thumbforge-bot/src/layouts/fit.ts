@@ -56,7 +56,12 @@ function wrappedLineCount(words: string[], charsPerLine: number): number {
 }
 
 /** True when even the longest single word overflows the box width at `px`. */
-function longestWordOverflows(words: string[], px: number, ratio: number, boxWidth: number): boolean {
+function longestWordOverflows(
+  words: string[],
+  px: number,
+  ratio: number,
+  boxWidth: number,
+): boolean {
   const longest = words.reduce((m, w) => Math.max(m, w.length), 0);
   return longest * px * ratio > boxWidth;
 }
@@ -68,7 +73,10 @@ function longestWordOverflows(words: string[], px: number, ratio: number, boxWid
 export function fitHeadline(text: string, options: FitOptions): FitResult {
   const charWidthRatio = options.charWidthRatio ?? DEFAULT_CHAR_WIDTH_RATIO;
   const lineHeightRatio = options.lineHeightRatio ?? DEFAULT_LINE_HEIGHT_RATIO;
-  const words = text.trim().split(/\s+/u).filter((w) => w.length > 0);
+  const words = text
+    .trim()
+    .split(/\s+/u)
+    .filter((w) => w.length > 0);
   const { width, height } = options.safeZone;
 
   if (words.length === 0) {

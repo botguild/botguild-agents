@@ -80,7 +80,12 @@ function briefUserPrompt(brief: AdBrief): string {
 }
 
 interface VariantsPayload {
-  variants?: Array<{ angle?: unknown; headline?: unknown; primaryText?: unknown; description?: unknown }>;
+  variants?: Array<{
+    angle?: unknown;
+    headline?: unknown;
+    primaryText?: unknown;
+    description?: unknown;
+  }>;
 }
 
 export function parseVariantsPayload(text: string): DraftVariant[] {
@@ -161,7 +166,11 @@ export function createCopyGenerator(config: CopyGeneratorConfig): CopyGenerator 
       return { variants: parseVariantsPayload(text), costUsd };
     },
 
-    async regenerateVariant(brief, failed, failures): Promise<{ variant: DraftVariant; costUsd: number }> {
+    async regenerateVariant(
+      brief,
+      failed,
+      failures,
+    ): Promise<{ variant: DraftVariant; costUsd: number }> {
       const prompt =
         `${briefUserPrompt(brief)}\n\nThe following variant FAILED validation and must be rewritten from scratch ` +
         `(same angle "${failed.angle}", entirely new copy):\n` +

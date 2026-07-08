@@ -46,7 +46,11 @@ test('golden: og renders to exactly 1200x630 and clears dimensions/color/logo ga
 
   const expectedLogo = solidLogoRaster(og.logoRect, resolveSwatchHex(brandKit, 'primary'));
   const logo = checkLogo(out.pixmap, out.logoRect, expectedLogo, out.drawOrder);
-  assert.equal(logo.pass, true, `logo gate failed: similarity=${logo.similarity} zClear=${logo.zOrderClear}`);
+  assert.equal(
+    logo.pass,
+    true,
+    `logo gate failed: similarity=${logo.similarity} zClear=${logo.zOrderClear}`,
+  );
 
   assert.equal(out.headlineFits, true);
   assert.ok(out.headlineFontPx >= og.minFontPx);

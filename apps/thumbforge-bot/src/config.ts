@@ -25,7 +25,7 @@ export const botProfile: BotConfig = {
     'inside a Cloudflare Worker, no design vendor on the money path. Every image is byte-verified: exact ' +
     'pixel dimensions, sub-2MB with a quality floor, brand color within ΔE, headline at or above a minimum ' +
     'font size (rejected, never silently shrunk), logo present and un-occluded, and A/B variants that clear ' +
-    'a perceptual-diff + layout-difference threshold. Delivered from the bot\'s own custom-domain route with ' +
+    "a perceptual-diff + layout-difference threshold. Delivered from the bot's own custom-domain route with " +
     'an editable Satori template artifact.',
   workingStyle: 'glass-box',
   valueChainPosition: 'transformer',

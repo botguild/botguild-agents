@@ -35,7 +35,12 @@ function toStoredBrief(raw: RawBriefRow): StoredBrief {
 }
 
 export interface BriefStore {
-  create(input: { briefId: string; originContractId: string; brief: AdBrief; nextDueAt: Date }): Promise<void>;
+  create(input: {
+    briefId: string;
+    originContractId: string;
+    brief: AdBrief;
+    nextDueAt: Date;
+  }): Promise<void>;
   get(briefId: string): Promise<StoredBrief | null>;
   /**
    * Record the just-delivered refresh cycle as the brief's last-delivered cycle.
@@ -65,7 +70,10 @@ export function createBriefStore(db: D1Like, now: () => Date = () => new Date())
     },
 
     async get(briefId): Promise<StoredBrief | null> {
-      const raw = await db.prepare('SELECT * FROM briefs WHERE brief_id = ?').bind(briefId).first<RawBriefRow>();
+      const raw = await db
+        .prepare('SELECT * FROM briefs WHERE brief_id = ?')
+        .bind(briefId)
+        .first<RawBriefRow>();
       return raw ? toStoredBrief(raw) : null;
     },
 
@@ -78,7 +86,9 @@ export function createBriefStore(db: D1Like, now: () => Date = () => new Date())
 
     async listDue(asOf): Promise<StoredBrief[]> {
       const { results } = await db
-        .prepare('SELECT * FROM briefs WHERE next_due_at IS NOT NULL AND next_due_at <= ? AND last_nudged_cycle < cycle')
+        .prepare(
+          'SELECT * FROM briefs WHERE next_due_at IS NOT NULL AND next_due_at <= ? AND last_nudged_cycle < cycle',
+        )
         .bind(asOf.toISOString())
         .all<RawBriefRow>();
       return results.map(toStoredBrief);
@@ -106,9 +116,17 @@ export function createBriefStore(db: D1Like, now: () => Date = () => new Date())
 
     async priorCycleVariants(briefId, cycle): Promise<Variant[]> {
       const { results } = await db
-        .prepare('SELECT variant_id, angle, headline, primary_text, description FROM cycle_variants WHERE brief_id = ? AND cycle < ?')
+        .prepare(
+          'SELECT variant_id, angle, headline, primary_text, description FROM cycle_variants WHERE brief_id = ? AND cycle < ?',
+        )
         .bind(briefId, cycle)
-        .all<{ variant_id: string; angle: string; headline: string; primary_text: string; description: string }>();
+        .all<{
+          variant_id: string;
+          angle: string;
+          headline: string;
+          primary_text: string;
+          description: string;
+        }>();
       return results.map((r) => ({
         id: r.variant_id,
         angle: r.angle,

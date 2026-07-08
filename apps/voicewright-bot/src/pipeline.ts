@@ -106,7 +106,15 @@ export async function processJobMessage(cfg: PipelineConfig, msg: JobMessage): P
     // return every prior batch (WHERE cycle < producedCycle) and stores the new
     // batch under a fresh cycle number, so the §9 differs-from-prior gate really
     // runs against month-1 and month-1's evidence is never overwritten.
-    await runAdCopyJob(cfg, logger, msg, contract, { ...stored.brief, briefId }, 'refresh', stored.cycle + 1);
+    await runAdCopyJob(
+      cfg,
+      logger,
+      msg,
+      contract,
+      { ...stored.brief, briefId },
+      'refresh',
+      stored.cycle + 1,
+    );
     return;
   }
 
@@ -171,7 +179,10 @@ async function moderateBriefOrPark(
       result: 'outage',
       detail: { attempts, detail: outcome.detail },
     });
-    logger.warn({ attempts, detail: outcome.detail }, 'moderation vendor unavailable, job parked (fail closed)');
+    logger.warn(
+      { attempts, detail: outcome.detail },
+      'moderation vendor unavailable, job parked (fail closed)',
+    );
     if (attempts === MODERATION_ATTEMPTS_BEFORE_NOTICE) {
       await cfg.client.sendMessage(
         msg.contractId,
@@ -259,7 +270,10 @@ async function runReadabilityJob(
   if (!moderated.ok) {
     await cfg.jobs.incrementModerationAttempts(msg.jobKey);
     await cfg.jobs.park(msg.jobKey, 'moderation_outage');
-    logger.warn({ detail: moderated.detail }, 'rewrite moderation unavailable, parked (fail closed)');
+    logger.warn(
+      { detail: moderated.detail },
+      'rewrite moderation unavailable, parked (fail closed)',
+    );
     return;
   }
   await cfg.jobs.recordGateAudit({
@@ -286,7 +300,10 @@ async function runReadabilityJob(
     `## Plain-language rewrite\n\n${rewrite}`;
   await cfg.client.deliverMilestone(msg.contractId, milestone.id, { note });
   await cfg.jobs.markDelivered(msg.jobKey, 'delivered');
-  logger.info({ inputGrade: check.inputGrade, rewriteGrade: check.rewriteGrade }, 'readability gig delivered');
+  logger.info(
+    { inputGrade: check.inputGrade, rewriteGrade: check.rewriteGrade },
+    'readability gig delivered',
+  );
 }
 
 // --- Paid ad-copy pipeline (adcopy + refresh) --------------------------------
@@ -347,7 +364,9 @@ async function runAdCopyJob(
   const batchGates = (variants: Variant[]): BatchGateState => ({
     diversity: evaluateDiversity(variants, { threshold: DIVERSITY_THRESHOLD, requiredAngles }),
     prior:
-      kind === 'refresh' ? differsFromPriorCycle(variants, priorVariants, DIVERSITY_THRESHOLD) : null,
+      kind === 'refresh'
+        ? differsFromPriorCycle(variants, priorVariants, DIVERSITY_THRESHOLD)
+        : null,
   });
 
   // Per-variant gates, then batch gates, with up to MAX_BATCH_ROUNDS top-up
@@ -417,7 +436,9 @@ async function runAdCopyJob(
       `Only ${deliverable.length} of ${brief.variantCount} variants cleared every hard gate within the ` +
         `contractual caps (${MAX_REGENS_PER_VARIANT} regenerations/variant, ${MAX_BATCH_ROUNDS} batch rounds, ` +
         `$${MAX_SPEND_USD.toFixed(2)} generation spend — $${checkpoint.spendUsd.toFixed(2)} consumed)` +
-        (batchGatesIntact ? '.' : ', and the passing subset does not satisfy the batch-level diversity gates.'),
+        (batchGatesIntact
+          ? '.'
+          : ', and the passing subset does not satisfy the batch-level diversity gates.'),
       'Itemized shortfall:',
       ...shortfall,
     ]);
@@ -452,7 +473,11 @@ async function runAdCopyJob(
   });
 
   await cfg.deliverables.put(`${deliverableToken}/copy.csv`, csv, 'text/csv; charset=utf-8');
-  await cfg.deliverables.put(`${deliverableToken}/report.json`, JSON.stringify(report, null, 2), 'application/json');
+  await cfg.deliverables.put(
+    `${deliverableToken}/report.json`,
+    JSON.stringify(report, null, 2),
+    'application/json',
+  );
   const csvUrl = `${cfg.publicBaseUrl}/deliverables/${deliverableToken}/copy.csv`;
   const reportUrl = `${cfg.publicBaseUrl}/deliverables/${deliverableToken}/report.json`;
 
@@ -461,11 +486,20 @@ async function runAdCopyJob(
   if (kind === 'adcopy') {
     briefId = crypto.randomUUID();
     const nextDue = addDays(cfg.now?.() ?? new Date(), REFRESH_CYCLE_DAYS);
-    await cfg.briefs.create({ briefId, originContractId: msg.contractId, brief, nextDueAt: nextDue });
+    await cfg.briefs.create({
+      briefId,
+      originContractId: msg.contractId,
+      brief,
+      nextDueAt: nextDue,
+    });
     await cfg.briefs.saveCycleVariants(briefId, 1, deliverable);
   } else {
     await cfg.briefs.saveCycleVariants(briefId as string, cycle, deliverable);
-    await cfg.briefs.completeCycle(briefId as string, cycle, addDays(cfg.now?.() ?? new Date(), REFRESH_CYCLE_DAYS));
+    await cfg.briefs.completeCycle(
+      briefId as string,
+      cycle,
+      addDays(cfg.now?.() ?? new Date(), REFRESH_CYCLE_DAYS),
+    );
   }
 
   const shortfallNote =
@@ -496,7 +530,10 @@ async function runAdCopyJob(
     detail: { csvUrl, reportUrl, delivered: deliverable.length, requested: brief.variantCount },
   });
   await cfg.jobs.markDelivered(msg.jobKey, outcome);
-  logger.info({ outcome, delivered: deliverable.length, spendUsd: checkpoint.spendUsd }, 'ad copy job delivered');
+  logger.info(
+    { outcome, delivered: deliverable.length, spendUsd: checkpoint.spendUsd },
+    'ad copy job delivered',
+  );
 }
 
 /** Run length → checklist → moderation → advisory readability on one variant. */
@@ -508,7 +545,13 @@ async function runVariantGates(
   state: VariantState,
 ): Promise<'done' | 'parked'> {
   const audit = (gate: string, result: string, detail: unknown): Promise<void> =>
-    cfg.jobs.recordGateAudit({ jobKey: msg.jobKey, variantId: state.variant.id, gate, result, detail });
+    cfg.jobs.recordGateAudit({
+      jobKey: msg.jobKey,
+      variantId: state.variant.id,
+      gate,
+      result,
+      detail,
+    });
 
   const canRegen = (): boolean =>
     state.regenAttempts < MAX_REGENS_PER_VARIANT && checkpoint.spendUsd < MAX_SPEND_USD;
@@ -531,7 +574,10 @@ async function runVariantGates(
     if (!lengthGatePasses(lengthChecks)) {
       const failures = lengthChecks
         .filter((c) => !c.pass)
-        .map((c) => `${c.field} is ${c.graphemes} graphemes — hard limit ${c.limit}. Write it shorter.`);
+        .map(
+          (c) =>
+            `${c.field} is ${c.graphemes} graphemes — hard limit ${c.limit}. Write it shorter.`,
+        );
       if (await regenerate(failures)) continue;
       state.status = 'failed';
       state.failReason = 'length: over grapheme limit after regeneration caps';
@@ -543,7 +589,9 @@ async function runVariantGates(
     state.evidence.checklist = checklist;
     await audit('checklist', checklist.pass ? 'pass' : 'fail', checklist);
     if (!checklist.pass) {
-      const failures = checklist.failures.map((f) => `ad-policy checklist ${checklist.version} rule "${f.ruleId}": ${f.description}`);
+      const failures = checklist.failures.map(
+        (f) => `ad-policy checklist ${checklist.version} rule "${f.ruleId}": ${f.description}`,
+      );
       if (await regenerate(failures)) continue;
       state.status = 'failed';
       state.failReason = `checklist: ${checklist.failures.map((f) => f.ruleId).join(', ')}`;
@@ -569,7 +617,11 @@ async function runVariantGates(
     state.evidence.moderation = moderated.verdict;
     await audit('moderation', moderated.verdict.flagged ? 'flagged' : 'pass', moderated.verdict);
     if (moderated.verdict.flagged) {
-      if (await regenerate(['the copy was flagged by the moderation vendor; rewrite it to be unambiguously safe'])) {
+      if (
+        await regenerate([
+          'the copy was flagged by the moderation vendor; rewrite it to be unambiguously safe',
+        ])
+      ) {
         continue;
       }
       state.status = 'failed';
@@ -619,7 +671,11 @@ function selectDeliverableSubset(
 }
 
 /** §9 abort leg: deliver nothing, post evidence, request payer cancellation. */
-async function abortJob(cfg: PipelineConfig, msg: JobMessage, explanation: string[]): Promise<void> {
+async function abortJob(
+  cfg: PipelineConfig,
+  msg: JobMessage,
+  explanation: string[],
+): Promise<void> {
   await cfg.client.sendMessage(
     msg.contractId,
     [

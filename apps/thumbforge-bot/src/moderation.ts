@@ -50,7 +50,10 @@ export function createModerator(config: ModeratorConfig): Moderator {
   });
 
   return {
-    async moderate(text: string, budgetMs: number = MODERATION_BUDGET_MS): Promise<ModerationOutcome> {
+    async moderate(
+      text: string,
+      budgetMs: number = MODERATION_BUDGET_MS,
+    ): Promise<ModerationOutcome> {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), budgetMs);
       try {
@@ -69,10 +72,16 @@ export function createModerator(config: ModeratorConfig): Moderator {
           .join('\n');
         const verdict = parseClaudeJson<ModerationVerdict>(raw);
         if (!verdict || typeof verdict.flagged !== 'boolean') {
-          return { status: 'unavailable', detail: 'moderation response missing a boolean `flagged`' };
+          return {
+            status: 'unavailable',
+            detail: 'moderation response missing a boolean `flagged`',
+          };
         }
         return verdict.flagged
-          ? { status: 'flagged', reason: typeof verdict.reason === 'string' ? verdict.reason : 'flagged' }
+          ? {
+              status: 'flagged',
+              reason: typeof verdict.reason === 'string' ? verdict.reason : 'flagged',
+            }
           : { status: 'clean' };
       } catch (err) {
         const detail = controller.signal.aborted

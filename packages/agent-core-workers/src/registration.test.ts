@@ -1,10 +1,7 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AgentClient, BotConfig, WebhookRegistration } from '@botguild/agent-core';
-import {
-  DISPATCHED_WEBHOOK_EVENTS,
-  ensureRegisteredWorkers,
-} from './registration.js';
+import { DISPATCHED_WEBHOOK_EVENTS, ensureRegisteredWorkers } from './registration.js';
 import { createD1WebhookSecretStore } from './webhookSecretStore.js';
 import type { D1WebhookSecretStore } from './webhookSecretStore.js';
 import { createMemoryD1 } from './testing.js';

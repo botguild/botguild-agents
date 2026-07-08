@@ -43,7 +43,9 @@ test('clean verdict: pass with the full response snapshotted', async () => {
 test('flagged verdict comes back ok:true with flagged:true (a verdict, not an outage)', async () => {
   const client = createModerationClient({
     apiKey: 'k',
-    fetchImpl: stubFetch(() => jsonResponse(200, { model: MODERATION_MODEL, results: [{ flagged: true }] })),
+    fetchImpl: stubFetch(() =>
+      jsonResponse(200, { model: MODERATION_MODEL, results: [{ flagged: true }] }),
+    ),
   });
   const outcome = await client.moderate('bad copy');
   assert.ok(outcome.ok);

@@ -5,8 +5,14 @@ import { parseVariantsPayload, usageCostUsd } from './generate.js';
 
 // FR-5 spend accounting: real token usage at pinned Haiku pricing.
 test('usageCostUsd prices input/output/cache tokens at Haiku list rates', () => {
-  assert.equal(usageCostUsd({ input_tokens: 1_000_000, output_tokens: 0 }), HAIKU_PRICING_PER_MTOK.input);
-  assert.equal(usageCostUsd({ input_tokens: 0, output_tokens: 1_000_000 }), HAIKU_PRICING_PER_MTOK.output);
+  assert.equal(
+    usageCostUsd({ input_tokens: 1_000_000, output_tokens: 0 }),
+    HAIKU_PRICING_PER_MTOK.input,
+  );
+  assert.equal(
+    usageCostUsd({ input_tokens: 0, output_tokens: 1_000_000 }),
+    HAIKU_PRICING_PER_MTOK.output,
+  );
   const mixed = usageCostUsd({
     input_tokens: 2_000,
     output_tokens: 1_500,
@@ -18,7 +24,12 @@ test('usageCostUsd prices input/output/cache tokens at Haiku list rates', () => 
   assert.equal(usageCostUsd({ input_tokens: 0, output_tokens: 0 }), 0);
   // Null cache fields (the SDK's type) don't poison the sum.
   assert.equal(
-    usageCostUsd({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: null, cache_read_input_tokens: null }),
+    usageCostUsd({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: null,
+    }),
     0,
   );
 });

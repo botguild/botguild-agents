@@ -170,7 +170,9 @@ export function validateCsvAgainstTemplate(csv: string): CsvValidation {
   const header = rows[0] ?? [];
   const expected: string[] = [...META_BULK_TEMPLATE_HEADERS];
   if (header.length !== expected.length || header.some((h, idx) => h !== expected[idx])) {
-    errors.push(`header row does not match template ${TEMPLATE_VERSION}: got [${header.join(', ')}]`);
+    errors.push(
+      `header row does not match template ${TEMPLATE_VERSION}: got [${header.join(', ')}]`,
+    );
   }
 
   const dataRows = rows.slice(1);

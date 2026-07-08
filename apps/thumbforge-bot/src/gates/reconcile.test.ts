@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { reconcile } from './reconcile.js';
 
 test('exactly one output per input passes', () => {
-  const result = reconcile(['k1', 'k2', 'k3'], [{ inputKey: 'k1' }, { inputKey: 'k2' }, { inputKey: 'k3' }]);
+  const result = reconcile(
+    ['k1', 'k2', 'k3'],
+    [{ inputKey: 'k1' }, { inputKey: 'k2' }, { inputKey: 'k3' }],
+  );
   assert.equal(result.pass, true);
   assert.deepEqual(result.missing, []);
   assert.deepEqual(result.duplicates, []);

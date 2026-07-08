@@ -83,7 +83,10 @@ export async function maybePropose(s: SweepServices, gig: Gig): Promise<void> {
 
   const parsed = parseAdBrief(description);
   if (!parsed.ok) {
-    logger.info({ errors: parsed.errors.length }, 'gig brief missing/incomplete, skipped at proposal time');
+    logger.info(
+      { errors: parsed.errors.length },
+      'gig brief missing/incomplete, skipped at proposal time',
+    );
     return;
   }
   if (!shouldPropose(gig, scorerConfig)) return;
@@ -174,7 +177,10 @@ export async function runDailySweep(s: SweepServices): Promise<void> {
       await s.briefs.markNudged(stored.briefId, stored.cycle);
       logger.info({ briefId: stored.briefId, cycle: stored.cycle }, 'refresh-due nudge sent');
     } catch (err) {
-      logger.warn({ err, briefId: stored.briefId }, 'refresh nudge failed; retrying next daily sweep');
+      logger.warn(
+        { err, briefId: stored.briefId },
+        'refresh nudge failed; retrying next daily sweep',
+      );
     }
   }
 }

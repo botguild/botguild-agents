@@ -14,7 +14,9 @@ import type { JobCheckpoint } from './types.js';
 
 const checkpoint: JobCheckpoint = { variants: [], batchRounds: 1, spendUsd: 0.25 };
 
-async function freshStore(now?: () => Date): Promise<{ store: JobStore; db: ReturnType<typeof createMemoryD1> }> {
+async function freshStore(
+  now?: () => Date,
+): Promise<{ store: JobStore; db: ReturnType<typeof createMemoryD1> }> {
   const db = createMemoryD1();
   await applyMigrations(db);
   return { store: createJobStore(db, now), db };
@@ -61,7 +63,10 @@ test('decideOnConflict: delivered and parked skip; checkpointed skips; bare clai
 
 test('first claim inserts; redelivery of an unstarted job re-enqueues', async () => {
   const { store } = await freshStore();
-  assert.deepEqual(await store.claim('key-1', 'contract-1'), { action: 'enqueue', reason: 'fresh-claim' });
+  assert.deepEqual(await store.claim('key-1', 'contract-1'), {
+    action: 'enqueue',
+    reason: 'fresh-claim',
+  });
   assert.deepEqual(await store.claim('key-1', 'contract-1'), {
     action: 'enqueue',
     reason: 'claimed-not-checkpointed',
@@ -72,7 +77,10 @@ test('redelivery skips once the job is checkpointed, parked, or delivered', asyn
   const { store } = await freshStore();
   await store.claim('key-1', 'contract-1');
   await store.saveCheckpoint('key-1', checkpoint);
-  assert.deepEqual(await store.claim('key-1', 'contract-1'), { action: 'skip', reason: 'in-progress' });
+  assert.deepEqual(await store.claim('key-1', 'contract-1'), {
+    action: 'skip',
+    reason: 'in-progress',
+  });
 
   await store.claim('key-2', 'contract-2');
   await store.park('key-2', 'moderation_outage');
@@ -80,7 +88,10 @@ test('redelivery skips once the job is checkpointed, parked, or delivered', asyn
 
   await store.claim('key-3', 'contract-3');
   await store.markDelivered('key-3', 'delivered');
-  assert.deepEqual(await store.claim('key-3', 'contract-3'), { action: 'skip', reason: 'delivered' });
+  assert.deepEqual(await store.claim('key-3', 'contract-3'), {
+    action: 'skip',
+    reason: 'delivered',
+  });
 });
 
 test('each claimed job gets a distinct, unguessable 64-hex deliverable token (§12)', async () => {
@@ -91,7 +102,11 @@ test('each claimed job gets a distinct, unguessable 64-hex deliverable token (§
   const b = await store.get('key-2');
   assert.match(a?.deliverableToken ?? '', /^[0-9a-f]{64}$/);
   assert.match(b?.deliverableToken ?? '', /^[0-9a-f]{64}$/);
-  assert.notEqual(a?.deliverableToken, b?.deliverableToken, 'the token is per-job random, not derived from the contract id');
+  assert.notEqual(
+    a?.deliverableToken,
+    b?.deliverableToken,
+    'the token is per-job random, not derived from the contract id',
+  );
   // The token is NOT the (public, recomputable) job key.
   assert.notEqual(a?.deliverableToken, 'key-1');
   // Stable across reads.
@@ -128,7 +143,10 @@ test('park / unpark lifecycle and parked listing by reason', async () => {
   await store.park('key-2', 'brief_invalid');
 
   const outages = await store.listParked('moderation_outage');
-  assert.deepEqual(outages.map((j) => j.jobKey), ['key-1']);
+  assert.deepEqual(
+    outages.map((j) => j.jobKey),
+    ['key-1'],
+  );
   assert.equal((await store.listParked()).length, 2);
 
   await store.unpark('key-1');
@@ -158,7 +176,10 @@ test('listStuckClaims finds only old, checkpoint-less claimed jobs', async () =>
 
   const cutoff = new Date('2026-07-06T00:30:00Z');
   const stuck = await store.listStuckClaims(cutoff);
-  assert.deepEqual(stuck.map((j) => j.jobKey), ['old-bare']);
+  assert.deepEqual(
+    stuck.map((j) => j.jobKey),
+    ['old-bare'],
+  );
 });
 
 test('gate audit rows persist decisions with JSON detail', async () => {

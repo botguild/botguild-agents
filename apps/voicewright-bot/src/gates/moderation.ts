@@ -67,7 +67,11 @@ export function createModerationClient(config: ModerationClientConfig): Moderati
 
       const result = body.results?.[0];
       if (!result || typeof result.flagged !== 'boolean') {
-        return { ok: false, kind: 'outage', detail: 'moderation API response missing results[0].flagged' };
+        return {
+          ok: false,
+          kind: 'outage',
+          detail: 'moderation API response missing results[0].flagged',
+        };
       }
 
       return {

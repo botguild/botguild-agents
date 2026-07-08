@@ -89,7 +89,11 @@ function getServices(env: Env): Services {
     botId,
     logger,
   });
-  const mcpClient = new AgentMcpClient({ apiUrl: env.BOTGUILD_API_URL, apiKey: env.BOTGUILD_API_KEY, logger });
+  const mcpClient = new AgentMcpClient({
+    apiUrl: env.BOTGUILD_API_URL,
+    apiKey: env.BOTGUILD_API_KEY,
+    logger,
+  });
   const secretStore = createD1WebhookSecretStore(env.DB);
   const jobs = createJobStore(env.DB);
   const briefs = createBriefStore(env.DB);
@@ -154,7 +158,10 @@ function getServices(env: Env): Services {
     proposer,
     freeProposer,
     costEstimator,
-    threadReader: createThreadReader({ apiUrl: env.BOTGUILD_API_URL, apiKey: env.BOTGUILD_API_KEY }),
+    threadReader: createThreadReader({
+      apiUrl: env.BOTGUILD_API_URL,
+      apiKey: env.BOTGUILD_API_KEY,
+    }),
     queue: env.JOBS,
     botId,
     logger,
@@ -217,7 +224,10 @@ function buildApp(
 
   const onProposalAccepted: WebhookHandler = async (event) => {
     const { contractId } = event.payload as { contractId: string };
-    await client.sendMessage(contractId, 'Proposal accepted — work begins as soon as escrow is funded.');
+    await client.sendMessage(
+      contractId,
+      'Proposal accepted — work begins as soon as escrow is funded.',
+    );
   };
 
   const onMilestoneAccepted: WebhookHandler = async (event) => {
@@ -291,7 +301,12 @@ function buildApp(
     }
     const result = await ensureRegisteredWorkers({
       client,
-      registration: { apiUrl: env.BOTGUILD_API_URL, apiKey: env.BOTGUILD_API_KEY, botConfig: botProfile, logger },
+      registration: {
+        apiUrl: env.BOTGUILD_API_URL,
+        apiKey: env.BOTGUILD_API_KEY,
+        botConfig: botProfile,
+        logger,
+      },
       webhookBaseUrl: env.WEBHOOK_BASE_URL,
       secretStore,
       logger,
@@ -304,7 +319,11 @@ function buildApp(
 
 // --- scheduled / queue ------------------------------------------------------
 
-async function scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+async function scheduled(
+  controller: ScheduledController,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
   const s = getServices(env);
   s.logger.info({ cron: controller.cron }, 'cron sweep starting');
 
@@ -336,7 +355,11 @@ async function scheduled(controller: ScheduledController, env: Env, _ctx: Execut
   await runFifteenMinuteSweep(s.sweeps);
 }
 
-async function queue(batch: MessageBatch<JobMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+async function queue(
+  batch: MessageBatch<JobMessage>,
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<void> {
   const s = getServices(env);
 
   // DLQ consumer: messages here exhausted their retries. They do NOT
@@ -345,7 +368,12 @@ async function queue(batch: MessageBatch<JobMessage>, env: Env, _ctx: ExecutionC
   if (batch.queue.endsWith('-dlq')) {
     for (const message of batch.messages) {
       s.logger.error(
-        { queue: batch.queue, body: message.body, messageId: message.id, attempts: message.attempts },
+        {
+          queue: batch.queue,
+          body: message.body,
+          messageId: message.id,
+          attempts: message.attempts,
+        },
         'DEAD-LETTERED JOB — operator action required (see README runbook)',
       );
       message.ack();
@@ -361,7 +389,12 @@ async function queue(batch: MessageBatch<JobMessage>, env: Env, _ctx: ExecutionC
       message.ack();
     } catch (err) {
       s.logger.error(
-        { err, contractId: message.body.contractId, jobKey: message.body.jobKey, attempts: message.attempts },
+        {
+          err,
+          contractId: message.body.contractId,
+          jobKey: message.body.jobKey,
+          attempts: message.attempts,
+        },
         'pipeline failed with a transient error; retrying via queue',
       );
       message.retry();

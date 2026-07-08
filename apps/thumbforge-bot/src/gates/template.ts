@@ -28,7 +28,11 @@ export interface TemplateArtifact {
 }
 
 /** Build the editable-template artifact JSON for a layout + job. */
-export function serializeTemplate(layout: LayoutDescriptor, brandKit: BrandKit, inputs: JobInputs): string {
+export function serializeTemplate(
+  layout: LayoutDescriptor,
+  brandKit: BrandKit,
+  inputs: JobInputs,
+): string {
   const rendered = layout.render(brandKit, inputs);
   const artifact: TemplateArtifact = {
     version: TEMPLATE_VERSION,
@@ -70,7 +74,11 @@ export function checkTemplate(artifact: string | undefined | null): TemplateChec
   if (typeof t.width !== 'number' || typeof t.height !== 'number') {
     return { pass: false, error: 'template artifact has no dimensions' };
   }
-  if (!t.element || typeof t.element !== 'object' || typeof (t.element as SatoriNode).type !== 'string') {
+  if (
+    !t.element ||
+    typeof t.element !== 'object' ||
+    typeof (t.element as SatoriNode).type !== 'string'
+  ) {
     return { pass: false, error: 'template artifact has no element tree' };
   }
   return { pass: true, parsed: parsed as TemplateArtifact };

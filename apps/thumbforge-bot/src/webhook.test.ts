@@ -66,7 +66,9 @@ async function harness(gigDescription: string): Promise<{
 }
 
 test('social-pack milestone.funded claims a render job and enqueues one plan message', async () => {
-  const h = await harness('Need 10 on-brand social media graphics from our brand kit for a campaign.');
+  const h = await harness(
+    'Need 10 on-brand social media graphics from our brand kit for a campaign.',
+  );
   await h.handlers['milestone.funded']!(fundedEvent('c1'));
 
   assert.equal(h.sent.length, 1);
@@ -84,14 +86,19 @@ test('a redelivery before planning re-enqueues (claim+fan-out are not atomic)', 
 });
 
 test('OG milestone.funded arms the per-offer CMS route and posts the signing snippet (no queue send)', async () => {
-  const h = await harness('Auto-generate an OG open graph share image for every published page via webhook.');
+  const h = await harness(
+    'Auto-generate an OG open graph share image for every published page via webhook.',
+  );
   await h.handlers['milestone.funded']!(fundedEvent('c2'));
 
   assert.equal(h.sent.length, 0, 'OG arms a route, it does not enqueue a render');
   const offer = await h.offers.get('c2');
   assert.equal(offer?.contractId, 'c2');
   assert.equal(offer?.secret, 'deterministic-test-secret');
-  assert.ok(h.messages.some((m) => m.includes('/hooks/c2')), 'the buyer is handed the signing snippet');
+  assert.ok(
+    h.messages.some((m) => m.includes('/hooks/c2')),
+    'the buyer is handed the signing snippet',
+  );
 });
 
 test('arming is idempotent — re-funding a still-armed OG offer keeps its secret and posts nothing new', async () => {

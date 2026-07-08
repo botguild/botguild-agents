@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { PLAIN_LANGUAGE_FLOOR_GRADE, READABILITY_LIB, checkRewrite, scoreReadability } from './readability.js';
+import {
+  PLAIN_LANGUAGE_FLOOR_GRADE,
+  READABILITY_LIB,
+  checkRewrite,
+  scoreReadability,
+} from './readability.js';
 
 const COMPLEX =
   'Notwithstanding the considerable methodological heterogeneity characterizing contemporary ' +

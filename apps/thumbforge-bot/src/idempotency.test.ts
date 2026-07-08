@@ -30,7 +30,11 @@ test('changed-hash-rerender: unseen key but the same page_url was delivered befo
 });
 
 test('delivered-return: an already-delivered key returns its URL and counts nothing', () => {
-  const row: ClaimRow = { status: 'delivered', url: 'https://x/a/og/k.png', claimedAt: '2026-07-06T11:59:00Z' };
+  const row: ClaimRow = {
+    status: 'delivered',
+    url: 'https://x/a/og/k.png',
+    claimedAt: '2026-07-06T11:59:00Z',
+  };
   assert.deepEqual(decideIdempotency(row, { now: NOW }), {
     action: 'return',
     reason: 'delivered-return',
@@ -39,7 +43,11 @@ test('delivered-return: an already-delivered key returns its URL and counts noth
 });
 
 test('pending-in-flight: a fresh pending claim (younger than the takeover TTL) waits', () => {
-  const row: ClaimRow = { status: 'pending', url: null, claimedAt: new Date(NOW - 30_000).toISOString() };
+  const row: ClaimRow = {
+    status: 'pending',
+    url: null,
+    claimedAt: new Date(NOW - 30_000).toISOString(),
+  };
   assert.deepEqual(decideIdempotency(row, { now: NOW, takeoverMs: 120_000 }), {
     action: 'wait',
     reason: 'pending-in-flight',
@@ -47,7 +55,11 @@ test('pending-in-flight: a fresh pending claim (younger than the takeover TTL) w
 });
 
 test('stale-pending-takeover: a pending claim older than the TTL is re-driven', () => {
-  const row: ClaimRow = { status: 'pending', url: null, claimedAt: new Date(NOW - 5 * 60_000).toISOString() };
+  const row: ClaimRow = {
+    status: 'pending',
+    url: null,
+    claimedAt: new Date(NOW - 5 * 60_000).toISOString(),
+  };
   assert.deepEqual(decideIdempotency(row, { now: NOW, takeoverMs: 120_000 }), {
     action: 'render',
     reason: 'stale-pending-takeover',
@@ -56,5 +68,8 @@ test('stale-pending-takeover: a pending claim older than the TTL is re-driven', 
 
 test('a delivered row missing its URL falls back to a takeover re-drive (never a bad return)', () => {
   const row: ClaimRow = { status: 'delivered', url: null, claimedAt: '2026-07-06T11:00:00Z' };
-  assert.deepEqual(decideIdempotency(row, { now: NOW }), { action: 'render', reason: 'stale-pending-takeover' });
+  assert.deepEqual(decideIdempotency(row, { now: NOW }), {
+    action: 'render',
+    reason: 'stale-pending-takeover',
+  });
 });

@@ -31,5 +31,8 @@ test('malformed JSON fails the gate', () => {
 
 test('JSON missing the layout source fails the gate', () => {
   assert.equal(checkTemplate(JSON.stringify({ templateId: 'x', width: 1, height: 1 })).pass, false);
-  assert.equal(checkTemplate(JSON.stringify({ width: 1, height: 1, element: { type: 'div' } })).pass, false);
+  assert.equal(
+    checkTemplate(JSON.stringify({ width: 1, height: 1, element: { type: 'div' } })).pass,
+    false,
+  );
 });

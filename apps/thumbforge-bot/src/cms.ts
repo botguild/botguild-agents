@@ -34,7 +34,9 @@ export async function hmacSha256Hex(secret: string, message: string): Promise<st
 /** Strip the `hmac-sha256=` prefix (if present) and normalize to lowercase hex. */
 export function normalizeSignature(value: string): string {
   const trimmed = value.trim();
-  const hex = trimmed.startsWith(SIGNATURE_PREFIX) ? trimmed.slice(SIGNATURE_PREFIX.length) : trimmed;
+  const hex = trimmed.startsWith(SIGNATURE_PREFIX)
+    ? trimmed.slice(SIGNATURE_PREFIX.length)
+    : trimmed;
   return hex.toLowerCase();
 }
 

@@ -41,10 +41,9 @@ test('JPEG at the floor still over the ceiling signals re-compose, never degrade
 });
 
 test('JPEG below the declared quality floor never ships', () => {
-  const decision = checkFileSize(
-    encoded({ format: 'jpeg', quality: 60, byteLength: 100 }),
-    { jpegQualityFloor: 70 },
-  );
+  const decision = checkFileSize(encoded({ format: 'jpeg', quality: 60, byteLength: 100 }), {
+    jpegQualityFloor: 70,
+  });
   assert.equal(decision.pass, false);
   assert.equal(decision.reason, 'jpeg-below-quality-floor');
 });

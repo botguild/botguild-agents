@@ -85,7 +85,10 @@ test('withinReplayWindow accepts ±window and rejects beyond it (and NaN)', () =
 
 test('deterministic URL derives purely from the idempotency key (mintable pre-render, §8)', () => {
   assert.equal(ogDeliverableKey('abc123'), 'og/abc123.png');
-  assert.equal(deterministicUrl('https://tf.example.com/', 'abc123'), 'https://tf.example.com/a/og/abc123.png');
+  assert.equal(
+    deterministicUrl('https://tf.example.com/', 'abc123'),
+    'https://tf.example.com/a/og/abc123.png',
+  );
   // Trailing-slash normalized; same key → same URL.
   assert.equal(
     deterministicUrl('https://tf.example.com', 'abc123'),

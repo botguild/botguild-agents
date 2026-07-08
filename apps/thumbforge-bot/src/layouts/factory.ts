@@ -75,7 +75,12 @@ export function createLayout(config: LayoutConfig): LayoutDescriptor {
 
     // Logo is last → top-most: the z-order invariant the logo gate asserts.
     const layers = [...panelLayers, ...swatchLayers, headlineLayer, logoLayer];
-    const { element, drawOrder } = compose(config.width, config.height, config.backgroundHex, layers);
+    const { element, drawOrder } = compose(
+      config.width,
+      config.height,
+      config.backgroundHex,
+      layers,
+    );
 
     return {
       element,

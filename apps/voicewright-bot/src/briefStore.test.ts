@@ -28,8 +28,20 @@ const brief: AdBrief = {
 };
 
 const month1: Variant[] = [
-  { id: 'v1', angle: 'value', headline: 'Save time every day', primaryText: 'Do more with less effort now', description: 'Learn more' },
-  { id: 'v2', angle: 'trust', headline: 'Loved by thousands of teams', primaryText: 'Join the teams already winning', description: 'See why' },
+  {
+    id: 'v1',
+    angle: 'value',
+    headline: 'Save time every day',
+    primaryText: 'Do more with less effort now',
+    description: 'Learn more',
+  },
+  {
+    id: 'v2',
+    angle: 'trust',
+    headline: 'Loved by thousands of teams',
+    primaryText: 'Join the teams already winning',
+    description: 'See why',
+  },
 ];
 
 test('a first refresh produces at stored.cycle+1: prior batch is visible and month-1 rows survive', async () => {
@@ -38,7 +50,12 @@ test('a first refresh produces at stored.cycle+1: prior batch is visible and mon
   const briefs = createBriefStore(db, () => new Date('2026-07-07T00:00:00Z'));
 
   // adcopy delivery: create brief (cycle=1) + store month-1 under cycle 1.
-  await briefs.create({ briefId: 'b1', originContractId: 'c1', brief, nextDueAt: new Date('2026-08-06T00:00:00Z') });
+  await briefs.create({
+    briefId: 'b1',
+    originContractId: 'c1',
+    brief,
+    nextDueAt: new Date('2026-08-06T00:00:00Z'),
+  });
   await briefs.saveCycleVariants('b1', 1, month1);
 
   // First refresh: stored.cycle is 1, so the pipeline produces at cycle 2.
@@ -59,8 +76,20 @@ test('a first refresh produces at stored.cycle+1: prior batch is visible and mon
 
   // Store a genuinely fresh month-2 batch and advance the cycle pointer.
   const month2: Variant[] = [
-    { id: 'v1', angle: 'urgency', headline: 'Only a few spots left today', primaryText: 'Grab yours before they vanish', description: 'Act fast' },
-    { id: 'v2', angle: 'proof', headline: 'Numbers that speak for themselves', primaryText: 'Results our customers can measure', description: 'View data' },
+    {
+      id: 'v1',
+      angle: 'urgency',
+      headline: 'Only a few spots left today',
+      primaryText: 'Grab yours before they vanish',
+      description: 'Act fast',
+    },
+    {
+      id: 'v2',
+      angle: 'proof',
+      headline: 'Numbers that speak for themselves',
+      primaryText: 'Results our customers can measure',
+      description: 'View data',
+    },
   ];
   await briefs.saveCycleVariants('b1', producedCycle, month2);
   await briefs.completeCycle('b1', producedCycle, new Date('2026-09-05T00:00:00Z'));
@@ -71,7 +100,11 @@ test('a first refresh produces at stored.cycle+1: prior batch is visible and mon
     .bind('b1')
     .all<{ variant_id: string }>();
   assert.deepEqual(results.map((r) => r.variant_id).sort(), ['v1', 'v2']);
-  assert.equal((await briefs.get('b1'))?.cycle, 2, 'completeCycle records the produced cycle explicitly');
+  assert.equal(
+    (await briefs.get('b1'))?.cycle,
+    2,
+    'completeCycle records the produced cycle explicitly',
+  );
 
   // The next refresh (month-3) sees both prior cycles.
   const priorForMonth3 = await briefs.priorCycleVariants('b1', 3);

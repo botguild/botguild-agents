@@ -77,13 +77,20 @@ export async function ensureRegisteredWorkers(
   if (registration.secret && registration.secret.length > 0) {
     await secretStore.saveWebhookSecret(registration.secret, registration.id);
     const readBack = await secretStore.loadWebhookSecret();
-    if (!readBack || readBack.secret !== registration.secret || readBack.webhookId !== registration.id) {
+    if (
+      !readBack ||
+      readBack.secret !== registration.secret ||
+      readBack.webhookId !== registration.id
+    ) {
       throw new Error(
         `webhook secret persist read-back failed for webhook ${registration.id}; ` +
           'registration is NOT complete — without the stored secret, inbound deliveries cannot be verified',
       );
     }
-    logger.info({ botId, webhookId: registration.id }, 'webhook secret persisted to D1 and read back');
+    logger.info(
+      { botId, webhookId: registration.id },
+      'webhook secret persisted to D1 and read back',
+    );
     return { botId, webhookId: registration.id, secretRotated: true };
   }
 

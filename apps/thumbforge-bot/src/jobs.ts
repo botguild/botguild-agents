@@ -66,7 +66,10 @@ export interface IdempotencyStore {
   sweepStalePending(olderThan: Date): Promise<number>;
 }
 
-export function createIdempotencyStore(db: D1Like, now: () => Date = () => new Date()): IdempotencyStore {
+export function createIdempotencyStore(
+  db: D1Like,
+  now: () => Date = () => new Date(),
+): IdempotencyStore {
   const toRow = (raw: RawClaimRow): FullClaimRow => ({
     key: raw.key,
     status: raw.status,
@@ -104,7 +107,9 @@ export function createIdempotencyStore(db: D1Like, now: () => Date = () => new D
     async markDelivered(key, url): Promise<void> {
       const ts = now().toISOString();
       await db
-        .prepare("UPDATE idempotency_claims SET status = 'delivered', url = ?, billed_at = ? WHERE key = ?")
+        .prepare(
+          "UPDATE idempotency_claims SET status = 'delivered', url = ?, billed_at = ? WHERE key = ?",
+        )
         .bind(url, ts, key)
         .run();
     },
@@ -132,7 +137,10 @@ export function createIdempotencyStore(db: D1Like, now: () => Date = () => new D
         .bind(olderThan.toISOString())
         .all<{ key: string }>();
       for (const row of results) {
-        await db.prepare("DELETE FROM idempotency_claims WHERE key = ? AND status = 'pending'").bind(row.key).run();
+        await db
+          .prepare("DELETE FROM idempotency_claims WHERE key = ? AND status = 'pending'")
+          .bind(row.key)
+          .run();
       }
       return results.length;
     },
@@ -326,7 +334,8 @@ export type RenderClaimDecision =
 export function decideRenderConflict(
   row: Pick<RenderJobRow, 'status' | 'plan'>,
 ): RenderClaimDecision {
-  if (row.status === 'delivered' || row.status === 'rejected') return { action: 'skip', reason: 'delivered' };
+  if (row.status === 'delivered' || row.status === 'rejected')
+    return { action: 'skip', reason: 'delivered' };
   if (row.plan !== null) return { action: 'skip', reason: 'in-progress' };
   return { action: 'enqueue', reason: 'claimed-not-planned' };
 }
@@ -334,7 +343,10 @@ export function decideRenderConflict(
 export interface RenderJobStore {
   claim(jobKey: string, contractId: string): Promise<RenderClaimDecision>;
   get(jobKey: string): Promise<RenderJobRow | null>;
-  savePlan(jobKey: string, fields: { kind: RenderKind; milestoneId: string; plan: RenderPlan }): Promise<void>;
+  savePlan(
+    jobKey: string,
+    fields: { kind: RenderKind; milestoneId: string; plan: RenderPlan },
+  ): Promise<void>;
   saveTemplateArtifact(jobKey: string, artifact: string): Promise<void>;
   /**
    * Atomically claim the completion transition (§9): flip `in_progress →
@@ -353,7 +365,10 @@ export interface RenderJobStore {
   listStuckClaims(olderThan: Date): Promise<RenderJobRow[]>;
 }
 
-export function createRenderJobStore(db: D1Like, now: () => Date = () => new Date()): RenderJobStore {
+export function createRenderJobStore(
+  db: D1Like,
+  now: () => Date = () => new Date(),
+): RenderJobStore {
   const toRow = (raw: RawRenderJobRow): RenderJobRow => ({
     jobKey: raw.job_key,
     contractId: raw.contract_id,
@@ -370,7 +385,10 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
   });
 
   async function get(jobKey: string): Promise<RenderJobRow | null> {
-    const raw = await db.prepare('SELECT * FROM render_jobs WHERE job_key = ?').bind(jobKey).first<RawRenderJobRow>();
+    const raw = await db
+      .prepare('SELECT * FROM render_jobs WHERE job_key = ?')
+      .bind(jobKey)
+      .first<RawRenderJobRow>();
     return raw ? toRow(raw) : null;
   }
 
@@ -381,7 +399,9 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
       const ts = now().toISOString();
       try {
         await db
-          .prepare('INSERT INTO render_jobs (job_key, contract_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+          .prepare(
+            'INSERT INTO render_jobs (job_key, contract_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+          )
           .bind(jobKey, contractId, 'claimed', ts, ts)
           .run();
         return { action: 'enqueue', reason: 'fresh-claim' };
@@ -398,7 +418,13 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
         .prepare(
           "UPDATE render_jobs SET status = 'in_progress', kind = ?, milestone_id = ?, plan_json = ?, updated_at = ? WHERE job_key = ?",
         )
-        .bind(fields.kind, fields.milestoneId, JSON.stringify(fields.plan), now().toISOString(), jobKey)
+        .bind(
+          fields.kind,
+          fields.milestoneId,
+          JSON.stringify(fields.plan),
+          now().toISOString(),
+          jobKey,
+        )
         .run();
     },
 
@@ -411,7 +437,9 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
 
     async claimForDelivery(jobKey): Promise<boolean> {
       const result = await db
-        .prepare("UPDATE render_jobs SET status = 'delivered', updated_at = ? WHERE job_key = ? AND status = 'in_progress'")
+        .prepare(
+          "UPDATE render_jobs SET status = 'delivered', updated_at = ? WHERE job_key = ? AND status = 'in_progress'",
+        )
         .bind(now().toISOString(), jobKey)
         .run();
       return rowsChanged(result) === 1;
@@ -419,7 +447,9 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
 
     async reopenForDelivery(jobKey): Promise<void> {
       await db
-        .prepare("UPDATE render_jobs SET status = 'in_progress', updated_at = ? WHERE job_key = ? AND status = 'delivered' AND outcome IS NULL")
+        .prepare(
+          "UPDATE render_jobs SET status = 'in_progress', updated_at = ? WHERE job_key = ? AND status = 'delivered' AND outcome IS NULL",
+        )
         .bind(now().toISOString(), jobKey)
         .run();
     },
@@ -427,14 +457,18 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
     async markDelivered(jobKey, outcome): Promise<void> {
       const ts = now().toISOString();
       await db
-        .prepare("UPDATE render_jobs SET status = 'delivered', outcome = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?")
+        .prepare(
+          "UPDATE render_jobs SET status = 'delivered', outcome = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?",
+        )
         .bind(outcome, ts, ts, jobKey)
         .run();
     },
 
     async park(jobKey, reason): Promise<void> {
       await db
-        .prepare("UPDATE render_jobs SET status = 'parked', park_reason = ?, updated_at = ? WHERE job_key = ?")
+        .prepare(
+          "UPDATE render_jobs SET status = 'parked', park_reason = ?, updated_at = ? WHERE job_key = ?",
+        )
         .bind(reason, now().toISOString(), jobKey)
         .run();
     },
@@ -442,14 +476,18 @@ export function createRenderJobStore(db: D1Like, now: () => Date = () => new Dat
     async reject(jobKey, reason): Promise<void> {
       const ts = now().toISOString();
       await db
-        .prepare("UPDATE render_jobs SET status = 'rejected', outcome = 'rejected', park_reason = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?")
+        .prepare(
+          "UPDATE render_jobs SET status = 'rejected', outcome = 'rejected', park_reason = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?",
+        )
         .bind(reason, ts, ts, jobKey)
         .run();
     },
 
     async listStuckClaims(olderThan): Promise<RenderJobRow[]> {
       const { results } = await db
-        .prepare("SELECT * FROM render_jobs WHERE status = 'claimed' AND plan_json IS NULL AND created_at < ?")
+        .prepare(
+          "SELECT * FROM render_jobs WHERE status = 'claimed' AND plan_json IS NULL AND created_at < ?",
+        )
         .bind(olderThan.toISOString())
         .all<RawRenderJobRow>();
       return results.map(toRow);
@@ -557,7 +595,9 @@ export function createAuditStore(db: D1Like, now: () => Date = () => new Date())
   return {
     async record(entry): Promise<void> {
       await db
-        .prepare('INSERT INTO gate_audit (scope, graphic_id, gate, result, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .prepare(
+          'INSERT INTO gate_audit (scope, graphic_id, gate, result, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
         .bind(
           entry.scope,
           entry.graphicId ?? null,
@@ -581,7 +621,11 @@ export function createAuditStore(db: D1Like, now: () => Date = () => new Date())
 
 // --- Reputation snapshot cache (read by /health, written by the cron) -------
 
-export async function saveReputationSnapshot(db: D1Like, snapshot: unknown, now = new Date()): Promise<void> {
+export async function saveReputationSnapshot(
+  db: D1Like,
+  snapshot: unknown,
+  now = new Date(),
+): Promise<void> {
   await db
     .prepare(
       `INSERT INTO reputation_snapshot (id, snapshot_json, updated_at) VALUES (1, ?, ?)

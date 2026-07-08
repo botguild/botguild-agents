@@ -15,5 +15,5 @@
   // hostname on a different zone from the bot's custom domain.
   "workers_dev": true,
 
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
 }

@@ -113,7 +113,10 @@ export interface JobStore {
   /** D1 INSERT claim; on unique-constraint conflict applies decideOnConflict. */
   claim(jobKey: string, contractId: string): Promise<ClaimDecision>;
   get(jobKey: string): Promise<JobRow | null>;
-  setInProgress(jobKey: string, fields: { kind: JobKind; gigId: string; briefJson: string }): Promise<void>;
+  setInProgress(
+    jobKey: string,
+    fields: { kind: JobKind; gigId: string; briefJson: string },
+  ): Promise<void>;
   saveCheckpoint(jobKey: string, checkpoint: JobCheckpoint): Promise<void>;
   updateBrief(jobKey: string, briefJson: string): Promise<void>;
   park(jobKey: string, reason: string): Promise<void>;
@@ -140,7 +143,10 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
   const touch = (): string => now().toISOString();
 
   async function get(jobKey: string): Promise<JobRow | null> {
-    const raw = await db.prepare('SELECT * FROM jobs WHERE job_key = ?').bind(jobKey).first<RawJobRow>();
+    const raw = await db
+      .prepare('SELECT * FROM jobs WHERE job_key = ?')
+      .bind(jobKey)
+      .first<RawJobRow>();
     return raw ? toJobRow(raw) : null;
   }
 
@@ -167,15 +173,25 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
 
     async setInProgress(jobKey, fields): Promise<void> {
       await db
-        .prepare('UPDATE jobs SET status = ?, kind = ?, gig_id = ?, brief_json = ?, park_reason = NULL, updated_at = ? WHERE job_key = ?')
+        .prepare(
+          'UPDATE jobs SET status = ?, kind = ?, gig_id = ?, brief_json = ?, park_reason = NULL, updated_at = ? WHERE job_key = ?',
+        )
         .bind('in_progress', fields.kind, fields.gigId, fields.briefJson, touch(), jobKey)
         .run();
     },
 
     async saveCheckpoint(jobKey, checkpoint): Promise<void> {
       await db
-        .prepare('UPDATE jobs SET checkpoint_json = ?, spent_usd = ?, batch_rounds = ?, updated_at = ? WHERE job_key = ?')
-        .bind(JSON.stringify(checkpoint), checkpoint.spendUsd, checkpoint.batchRounds, touch(), jobKey)
+        .prepare(
+          'UPDATE jobs SET checkpoint_json = ?, spent_usd = ?, batch_rounds = ?, updated_at = ? WHERE job_key = ?',
+        )
+        .bind(
+          JSON.stringify(checkpoint),
+          checkpoint.spendUsd,
+          checkpoint.batchRounds,
+          touch(),
+          jobKey,
+        )
         .run();
     },
 
@@ -195,14 +211,18 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
 
     async unpark(jobKey): Promise<void> {
       await db
-        .prepare("UPDATE jobs SET status = 'claimed', park_reason = NULL, updated_at = ? WHERE job_key = ? AND status = 'parked'")
+        .prepare(
+          "UPDATE jobs SET status = 'claimed', park_reason = NULL, updated_at = ? WHERE job_key = ? AND status = 'parked'",
+        )
         .bind(touch(), jobKey)
         .run();
     },
 
     async incrementModerationAttempts(jobKey): Promise<number> {
       await db
-        .prepare('UPDATE jobs SET moderation_attempts = moderation_attempts + 1, updated_at = ? WHERE job_key = ?')
+        .prepare(
+          'UPDATE jobs SET moderation_attempts = moderation_attempts + 1, updated_at = ? WHERE job_key = ?',
+        )
         .bind(touch(), jobKey)
         .run();
       const row = await get(jobKey);
@@ -212,14 +232,18 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
     async markDelivered(jobKey, outcome): Promise<void> {
       const ts = touch();
       await db
-        .prepare('UPDATE jobs SET status = ?, outcome = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?')
+        .prepare(
+          'UPDATE jobs SET status = ?, outcome = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?',
+        )
         .bind('delivered', outcome, ts, ts, jobKey)
         .run();
     },
 
     async listParked(reason?: string): Promise<JobRow[]> {
       const query = reason
-        ? db.prepare('SELECT * FROM jobs WHERE status = ? AND park_reason = ?').bind('parked', reason)
+        ? db
+            .prepare('SELECT * FROM jobs WHERE status = ? AND park_reason = ?')
+            .bind('parked', reason)
         : db.prepare('SELECT * FROM jobs WHERE status = ?').bind('parked');
       const { results } = await query.all<RawJobRow>();
       return results.map(toJobRow);
@@ -227,7 +251,9 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
 
     async listStuckClaims(olderThan: Date): Promise<JobRow[]> {
       const { results } = await db
-        .prepare('SELECT * FROM jobs WHERE status = ? AND checkpoint_json IS NULL AND created_at < ?')
+        .prepare(
+          'SELECT * FROM jobs WHERE status = ? AND checkpoint_json IS NULL AND created_at < ?',
+        )
         .bind('claimed', olderThan.toISOString())
         .all<RawJobRow>();
       return results.map(toJobRow);
@@ -235,7 +261,9 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
 
     async recordGateAudit(entry): Promise<void> {
       await db
-        .prepare('INSERT INTO gate_audit (job_key, variant_id, gate, result, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .prepare(
+          'INSERT INTO gate_audit (job_key, variant_id, gate, result, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
         .bind(
           entry.jobKey,
           entry.variantId ?? null,
@@ -251,7 +279,11 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
 
 // --- Reputation snapshot cache (read by /health, written by the cron) --------
 
-export async function saveReputationSnapshot(db: D1Like, snapshot: unknown, now = new Date()): Promise<void> {
+export async function saveReputationSnapshot(
+  db: D1Like,
+  snapshot: unknown,
+  now = new Date(),
+): Promise<void> {
   await db
     .prepare(
       `INSERT INTO reputation_snapshot (id, snapshot_json, updated_at) VALUES (1, ?, ?)

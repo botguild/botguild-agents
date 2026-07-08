@@ -18,7 +18,11 @@ export interface Lab {
 /** Parse `#RGB` / `#RRGGBB` into 0–255 components. */
 export function hexToRgb(hex: string): RGB {
   let h = hex.trim().replace(/^#/, '');
-  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length === 3)
+    h = h
+      .split('')
+      .map((c) => c + c)
+      .join('');
   const n = Number.parseInt(h, 16);
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
@@ -44,7 +48,8 @@ export function rgbToLab({ r, g, b }: RGB): Lab {
   const yn = 100.0;
   const zn = 108.883;
   const delta = 6 / 29;
-  const f = (t: number): number => (t > delta ** 3 ? Math.cbrt(t) : t / (3 * delta * delta) + 4 / 29);
+  const f = (t: number): number =>
+    t > delta ** 3 ? Math.cbrt(t) : t / (3 * delta * delta) + 4 / 29;
 
   const fx = f(x / xn);
   const fy = f(y / yn);
@@ -119,10 +124,7 @@ export function ciede2000(lab1: Lab, lab2: Lab): number {
   const Rt = -Math.sin(rad(2 * dTheta)) * Rc;
 
   return Math.sqrt(
-    (dLp / Sl) ** 2 +
-      (dCp / Sc) ** 2 +
-      (dHp / Sh) ** 2 +
-      Rt * (dCp / Sc) * (dHp / Sh),
+    (dLp / Sl) ** 2 + (dCp / Sc) ** 2 + (dHp / Sh) ** 2 + Rt * (dCp / Sc) * (dHp / Sh),
   );
 }
 

@@ -14,13 +14,13 @@ rejections are carried by the 21-day warranty, not by this document.
 
 ## Rules
 
-| Rule id | Requirement |
-| --- | --- |
-| `no-personal-attribute-callouts` | Copy must not assert or imply the reader's personal attributes — health conditions, financial status, identity ("Are you diabetic?", "struggling with debt?"). Meta rejects personal-attribute call-outs outright. |
-| `no-prohibited-claims` | No miracle/cure language, no guaranteed-outcome claims (results, weight loss, income, returns), no "100% risk-free" or get-rich framing. |
-| `no-excessive-punctuation` | No repeated terminal punctuation (`!!`, `???`, `!?`). |
-| `no-all-caps-shouting` | No fully-capitalized words of four or more letters. Short acronyms (USA, CTA, SDK) are allowed. |
-| `buyer-policy-constraints` | The significant terms of every buyer-specified prohibition in the brief's `policyConstraints` (e.g. "no weight-loss or body-transformation claims") must not appear in the copy. The full constraint text is also fed to generation as a hard instruction; this rule is the deterministic backstop. |
+| Rule id                          | Requirement                                                                                                                                                                                                                                                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no-personal-attribute-callouts` | Copy must not assert or imply the reader's personal attributes — health conditions, financial status, identity ("Are you diabetic?", "struggling with debt?"). Meta rejects personal-attribute call-outs outright.                                                                                  |
+| `no-prohibited-claims`           | No miracle/cure language, no guaranteed-outcome claims (results, weight loss, income, returns), no "100% risk-free" or get-rich framing.                                                                                                                                                            |
+| `no-excessive-punctuation`       | No repeated terminal punctuation (`!!`, `???`, `!?`).                                                                                                                                                                                                                                               |
+| `no-all-caps-shouting`           | No fully-capitalized words of four or more letters. Short acronyms (USA, CTA, SDK) are allowed.                                                                                                                                                                                                     |
+| `buyer-policy-constraints`       | The significant terms of every buyer-specified prohibition in the brief's `policyConstraints` (e.g. "no weight-loss or body-transformation claims") must not appear in the copy. The full constraint text is also fed to generation as a hard instruction; this rule is the deterministic backstop. |
 
 ## Evaluation
 

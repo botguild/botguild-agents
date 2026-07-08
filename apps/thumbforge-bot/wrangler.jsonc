@@ -22,7 +22,7 @@
     // ⚠️ REPLACE with the deployed Worker's custom-domain URL (deliverable
     // links + webhook registration). Deliverables are served from this
     // route — NEVER the r2.dev dev domain (FR-9/FR-11).
-    "WEBHOOK_BASE_URL": "https://thumbforge.example.com"
+    "WEBHOOK_BASE_URL": "https://thumbforge.example.com",
   },
 
   "d1_databases": [
@@ -30,8 +30,8 @@
       "binding": "DB",
       "database_name": "thumbforge",
       // ⚠️ REPLACE with the id from `wrangler d1 create thumbforge`.
-      "database_id": "00000000-0000-0000-0000-000000000000"
-    }
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    },
   ],
 
   "kv_namespaces": [
@@ -39,15 +39,15 @@
       "binding": "CACHE",
       // ⚠️ REPLACE with the id from `wrangler kv namespace create CACHE`.
       // Non-billing caches only (poller seen-gig ids) — never usage/idempotency.
-      "id": "00000000000000000000000000000000"
-    }
+      "id": "00000000000000000000000000000000",
+    },
   ],
 
   "r2_buckets": [
     {
       "binding": "ASSETS",
-      "bucket_name": "thumbforge-deliverables"
-    }
+      "bucket_name": "thumbforge-deliverables",
+    },
   ],
 
   "queues": {
@@ -61,16 +61,16 @@
         // Transient errors only (Claude 5xx, D1/R2 hiccups); the DLQ parks
         // poison messages for operator replay (§12).
         "max_retries": 3,
-        "dead_letter_queue": "thumbforge-render-dlq"
+        "dead_letter_queue": "thumbforge-render-dlq",
       },
       {
         // DLQ consumer: logs an operator alert per poisoned message (§12
         // runbook — replay by re-enqueueing to thumbforge-render).
         "queue": "thumbforge-render-dlq",
         "max_batch_size": 10,
-        "max_retries": 0
-      }
-    ]
+        "max_retries": 0,
+      },
+    ],
   },
 
   "services": [
@@ -78,18 +78,18 @@
       // The reachability URL-probe leg (§7/§9): a second Worker on its own
       // workers.dev hostname. Deploy thumbforge-probe first.
       "binding": "PROBE",
-      "service": "thumbforge-probe"
-    }
+      "service": "thumbforge-probe",
+    },
   ],
 
   "triggers": {
     // */10: gig poll + negotiation + reputation refresh.
     // 0 4:  daily usage rollover reconciliation + stuck-claim recovery.
     // 0 3 1: monthly recurring-gig re-post (usage report + re-fund prompt).
-    "crons": ["*/10 * * * *", "0 4 * * *", "0 3 1 * *"]
+    "crons": ["*/10 * * * *", "0 4 * * *", "0 3 1 * *"],
   },
 
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
 
   // Secrets (set via `wrangler secret put <NAME>`; see .dev.vars.example):
   //   BOTGUILD_API_URL, BOTGUILD_API_KEY, BOTGUILD_BOT_ID,

@@ -17,7 +17,13 @@ import { deterministicUrl, hmacSha256Hex, ogDeliverableKey, verifyCmsRequest } f
 import { decideIdempotency, deriveIdempotencyKey } from './idempotency.js';
 import { decideUsage, overCapMessage, usagePeriod } from './usage.js';
 import { buildOgGraphic } from './brief.js';
-import { bytesEqual, renderSpec, type DeliverableStorage, type RenderContext, type UrlProbe } from './pipeline.js';
+import {
+  bytesEqual,
+  renderSpec,
+  type DeliverableStorage,
+  type RenderContext,
+  type UrlProbe,
+} from './pipeline.js';
 import type { Moderator } from './moderation.js';
 import type { AuditStore, IdempotencyStore, OfferStore, UsageStore } from './jobs.js';
 import type { BrandKit } from './types.js';
@@ -90,7 +96,12 @@ export async function handleOgPublish(
     windowSeconds: CMS_REPLAY_WINDOW_SECONDS,
   });
   if (!verify.ok) {
-    await cfg.audit.record({ scope: offerId, gate: 'cms-verify', result: verify.reason, detail: { pageUrl } });
+    await cfg.audit.record({
+      scope: offerId,
+      gate: 'cms-verify',
+      result: verify.reason,
+      detail: { pageUrl },
+    });
     logger.warn({ reason: verify.reason }, 'CMS webhook verification failed');
     return { status: 401, body: { error: verify.reason } };
   }
@@ -104,15 +115,26 @@ export async function handleOgPublish(
     const existing = await cfg.idempotency.get(key);
     const priorVersionDelivered = await cfg.idempotency.priorVersionDelivered(pageUrl, key);
     const decision = decideIdempotency(existing, { now: now().getTime(), priorVersionDelivered });
-    await cfg.audit.record({ scope: key, gate: 'idempotency', result: decision.reason, detail: { pageUrl } });
+    await cfg.audit.record({
+      scope: key,
+      gate: 'idempotency',
+      result: decision.reason,
+      detail: { pageUrl },
+    });
     if (decision.action === 'return') {
       // Already delivered under this exact key: its R2 read-back ran at delivery.
-      return { status: 200, body: reachabilityBody(decision.url, 'passed', true, { deduped: true }) };
+      return {
+        status: 200,
+        body: reachabilityBody(decision.url, 'passed', true, { deduped: true }),
+      };
     }
     if (decision.action === 'wait') {
       // A fresh attempt is in flight — hand back the deterministic URL, count
       // nothing, and report r2_verified:false (THIS invocation stored nothing).
-      return { status: 202, body: reachabilityBody(finalUrl, 'pending', false, { inFlight: true }) };
+      return {
+        status: 202,
+        body: reachabilityBody(finalUrl, 'pending', false, { inFlight: true }),
+      };
     }
     // stale-pending-takeover → fall through and re-drive idempotently.
   }
@@ -144,7 +166,10 @@ export async function handleOgPublish(
   if (moderation.status === 'flagged') {
     await cfg.idempotency.removePending(key);
     await cfg.usage.release(offerId, period); // never rendered → give the slot back
-    return { status: 422, body: { error: 'content flagged by moderation', reason: moderation.reason } };
+    return {
+      status: 422,
+      body: { error: 'content flagged by moderation', reason: moderation.reason },
+    };
   }
 
   if (moderation.status === 'unavailable') {
@@ -154,7 +179,16 @@ export async function handleOgPublish(
     return {
       status: 202,
       body: reachabilityBody(finalUrl, 'pending', false, { deferred: true }),
-      after: () => completeAsync(cfg, { key, offerId, period, spec, envelope, secret: offer.secret, finalUrl }),
+      after: () =>
+        completeAsync(cfg, {
+          key,
+          offerId,
+          period,
+          spec,
+          envelope,
+          secret: offer.secret,
+          finalUrl,
+        }),
     };
   }
 
@@ -163,18 +197,29 @@ export async function handleOgPublish(
   if (!rendered.ok) {
     await cfg.idempotency.removePending(key);
     await cfg.usage.release(offerId, period); // render failed a gate → release the slot
-    return { status: 422, body: { error: 'render failed a blocking gate', detail: rendered.detail } };
+    return {
+      status: 422,
+      body: { error: 'render failed a blocking gate', detail: rendered.detail },
+    };
   }
 
   // The slot was already reserved atomically above — do NOT increment again.
   await cfg.idempotency.markDelivered(key, rendered.url);
-  await cfg.audit.record({ scope: key, gate: 'og-delivery', result: 'delivered', detail: { url: rendered.url, bytes: rendered.byteLength } });
+  await cfg.audit.record({
+    scope: key,
+    gate: 'og-delivery',
+    result: 'delivered',
+    detail: { url: rendered.url, bytes: rendered.byteLength },
+  });
 
   return {
     status: 200,
     // The in-process R2 write-then-read byte-equality ran (r2_verified: true);
     // url_probe is still pending until probeAfter lands.
-    body: reachabilityBody(rendered.url, 'pending', true, { bytes: rendered.byteLength, format: rendered.format }),
+    body: reachabilityBody(rendered.url, 'pending', true, {
+      bytes: rendered.byteLength,
+      format: rendered.format,
+    }),
     // §9: probe post-response from the probe Worker; failure alerts + re-delivers.
     after: () => probeAfter(cfg, key, rendered.url, envelope, offer.secret),
   };
@@ -204,7 +249,11 @@ async function renderAndStore(
   }
 
   const r2Key = ogDeliverableKey(key);
-  await cfg.storage.put(r2Key, rendered.bytes, rendered.format === 'png' ? 'image/png' : 'image/jpeg');
+  await cfg.storage.put(
+    r2Key,
+    rendered.bytes,
+    rendered.format === 'png' ? 'image/png' : 'image/jpeg',
+  );
   const readBack = await cfg.storage.getBytes(r2Key);
   // §9(a): full byte-equality, not just length — a corrupted-but-same-length R2
   // object must not pass the pre-delivery reachability gate (matches the queue path).
@@ -235,8 +284,16 @@ async function completeAsync(
   if (moderation.status !== 'clean') {
     await cfg.idempotency.removePending(args.key);
     await cfg.usage.release(args.offerId, args.period); // reservation held at 202 → release
-    await cfg.audit.record({ scope: args.key, gate: 'moderation-async', result: moderation.status });
-    await postCallback(cfg, args.envelope.callback_url, args.secret, { status: 'failed', reason: 'moderation', key: args.key });
+    await cfg.audit.record({
+      scope: args.key,
+      gate: 'moderation-async',
+      result: moderation.status,
+    });
+    await postCallback(cfg, args.envelope.callback_url, args.secret, {
+      status: 'failed',
+      reason: 'moderation',
+      key: args.key,
+    });
     return;
   }
 
@@ -244,16 +301,32 @@ async function completeAsync(
   if (!rendered.ok) {
     await cfg.idempotency.removePending(args.key);
     await cfg.usage.release(args.offerId, args.period); // reservation held at 202 → release
-    await postCallback(cfg, args.envelope.callback_url, args.secret, { status: 'failed', reason: 'gate', key: args.key });
+    await postCallback(cfg, args.envelope.callback_url, args.secret, {
+      status: 'failed',
+      reason: 'gate',
+      key: args.key,
+    });
     return;
   }
 
   // The slot was reserved atomically before the 202 — do NOT increment again.
   await cfg.idempotency.markDelivered(args.key, rendered.url);
-  await cfg.audit.record({ scope: args.key, gate: 'og-delivery-async', result: 'delivered', detail: { url: rendered.url } });
+  await cfg.audit.record({
+    scope: args.key,
+    gate: 'og-delivery-async',
+    result: 'delivered',
+    detail: { url: rendered.url },
+  });
 
-  const probe = await cfg.probe.probe(rendered.url).catch(() => ({ ok: false, status: 0, byteLength: 0 }));
-  await cfg.audit.record({ scope: args.key, gate: 'url-probe', result: probe.ok ? 'pass' : 'fail', detail: probe });
+  const probe = await cfg.probe
+    .probe(rendered.url)
+    .catch(() => ({ ok: false, status: 0, byteLength: 0 }));
+  await cfg.audit.record({
+    scope: args.key,
+    gate: 'url-probe',
+    result: probe.ok ? 'pass' : 'fail',
+    detail: probe,
+  });
   await postCallback(cfg, args.envelope.callback_url, args.secret, {
     status: 'completed',
     url: rendered.url,
@@ -268,11 +341,25 @@ async function probeAfter(
   envelope: CmsEnvelope,
   secret: string,
 ): Promise<void> {
-  const probe = await cfg.probe.probe(url).catch((err: unknown) => ({ ok: false, status: 0, byteLength: 0, err }));
-  await cfg.audit.record({ scope: key, gate: 'url-probe', result: probe.ok ? 'pass' : 'fail', detail: probe });
+  const probe = await cfg.probe
+    .probe(url)
+    .catch((err: unknown) => ({ ok: false, status: 0, byteLength: 0, err }));
+  await cfg.audit.record({
+    scope: key,
+    gate: 'url-probe',
+    result: probe.ok ? 'pass' : 'fail',
+    detail: probe,
+  });
   if (!probe.ok) {
-    cfg.logger.error({ key, url, probe }, 'URL probe failed post-delivery — re-delivering (operator alert)');
-    await postCallback(cfg, envelope.callback_url, secret, { status: 'failed', reason: 'probe', key });
+    cfg.logger.error(
+      { key, url, probe },
+      'URL probe failed post-delivery — re-delivering (operator alert)',
+    );
+    await postCallback(cfg, envelope.callback_url, secret, {
+      status: 'failed',
+      reason: 'probe',
+      key,
+    });
   }
 }
 

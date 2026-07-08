@@ -35,6 +35,8 @@ export function decideHeadline(
 }
 
 /** The buyer-facing reject/renegotiate message for a failed headline fit (FR-6). */
-export function headlineRejectionMessage(decision: Extract<HeadlineDecision, { accept: false }>): string {
+export function headlineRejectionMessage(
+  decision: Extract<HeadlineDecision, { accept: false }>,
+): string {
   return decision.reason;
 }

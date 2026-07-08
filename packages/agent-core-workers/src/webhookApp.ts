@@ -73,7 +73,10 @@ export function createWorkersWebhookApp(config: WorkersWebhookAppConfig): Hono {
       return c.json({ error: 'Secret unavailable' }, 503);
     }
 
-    if (!signature || !(await verifyWebhookSignature(rawBody, normalizeSignature(signature), secret))) {
+    if (
+      !signature ||
+      !(await verifyWebhookSignature(rawBody, normalizeSignature(signature), secret))
+    ) {
       return c.json({ error: 'Invalid or missing signature' }, 401);
     }
 

@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkColor, ciede2000, deltaE, hexToRgb, rgbToLab, sampleRegion, type Lab } from './color.js';
+import {
+  checkColor,
+  ciede2000,
+  deltaE,
+  hexToRgb,
+  rgbToLab,
+  sampleRegion,
+  type Lab,
+} from './color.js';
 import { solidPixmap } from '../testSupport.js';
 
 // Reference pairs from Sharma, Wu & Dalal (2005), "The CIEDE2000 Color-Difference

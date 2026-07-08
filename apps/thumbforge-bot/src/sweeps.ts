@@ -8,7 +8,13 @@
 // ---------------------------------------------------------------------------
 
 import type { Logger } from 'pino';
-import type { AgentClient, CostEstimator, Gig, Proposer, ReputationSource } from '@botguild/agent-core';
+import type {
+  AgentClient,
+  CostEstimator,
+  Gig,
+  Proposer,
+  ReputationSource,
+} from '@botguild/agent-core';
 import { shouldPropose } from '@botguild/agent-core';
 import {
   refreshReputationOnce,
@@ -90,7 +96,10 @@ export async function runDailySweep(s: SweepServices): Promise<void> {
   for (const job of await s.renderJobs.listStuckClaims(cutoff)) {
     const message: RenderMessage = { kind: 'plan', contractId: job.contractId, jobKey: job.jobKey };
     await s.queue.send(message);
-    s.logger.warn({ jobKey: job.jobKey, contractId: job.contractId }, 'stuck render claim re-enqueued');
+    s.logger.warn(
+      { jobKey: job.jobKey, contractId: job.contractId },
+      'stuck render claim re-enqueued',
+    );
   }
 
   // Usage rollover is implicit (the period key is YYYY-MM); prune stale pending

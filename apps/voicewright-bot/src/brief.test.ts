@@ -12,7 +12,11 @@ import {
 const validBrief = {
   brandVoiceGuide: 'markdown: warm, no jargon',
   offer: '20% off spring line',
-  campaign: { campaignName: 'Q3-Launch-Test', objective: 'OUTCOME_TRAFFIC', adSetName: 'Prospecting-Broad-US' },
+  campaign: {
+    campaignName: 'Q3-Launch-Test',
+    objective: 'OUTCOME_TRAFFIC',
+    adSetName: 'Prospecting-Broad-US',
+  },
   creative: { landingUrl: 'https://example.com/offer', pageId: '1234567890', imageRef: 'hero.png' },
   platform: 'facebook-instagram-feed',
   variantCount: 10,
@@ -42,7 +46,9 @@ test('a complete brief parses from a gig description with defaults applied', () 
   assert.ok(result.ok);
   assert.equal(result.brief.variantCount, 10);
   assert.equal(result.brief.campaign.campaignName, 'Q3-Launch-Test');
-  assert.deepEqual(result.brief.policyConstraints, ['no weight-loss or body-transformation claims']);
+  assert.deepEqual(result.brief.policyConstraints, [
+    'no weight-loss or body-transformation claims',
+  ]);
 });
 
 test('variantCount/angleCount default when omitted', () => {
@@ -59,7 +65,10 @@ test('missing campaign/creative scaffolding is rejected with field-level errors'
   assert.ok(!result.ok);
   assert.ok(result.errors.some((e) => e.field === 'campaign'));
 
-  const badCreative = { ...validBrief, creative: { landingUrl: 'not-a-url', pageId: '1', imageRef: 'x' } };
+  const badCreative = {
+    ...validBrief,
+    creative: { landingUrl: 'not-a-url', pageId: '1', imageRef: 'x' },
+  };
   const creativeResult = validateAdBrief(badCreative);
   assert.ok(!creativeResult.ok);
   assert.ok(creativeResult.errors.some((e) => e.field === 'creative.landingUrl'));
@@ -76,7 +85,9 @@ test('non-object brief and malformed field types are rejected', () => {
   const notObject = validateAdBrief('just a string');
   assert.ok(!notObject.ok && notObject.errors[0]?.field === '(root)');
   const badConstraints = validateAdBrief({ ...validBrief, policyConstraints: 'no claims' });
-  assert.ok(!badConstraints.ok && badConstraints.errors.some((e) => e.field === 'policyConstraints'));
+  assert.ok(
+    !badConstraints.ok && badConstraints.errors.some((e) => e.field === 'policyConstraints'),
+  );
 });
 
 test('a description with no fence fails brief parsing (scorer skips it)', () => {

@@ -23,16 +23,25 @@ test('clean copy passes every rule and reports the checklist version', () => {
 });
 
 test('personal-attribute call-outs fail', () => {
-  const result = runChecklist(variant({ primaryText: 'Are you overweight? We can help.' }), noConstraints);
+  const result = runChecklist(
+    variant({ primaryText: 'Are you overweight? We can help.' }),
+    noConstraints,
+  );
   assert.equal(result.pass, false);
   assert.ok(result.failures.some((f) => f.ruleId === 'no-personal-attribute-callouts'));
 
-  const suffering = runChecklist(variant({ headline: 'Do you suffer from back pain' }), noConstraints);
+  const suffering = runChecklist(
+    variant({ headline: 'Do you suffer from back pain' }),
+    noConstraints,
+  );
   assert.ok(suffering.failures.some((f) => f.ruleId === 'no-personal-attribute-callouts'));
 });
 
 test('miracle/guaranteed-outcome claims fail', () => {
-  const result = runChecklist(variant({ primaryText: 'A miracle serum with guaranteed results.' }), noConstraints);
+  const result = runChecklist(
+    variant({ primaryText: 'A miracle serum with guaranteed results.' }),
+    noConstraints,
+  );
   assert.equal(result.pass, false);
   assert.ok(result.failures.some((f) => f.ruleId === 'no-prohibited-claims'));
 });
@@ -41,17 +50,23 @@ test('repeated punctuation fails; single ! passes', () => {
   const shouting = runChecklist(variant({ headline: 'Sale ends tonight!!' }), noConstraints);
   assert.ok(shouting.failures.some((f) => f.ruleId === 'no-excessive-punctuation'));
   const single = runChecklist(variant({ headline: 'Sale ends tonight!' }), noConstraints);
-  assert.equal(single.failures.some((f) => f.ruleId === 'no-excessive-punctuation'), false);
+  assert.equal(
+    single.failures.some((f) => f.ruleId === 'no-excessive-punctuation'),
+    false,
+  );
 });
 
 test('ALL-CAPS words of 4+ letters fail; short acronyms pass', () => {
   const caps = runChecklist(variant({ headline: 'HUGE savings this week' }), noConstraints);
   assert.ok(caps.failures.some((f) => f.ruleId === 'no-all-caps-shouting'));
   const acronym = runChecklist(variant({ headline: 'Ships free across the USA' }), noConstraints);
-  assert.equal(acronym.failures.some((f) => f.ruleId === 'no-all-caps-shouting'), false);
+  assert.equal(
+    acronym.failures.some((f) => f.ruleId === 'no-all-caps-shouting'),
+    false,
+  );
 });
 
-test('buyer policy constraints ban the constraint\'s significant terms', () => {
+test("buyer policy constraints ban the constraint's significant terms", () => {
   const brief = { policyConstraints: ['no weight-loss or body-transformation claims'] };
   const offending = runChecklist(
     variant({ primaryText: 'Kickstart your weight-loss journey today.' }),

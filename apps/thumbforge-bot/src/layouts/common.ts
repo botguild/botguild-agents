@@ -19,7 +19,11 @@ import type { DrawNode, SatoriNode } from './types.js';
 /** Parse `#RGB` / `#RRGGBB` into 0–255 components. */
 export function hexToRgb(hex: string): RGB {
   let h = hex.trim().replace(/^#/, '');
-  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  if (h.length === 3)
+    h = h
+      .split('')
+      .map((c) => c + c)
+      .join('');
   const n = Number.parseInt(h, 16);
   return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
@@ -46,7 +50,11 @@ export function solidLogoRaster(rect: Rect, hex: string): LogoRaster {
 }
 
 /** An absolutely-positioned solid rectangle. */
-export function solidBox(rect: Rect, hex: string, extraStyle: Record<string, string | number> = {}): SatoriNode {
+export function solidBox(
+  rect: Rect,
+  hex: string,
+  extraStyle: Record<string, string | number> = {},
+): SatoriNode {
   return {
     type: 'div',
     props: {

@@ -77,7 +77,10 @@ export function createWebhookHandlers(deps: HandlerDeps): Record<string, Webhook
     // Async render gig: claim the job (idempotent) and enqueue a plan message.
     const jobKey = await sha256Hex(contractId);
     const decision = await renderJobs.claim(jobKey, contractId);
-    logger.info({ contractId, jobKey, kind, ...decision }, 'milestone.funded render claim decision');
+    logger.info(
+      { contractId, jobKey, kind, ...decision },
+      'milestone.funded render claim decision',
+    );
     if (decision.action === 'enqueue') {
       await queue.send({ kind: 'plan', contractId, jobKey });
     }
@@ -85,7 +88,10 @@ export function createWebhookHandlers(deps: HandlerDeps): Record<string, Webhook
 
   const onProposalAccepted: WebhookHandler = async (event) => {
     const { contractId } = event.payload as { contractId: string };
-    await client.sendMessage(contractId, 'Proposal accepted — rendering begins as soon as the milestone escrow is funded.');
+    await client.sendMessage(
+      contractId,
+      'Proposal accepted — rendering begins as soon as the milestone escrow is funded.',
+    );
   };
 
   const onMilestoneAccepted: WebhookHandler = async (event) => {

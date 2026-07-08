@@ -17,7 +17,9 @@ const DEFAULT_ANGLE_COUNT = 3;
 const MAX_VARIANT_COUNT = 25;
 
 /** Extract the first fenced JSON block (```json ... ``` or bare ``` ... ```). */
-export function extractFencedJson(text: string): { ok: true; value: unknown } | { ok: false; error: string } {
+export function extractFencedJson(
+  text: string,
+): { ok: true; value: unknown } | { ok: false; error: string } {
   const fences = [...text.matchAll(/```(?:json)?\s*\n?([\s\S]*?)```/g)];
   if (fences.length === 0) {
     return { ok: false, error: 'no fenced JSON block found' };
@@ -70,7 +72,10 @@ export function validateAdBrief(value: unknown): BriefResult<AdBrief> {
 
   let campaign: AdBrief['campaign'] = { campaignName: '', objective: '', adSetName: '' };
   if (!isRecord(value['campaign'])) {
-    errors.push({ field: 'campaign', message: 'required object: { campaignName, objective, adSetName }' });
+    errors.push({
+      field: 'campaign',
+      message: 'required object: { campaignName, objective, adSetName }',
+    });
   } else {
     const c = value['campaign'];
     campaign = {
@@ -82,7 +87,10 @@ export function validateAdBrief(value: unknown): BriefResult<AdBrief> {
 
   let creative: AdBrief['creative'] = { landingUrl: '', pageId: '', imageRef: '' };
   if (!isRecord(value['creative'])) {
-    errors.push({ field: 'creative', message: 'required object: { landingUrl, pageId, imageRef }' });
+    errors.push({
+      field: 'creative',
+      message: 'required object: { landingUrl, pageId, imageRef }',
+    });
   } else {
     const c = value['creative'];
     creative = {
@@ -109,7 +117,10 @@ export function validateAdBrief(value: unknown): BriefResult<AdBrief> {
   if (value['angleCount'] !== undefined) {
     const n = value['angleCount'];
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 3 || n > 10) {
-      errors.push({ field: 'angleCount', message: 'must be an integer 3–10 (≥3 angles are contractual)' });
+      errors.push({
+        field: 'angleCount',
+        message: 'must be an integer 3–10 (≥3 angles are contractual)',
+      });
     } else {
       angleCount = n;
     }

@@ -43,7 +43,10 @@ export interface FileSizeDecision {
 }
 
 /** Decide whether an encoded buffer clears the size ceiling + quality floor. */
-export function checkFileSize(encoded: EncodeResult, options: FileSizeOptions = {}): FileSizeDecision {
+export function checkFileSize(
+  encoded: EncodeResult,
+  options: FileSizeOptions = {},
+): FileSizeDecision {
   const maxBytes = options.maxBytes ?? MAX_FILE_BYTES;
   const jpegQualityFloor = options.jpegQualityFloor ?? DEFAULT_JPEG_QUALITY_FLOOR;
   const base = {

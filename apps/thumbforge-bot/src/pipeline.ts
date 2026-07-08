@@ -33,18 +33,8 @@ import {
   MAX_FILE_BYTES,
   JPEG_QUALITY_FLOOR,
 } from './config.js';
-import {
-  buildSocialPackPlan,
-  buildThumbnailPlan,
-  parseBrief,
-} from './brief.js';
-import type {
-  AuditStore,
-  GraphicSpec,
-  OutputStore,
-  RenderJobStore,
-  RenderPlan,
-} from './jobs.js';
+import { buildSocialPackPlan, buildThumbnailPlan, parseBrief } from './brief.js';
+import type { AuditStore, GraphicSpec, OutputStore, RenderJobStore, RenderPlan } from './jobs.js';
 
 /** Injected wasm + fonts for the render core (§7). */
 export interface RenderContext {
@@ -91,7 +81,8 @@ export interface PipelineConfig {
   now?: () => Date;
 }
 
-const contentTypeFor = (format: 'png' | 'jpeg'): string => (format === 'png' ? 'image/png' : 'image/jpeg');
+const contentTypeFor = (format: 'png' | 'jpeg'): string =>
+  format === 'png' ? 'image/png' : 'image/jpeg';
 const extFor = (format: 'png' | 'jpeg'): string => (format === 'png' ? 'png' : 'jpg');
 
 // --- Message dispatch --------------------------------------------------------
@@ -150,11 +141,20 @@ async function processPlanMessage(
   // delivery. Never deliver unmoderated content. `flagged` rejects the job;
   // `unavailable` throws so the queue retries (and DLQs if persistent) rather
   // than delivering unscreened or discarding a paid job on a transient outage.
-  if (!(await moderatePlanOrReject(cfg, logger, msg.contractId, msg.jobKey, brief.jobType, plan))) return;
+  if (!(await moderatePlanOrReject(cfg, logger, msg.contractId, msg.jobKey, brief.jobType, plan)))
+    return;
 
   await cfg.renderJobs.savePlan(msg.jobKey, { kind: plan.kind, milestoneId: milestone.id, plan });
-  await cfg.audit.record({ scope: msg.jobKey, gate: 'plan', result: 'ok', detail: { kind: plan.kind, count: plan.graphics.length } });
-  logger.info({ kind: plan.kind, graphics: plan.graphics.length }, 'render plan built, fanning out');
+  await cfg.audit.record({
+    scope: msg.jobKey,
+    gate: 'plan',
+    result: 'ok',
+    detail: { kind: plan.kind, count: plan.graphics.length },
+  });
+  logger.info(
+    { kind: plan.kind, graphics: plan.graphics.length },
+    'render plan built, fanning out',
+  );
   await fanOut(cfg, msg.jobKey, plan);
 }
 
@@ -181,7 +181,9 @@ async function moderatePlanOrReject(
   jobType: string,
   plan: RenderPlan,
 ): Promise<boolean> {
-  const copy = [...new Set(plan.graphics.map((g) => g.inputs.headline).filter((h): h is string => !!h))].join('\n');
+  const copy = [
+    ...new Set(plan.graphics.map((g) => g.inputs.headline).filter((h): h is string => !!h)),
+  ].join('\n');
   if (!copy) return true;
 
   const moderation = await cfg.moderator.moderate(copy, ASYNC_MODERATION_BUDGET_MS);
@@ -250,7 +252,10 @@ async function processGraphicMessage(
     });
     await cfg.client.sendMessage(job.contractId, headlineRejectionMessage(rendered.gates.headline));
     await cfg.renderJobs.reject(msg.jobKey, 'headline_min_font');
-    logger.warn({ headline: rendered.gates.headline }, 'headline below min font — job rejected (FR-6)');
+    logger.warn(
+      { headline: rendered.gates.headline },
+      'headline below min font — job rejected (FR-6)',
+    );
     return;
   }
 
@@ -297,7 +302,10 @@ async function processGraphicMessage(
     phash: rendered.phash.toString(),
     gatePass: true,
   });
-  logger.info({ url, bytes: rendered.bytes.byteLength, format: rendered.format }, 'graphic rendered + stored + verified');
+  logger.info(
+    { url, bytes: rendered.bytes.byteLength, format: rendered.format },
+    'graphic rendered + stored + verified',
+  );
 
   await tryComplete(cfg, msg.jobKey);
 }
@@ -312,14 +320,27 @@ export interface RenderedGraphic {
 }
 
 /** Render + encode + gate one graphic (no I/O — pure over the injected assets). */
-export async function renderSpec(render: RenderContext, spec: GraphicSpec): Promise<RenderedGraphic> {
+export async function renderSpec(
+  render: RenderContext,
+  spec: GraphicSpec,
+): Promise<RenderedGraphic> {
   const layout = LAYOUTS[spec.templateId];
   if (!layout) throw new Error(`unknown templateId: ${spec.templateId}`);
 
   const out = await renderLayout(layout, { brandKit: spec.brandKit, job: spec.inputs }, render);
-  const encoded = await out.encode({ maxBytes: MAX_FILE_BYTES, jpegQualityFloor: JPEG_QUALITY_FLOOR });
+  const encoded = await out.encode({
+    maxBytes: MAX_FILE_BYTES,
+    jpegQualityFloor: JPEG_QUALITY_FLOOR,
+  });
   const gates = runGates(layout, spec.brandKit, out, encoded);
-  return { out, gates, encoded, bytes: encoded.bytes, format: encoded.format, phash: pHash(out.pixmap) };
+  return {
+    out,
+    gates,
+    encoded,
+    bytes: encoded.bytes,
+    format: encoded.format,
+    phash: pHash(out.pixmap),
+  };
 }
 
 /** Render one planned graphic using the pipeline's injected render context. */
@@ -343,8 +364,14 @@ async function tryComplete(cfg: PipelineConfig, jobKey: string): Promise<void> {
     expected,
     outputs.map((o) => ({ inputKey: o.graphicId })),
   );
-  await cfg.audit.record({ scope: jobKey, gate: 'reconcile', result: reconciliation.pass ? 'pass' : 'fail', detail: reconciliation });
-  if (!reconciliation.pass) throw new Error(`reconciliation failed: ${JSON.stringify(reconciliation)}`);
+  await cfg.audit.record({
+    scope: jobKey,
+    gate: 'reconcile',
+    result: reconciliation.pass ? 'pass' : 'fail',
+    detail: reconciliation,
+  });
+  if (!reconciliation.pass)
+    throw new Error(`reconciliation failed: ${JSON.stringify(reconciliation)}`);
 
   // A/B distinctness (§9): the two thumbnail variants must clear the pHash
   // distance AND be distinct templates.
@@ -379,8 +406,13 @@ async function tryComplete(cfg: PipelineConfig, jobKey: string): Promise<void> {
   const primary = job.plan.graphics[0] as GraphicSpec;
   const artifact = serializeTemplate(LAYOUTS[primary.templateId], primary.brandKit, primary.inputs);
   const templateCheck = checkTemplate(artifact);
-  await cfg.audit.record({ scope: jobKey, gate: 'template', result: templateCheck.pass ? 'pass' : 'fail' });
-  if (!templateCheck.pass) throw new Error(`template artifact failed its own gate: ${templateCheck.error}`);
+  await cfg.audit.record({
+    scope: jobKey,
+    gate: 'template',
+    result: templateCheck.pass ? 'pass' : 'fail',
+  });
+  if (!templateCheck.pass)
+    throw new Error(`template artifact failed its own gate: ${templateCheck.error}`);
   await cfg.renderJobs.saveTemplateArtifact(jobKey, artifact);
 
   const artifactKey = `${jobKey}/template.json`;
@@ -396,7 +428,13 @@ async function tryComplete(cfg: PipelineConfig, jobKey: string): Promise<void> {
   // BLOCKS deliverMilestone on the async paths.
   for (const output of outputs) {
     const result = await cfg.probe.probe(output.url);
-    await cfg.audit.record({ scope: jobKey, graphicId: output.graphicId, gate: 'url-probe', result: result.ok ? 'pass' : 'fail', detail: result });
+    await cfg.audit.record({
+      scope: jobKey,
+      graphicId: output.graphicId,
+      gate: 'url-probe',
+      result: result.ok ? 'pass' : 'fail',
+      detail: result,
+    });
     if (!result.ok) throw new Error(`URL probe failed for ${output.url}: status ${result.status}`);
   }
 
@@ -412,7 +450,8 @@ async function tryComplete(cfg: PipelineConfig, jobKey: string): Promise<void> {
   const attachments = [...urls, artifactUrl];
   const note = buildDeliveryNote(job.kind, outputs.length, urls, artifactUrl, artifact.length);
   try {
-    const milestoneId = job.milestoneId ?? findFundedMilestone(await cfg.client.getContract(job.contractId)).id;
+    const milestoneId =
+      job.milestoneId ?? findFundedMilestone(await cfg.client.getContract(job.contractId)).id;
     await cfg.client.deliverMilestone(job.contractId, milestoneId, { note, attachments });
     await cfg.renderJobs.markDelivered(jobKey, 'delivered');
   } catch (err) {
@@ -447,9 +486,17 @@ function buildDeliveryNote(
 function gateSummary(gates: GateReport): Record<string, unknown> {
   return {
     dimensions: gates.dimensions.pass,
-    fileSize: { pass: gates.fileSize.pass, reason: gates.fileSize.reason, bytes: gates.fileSize.byteLength },
+    fileSize: {
+      pass: gates.fileSize.pass,
+      reason: gates.fileSize.reason,
+      bytes: gates.fileSize.byteLength,
+    },
     color: { pass: gates.color.pass, maxDeltaE: gates.color.maxDeltaE },
-    logo: { pass: gates.logo.pass, similarity: gates.logo.similarity, zOrderClear: gates.logo.zOrderClear },
+    logo: {
+      pass: gates.logo.pass,
+      similarity: gates.logo.similarity,
+      zOrderClear: gates.logo.zOrderClear,
+    },
     headline: { accept: gates.headline.accept, fontPx: gates.headline.fontPx },
   };
 }

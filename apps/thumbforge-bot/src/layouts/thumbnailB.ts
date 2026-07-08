@@ -12,7 +12,9 @@ import { createLayout } from './factory.js';
 const BANNER = { x: 0, y: 0, width: 1280, height: 340 };
 
 function banner(brandKit: BrandKit): Layer[] {
-  return [{ id: 'banner', rect: BANNER, node: solidBox(BANNER, resolveSwatchHex(brandKit, 'secondary')) }];
+  return [
+    { id: 'banner', rect: BANNER, node: solidBox(BANNER, resolveSwatchHex(brandKit, 'secondary')) },
+  ];
 }
 
 export const thumbnailB = createLayout({

@@ -128,5 +128,12 @@ export function checkABDistinct(
   const hashB = pHash(pixmapB);
   const distance = hammingDistance(hashA, hashB);
   const distinctTemplates = templateIdA !== templateIdB;
-  return { pass: distance >= minDistance && distinctTemplates, distance, minDistance, distinctTemplates, hashA, hashB };
+  return {
+    pass: distance >= minDistance && distinctTemplates,
+    distance,
+    minDistance,
+    distinctTemplates,
+    hashA,
+    hashB,
+  };
 }

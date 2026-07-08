@@ -7,12 +7,7 @@
 //   → headline min-font (FR-6).
 // ---------------------------------------------------------------------------
 
-import {
-  JPEG_QUALITY_FLOOR,
-  LOGO_MIN_SIMILARITY,
-  MAX_DELTA_E,
-  MAX_FILE_BYTES,
-} from './config.js';
+import { JPEG_QUALITY_FLOOR, LOGO_MIN_SIMILARITY, MAX_DELTA_E, MAX_FILE_BYTES } from './config.js';
 import { checkDimensions, type DimensionsResult } from './gates/dimensions.js';
 import { checkFileSize, type FileSizeDecision } from './gates/filesize.js';
 import { checkColor, type ColorRegionExpectation, type ColorResult } from './gates/color.js';
@@ -60,7 +55,9 @@ export function runGates(
     maxBytes: MAX_FILE_BYTES,
     jpegQualityFloor: JPEG_QUALITY_FLOOR,
   });
-  const color = checkColor(out.pixmap, swatchExpectations(layout, brandKit), { maxDeltaE: MAX_DELTA_E });
+  const color = checkColor(out.pixmap, swatchExpectations(layout, brandKit), {
+    maxDeltaE: MAX_DELTA_E,
+  });
 
   // Compare against the exact raster the layout composited (§9 post-recolor
   // reference): the buyer's logo when supplied, else the solid brand-color
@@ -74,8 +71,7 @@ export function runGates(
   const headline = decideHeadline(out.headlineFits, out.headlineFontPx, layout.minFontPx);
 
   return {
-    pass:
-      dimensions.pass && fileSize.pass && color.pass && logo.pass && headline.accept,
+    pass: dimensions.pass && fileSize.pass && color.pass && logo.pass && headline.accept,
     dimensions,
     fileSize,
     color,
