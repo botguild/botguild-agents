@@ -5,15 +5,20 @@
 //              verify → handlers), GET /botguild/health
 //              GET  /health (root alias, same JSON as the shim's health)
 //              GET  /deliverables/:token/:file (streams report/zip/screenshot from R2)
+//              OPTIONS/POST /relay/:toolId (form-relay submission; CORS-gated, rate-capped)
+//              GET  /relay/verify/:verifyToken (double opt-in confirmation link)
+//              GET  /p/:token (public build-log page), /p/:token/events (SSE),
+//                   /p/:token/log.json (poll-degrade fallback)
 //              GET  /abuse + POST /abuse (report-a-tool form)
 //              POST /admin/register (protected; runs registration once at deploy)
-//   queue:     jiffyapp-jobs consumer — stub in this task (Tasks 17/18 wire the
-//              build pipeline) + DLQ alerting, which IS wired now.
+//   queue:     jiffyapp-jobs consumer — the full build pipeline (Tasks 17/18) + DLQ alerting.
 //   scheduled: registration backstop + sweep stub (Tasks 20/21 wire the sweeps).
 // ---------------------------------------------------------------------------
 
 import { Hono } from 'hono';
 import type { Logger } from 'pino';
+import { createMimeMessage } from 'mimetext';
+import { EmailMessage } from 'cloudflare:email';
 import {
   AgentClient,
   AgentMcpClient,
@@ -67,6 +72,15 @@ import { createPsiClient } from './psi.js';
 import { createModerationClient } from './moderation.js';
 import { createPlaywrightLauncher, createPlaywrightPageFactory } from './playwrightDriver.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
+import { buildLogPageHtml, createLogEventStream, handleLogJson } from './buildlog.js';
+import {
+  createEmailRoutingClient,
+  handleRelaySubmission,
+  handleRelayVerification,
+  relayCorsHeaders,
+  type RelayDeps,
+  type RelayMailer,
+} from './relay.js';
 import type { JobMessage } from './types.js';
 
 // @cloudflare/workers-types (pinned in package.json) already declares `SendEmail`
@@ -94,6 +108,8 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   MODERATION_API_KEY: string;
   CF_API_TOKEN: string;
+  /** Second Cloudflare token, scoped to Email Routing destination addresses ONLY (Task 19). */
+  CF_EMAIL_API_TOKEN: string;
   PSI_API_KEY: string;
   /** Protects POST /admin/register. Unset ⇒ the route is disabled. */
   ADMIN_TOKEN?: string;
@@ -125,9 +141,37 @@ interface Services {
   negotiationStore: D1NegotiationStore;
   /** The full build/live-gate/deliver pipeline config for the queue consumer (Tasks 17/18). */
   pipeline: PipelineConfig;
+  /** Shared deps for the public relay routes (Task 19) — same relay/usage/audit/mailer the
+   *  pipeline uses, so live submissions and the build pipeline agree on one set of counters. */
+  relayDeps: RelayDeps;
   /** Tears down the per-invocation Playwright browser after each queue message. */
   closeBrowser: () => Promise<void>;
   app: Hono;
+}
+
+/**
+ * The real relay mailer (Task 19): builds a MIME message via mimetext and sends it through the
+ * Cloudflare `send_email` binding. `cloudflare:email` is Worker-only, so this — and its
+ * `EmailMessage` import — live here rather than in relay.ts, which stays Node-testable.
+ */
+function createBindingMailer(sendEmail: SendEmail, logger: Logger): RelayMailer {
+  return {
+    async send(msg): Promise<{ messageId: string | null }> {
+      const mime = createMimeMessage();
+      mime.setSender({ addr: msg.from });
+      mime.setRecipient(msg.to);
+      mime.setSubject(msg.subject);
+      mime.addMessage({ contentType: 'text/plain', data: msg.text });
+      const messageId = (mime.getHeader('Message-ID') as string | undefined) ?? null;
+      try {
+        await sendEmail.send(new EmailMessage(msg.from, msg.to, mime.asRaw()));
+      } catch (err) {
+        logger.warn({ err, to: msg.to }, 'mailer: send_email binding failed');
+        throw err;
+      }
+      return { messageId };
+    },
+  };
 }
 
 // One service graph per isolate — env bindings are stable for its lifetime.
@@ -209,20 +253,13 @@ function getServices(env: Env): Services {
   const psi = createPsiClient({ apiKey: env.PSI_API_KEY, logger });
   const moderation = createModerationClient({ apiKey: env.MODERATION_API_KEY });
 
-  // Task 19 replaces both stubs with the real Cloudflare Email Sending binding + Email Routing
-  // client. Until then: the mailer no-ops (null messageId), and destination verification always
-  // reports `false` so relay tools honestly stay parked awaiting_verification rather than
-  // silently claiming a working relay.
-  const mailer = {
-    send: async (): Promise<{ messageId: string | null }> => {
-      logger.warn('mailer not wired (Task 19); dropping relay send');
-      return { messageId: null };
-    },
-  };
-  const emailRouting = {
-    ensureDestination: async (): Promise<void> => {},
-    isDestinationVerified: async (): Promise<boolean> => false,
-  };
+  // The real Cloudflare Email Sending binding + Email Routing client (Task 19).
+  const mailer: RelayMailer = createBindingMailer(env.SEND_EMAIL, logger);
+  const emailRouting = createEmailRoutingClient({
+    accountId: env.CF_ACCOUNT_ID,
+    apiToken: env.CF_EMAIL_API_TOKEN,
+    logger,
+  });
 
   const deliverables = {
     put: async (key: string, value: string | Uint8Array, contentType: string): Promise<void> => {
@@ -259,6 +296,17 @@ function getServices(env: Env): Services {
     logger,
   };
 
+  // Shared with the public relay routes (Task 19) — same stores as the pipeline, so a live form
+  // submission and a build-time relay test agree on one set of rate counters and event history.
+  const relayDeps: RelayDeps = {
+    relay,
+    usage,
+    mailer,
+    audit,
+    fromAddress: env.RELAY_FROM_ADDRESS,
+    logger,
+  };
+
   const app = buildApp(env, {
     logger,
     client,
@@ -270,6 +318,8 @@ function getServices(env: Env): Services {
     gigs,
     botId,
     publicBaseUrl,
+    relayDeps,
+    buildLog,
   });
 
   services = {
@@ -293,6 +343,7 @@ function getServices(env: Env): Services {
     seen,
     negotiationStore,
     pipeline,
+    relayDeps,
     closeBrowser: pageFactory.closeAll,
     app,
   };
@@ -360,6 +411,8 @@ function buildApp(
     gigs: GigStore;
     botId: string;
     publicBaseUrl: string;
+    relayDeps: RelayDeps;
+    buildLog: BuildLogStore;
   },
 ): Hono {
   const {
@@ -373,6 +426,8 @@ function buildApp(
     gigs,
     botId,
     publicBaseUrl,
+    relayDeps,
+    buildLog,
   } = deps;
 
   const rawHandlers = buildHandlers({
@@ -445,6 +500,82 @@ function buildApp(
       headers['Content-Disposition'] = 'attachment; filename="source.zip"';
     }
     return new Response(object.body as ReadableStream, { headers });
+  });
+
+  // --- Form relay (Task 19; FR-8/FR-12) ---------------------------------------
+  // The tool's own page is the cross-origin caller here (its origin is
+  // `https://<slug>.<TOOL_HOST_SUFFIX>`, this route is on the bot origin), and its POST carries
+  // `content-type: application/json`, so the browser preflights with OPTIONS. CORS headers are
+  // attached to every POST response (including errors) so a rejected submission still resolves
+  // client-side instead of failing as an opaque CORS error.
+  app.options('/relay/:toolId', (c) => {
+    const origin = c.req.header('origin') ?? null;
+    return new Response(null, {
+      status: 204,
+      headers: relayCorsHeaders(origin, env.TOOL_HOST_SUFFIX),
+    });
+  });
+
+  app.post('/relay/:toolId', async (c) => {
+    const origin = c.req.header('origin') ?? null;
+    const corsHeaders = relayCorsHeaders(origin, env.TOOL_HOST_SUFFIX);
+    const toolId = c.req.param('toolId');
+    const token = c.req.query('t') ?? c.req.header('x-relay-token') ?? null;
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return new Response(JSON.stringify({ error: 'invalid JSON body' }), {
+        status: 400,
+        headers: { 'content-type': 'application/json', ...corsHeaders },
+      });
+    }
+
+    const result = await handleRelaySubmission(relayDeps, { toolId, token, body });
+    return new Response(JSON.stringify(result.body), {
+      status: result.status,
+      headers: { 'content-type': 'application/json', ...corsHeaders },
+    });
+  });
+
+  // Double opt-in confirmation link (FR-8): single-use — a second click 404s.
+  app.get('/relay/verify/:verifyToken', async (c) => {
+    const verifyToken = c.req.param('verifyToken');
+    const result = await handleRelayVerification(relayDeps, verifyToken);
+    return new Response(result.html, {
+      status: result.status,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    });
+  });
+
+  // --- Public build-log page (Task 19; FR-11) ---------------------------------
+  app.get('/p/:token', (c) => {
+    const token = c.req.param('token');
+    if (!DELIVERABLE_TOKEN_RE.test(token)) return c.json({ error: 'Not found' }, 404);
+    return c.html(buildLogPageHtml(token));
+  });
+
+  app.get('/p/:token/events', (c) => {
+    const token = c.req.param('token');
+    if (!DELIVERABLE_TOKEN_RE.test(token)) return c.json({ error: 'Not found' }, 404);
+    const lastEventIdHeader = c.req.header('last-event-id');
+    const lastEventId = lastEventIdHeader ? Number(lastEventIdHeader) || 0 : 0;
+    const stream = createLogEventStream({ store: buildLog, token, lastEventId });
+    return new Response(stream, {
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+    });
+  });
+
+  app.get('/p/:token/log.json', async (c) => {
+    const token = c.req.param('token');
+    if (!DELIVERABLE_TOKEN_RE.test(token)) return c.json({ error: 'Not found' }, 404);
+    const after = Number(c.req.query('after') ?? '0') || 0;
+    const result = await handleLogJson(buildLog, token, after);
+    return new Response(JSON.stringify(result.body), {
+      status: result.status,
+      headers: { 'content-type': 'application/json' },
+    });
   });
 
   // Report-a-tool form (public, no auth — abuse reports are inherently
