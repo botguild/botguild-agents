@@ -725,6 +725,18 @@ function editAbortMessage(buildLogUrl: string): string {
   ].join('\n');
 }
 
+function editRestoredMessage(buildLogUrl: string): string {
+  return [
+    'We tried to apply your edit, but the updated tool could not pass its live acceptance checks, ' +
+      'so we restored your tool to its previous working version. Your live tool is UNCHANGED and ' +
+      'still serving, and this edit did NOT consume one of your included edits.',
+    '',
+    `Full build log: ${buildLogUrl}`,
+    '',
+    'Try re-posting the edit with a more specific description of the change you want.',
+  ].join('\n');
+}
+
 function editDeliveredMessage(args: {
   name: string;
   liveUrl: string;
@@ -772,9 +784,11 @@ async function promoteEdit(
     slots: SlotValues;
     script: string;
     checkpoint: BuildCheckpoint;
+    /** For rendering the prior-good script on an F2 restore (same ctx the staged short-circuit uses). */
+    relayCtx: { toolId: string; token: string } | null;
   },
 ): Promise<void> {
-  const { job, tool, def, request, requestId, goldens, slots, script, checkpoint } = args;
+  const { job, tool, def, request, requestId, goldens, slots, script, checkpoint, relayCtx } = args;
   const now = cfg.now ?? ((): Date => new Date());
   const sleep = cfg.sleep ?? defaultSleep;
   const scope = job.contractId;
@@ -817,6 +831,13 @@ async function promoteEdit(
   // hostedUntil is unchanged — an edit never extends (or resets) the paid hosting window.
   const hostedUntil =
     tool.hostedUntil ?? new Date(now().getTime() + HOSTING_WINDOW_DAYS * 86_400_000).toISOString();
+
+  // F2 restore-last-good: capture the tool's PRIOR-good live slots BEFORE the promote overwrites
+  // them, and persist so a retry can still restore. Guarded by `??` — on a promote retry `tool.slots`
+  // is already the NEW slots, so only the FIRST capture (the original live slots) is authoritative.
+  checkpoint.priorSlots = checkpoint.priorSlots ?? tool.slots;
+  await cfg.jobs.saveCheckpoint(job.jobKey, checkpoint);
+
   await cfg.tools.promote(tool.toolId, { slots, hostedUntil });
   await cfg.buildLog.append(token, 'promote', `edit promoted ${tool.slug} to live`, {
     slug: tool.slug,
@@ -827,6 +848,51 @@ async function promoteEdit(
     result: 'live',
     detail: { slug: tool.slug, edit: request.instruction },
   });
+
+  // A LIVE-gate failure on an edit must NOT leave the gate-failing version serving (the tool was
+  // ALREADY live before this edit). Restore the prior-good render — rendered exactly as the staged
+  // short-circuit does — make the DB slots consistent with what is now served, then TERMINALLY abort
+  // the edit: release the reserved quota, tell the buyer, and mark the job aborted. No re-throw, so
+  // the queue does not retry and the staged short-circuit does not re-promote the failing script. A
+  // PSI *outage* (couldn't measure) is NOT a failure — it parks/retries below, unchanged.
+  const restoreLastGood = async (reason: string): Promise<void> => {
+    const priorSlots = checkpoint.priorSlots;
+    if (!priorSlots) {
+      // Captured before the first promote, so this is unreachable in practice; if it ever happens
+      // there is nothing to restore to — surface as transient so the queue retries rather than
+      // silently leaving the gate-failing version live.
+      throw new Error(`edit restore: no prior slots captured for ${tool.toolId} (${reason})`);
+    }
+    const ctx: RenderContext = {
+      slug: tool.slug,
+      toolUrl: liveUrl,
+      publicBaseUrl: cfg.publicBaseUrl,
+      relay: relayCtx,
+    };
+    const priorFiles = def.render(priorSlots, ctx);
+    const priorScript = buildToolWorkerScript(
+      priorFiles,
+      cspFor(ctx, { frameable: def.id === 'widget' }),
+    );
+    await cfg.deployer.putScript(tool.slug, priorScript);
+    await cfg.tools.promote(tool.toolId, { slots: priorSlots, hostedUntil });
+    await releaseEditQuota(cfg, request);
+    await cfg.edits.setStatus(requestId, 'failed');
+    await cfg.client.sendMessage(scope, editRestoredMessage(buildLogUrl));
+    await cfg.buildLog.append(
+      token,
+      'restore',
+      'edit failed a live gate; restored the previous working version',
+      { reason },
+    );
+    await cfg.audit.record({
+      scope,
+      gate: 'edit',
+      result: 'restored',
+      detail: { toolId: tool.toolId, reason },
+    });
+    await cfg.jobs.markDelivered(job.jobKey, 'aborted');
+  };
 
   // ---- Live gates (goldens + census + PSI), same suite as a build ------------
   const liveShots = deliverablesAsScreenshotStore(cfg.deliverables);
@@ -843,7 +909,7 @@ async function promoteEdit(
       failures,
     });
     await cfg.audit.record({ scope, gate: 'live-assert', result: 'fail', detail: { failures } });
-    throw new Error(`edit live goldens failed on ${liveUrl}`);
+    return restoreLastGood('live-goldens');
   }
   await cfg.buildLog.append(token, 'live-assert', 'all goldens passed on the live url');
   await cfg.audit.record({ scope, gate: 'live-assert', result: 'pass' });
@@ -864,7 +930,7 @@ async function promoteEdit(
       result: 'fail',
       detail: { missing },
     });
-    throw new Error(`edit element-contract: missing ${missing.join(', ')}`);
+    return restoreLastGood('element-contract');
   }
   await cfg.audit.record({ scope, gate: 'element-contract', result: 'pass' });
 
@@ -891,7 +957,7 @@ async function promoteEdit(
       result: 'below-threshold',
       detail: { performance, accessibility },
     });
-    throw new Error(`edit PSI below thresholds (perf ${performance}, a11y ${accessibility})`);
+    return restoreLastGood('psi-below-threshold');
   }
   await cfg.audit.record({
     scope,
@@ -1064,6 +1130,7 @@ export async function processEditJob(
       slots: checkpoint.slotValues,
       script,
       checkpoint,
+      relayCtx,
     });
     return;
   }
@@ -1139,6 +1206,7 @@ export async function processEditJob(
       slots: loopResult.slots,
       script: loopResult.script,
       checkpoint,
+      relayCtx,
     });
     return;
   }

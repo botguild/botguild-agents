@@ -61,6 +61,11 @@ export interface BuildCheckpoint {
    *  (no double spend). `null` once assertions have run for that round (a failed round regenerates
    *  on repair). Older checkpoints predate the field — read `undefined` as `null`. */
   bankedRound: number | null;
+  /** Edit-path only (F2 restore-last-good): the tool's prior-good live slots, captured BEFORE the
+   *  first edit `promote` overwrites them. A live-gate FAILURE on an edit restores the tool to this
+   *  version. Captured once (guarded by `??`) because on a promote retry `tool.slots` is already the
+   *  NEW slots — so the persisted value is the only reliable source of the last-good render. */
+  priorSlots?: SlotValues | null;
 }
 
 export interface JobRow {

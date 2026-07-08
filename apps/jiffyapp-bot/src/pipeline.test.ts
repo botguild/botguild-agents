@@ -1546,3 +1546,127 @@ test('edit re-entry: a promote-time throw resumes via the staged short-circuit w
   assert.deepEqual((await h.stores.tools.get(toolId))?.goldens, UPDATED_CALC_GOLDENS);
   assert.equal((await h.stores.edits.get(requestId))?.status, 'done');
 });
+
+// =============================================================================
+// F2 — edit restore-last-good on a live-gate failure: an edit that promotes but then fails a
+// LIVE gate must not leave the gate-failing version serving. Restore the prior-good render,
+// abort the edit terminally (no throw/retry), release quota, and tell the buyer.
+// =============================================================================
+
+// Prior-good slots distinct from the codegen'd NEW slots (calcSlots()), so a restore is provable.
+function priorGoodSlots(): SlotValues {
+  return { ...calcSlots(), accentHex: '#123456' };
+}
+
+test('edit live goldens fail post-promote: restores last-good, aborts, releases quota, no throw (F2)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00')); // passes staging (and would pass live)
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const prior = priorGoodSlots();
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: prior,
+    instruction: 'change the headline',
+  });
+
+  // Swap the page to a FAILING one on the reachability probe — it fires after staging-green and
+  // before the live goldens — so staging passes but the live 'computes total' golden fails.
+  h.cfg.fetchImpl = (async () => {
+    h.setPage(calcLivePage('$0.00'));
+    return new Response('', { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await processJobMessage(h.cfg, msg); // TERMINAL restore — no throw
+
+  const tool = await h.stores.tools.get(toolId);
+  assert.equal(tool?.status, 'live');
+  // Restored to the prior-good slots (DB) + the goldens are unchanged (the edit did not take).
+  assert.deepEqual(tool?.slots, prior);
+  assert.deepEqual(tool?.goldens, CALC_GOLDENS);
+  // The LAST putScript on the live slug is the restore (prior script), not the gate-failing one.
+  const livePuts = h.deployerPuts.filter((p) => p.slug === tool!.slug);
+  assert.ok(livePuts.length >= 2, 'expected a failing promote then a restore putScript');
+  // Quota released, request failed, job aborted, buyer told it was restored.
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  assert.match(h.messages[h.messages.length - 1].content, /previous working version|restored/i);
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(audits.some((a) => a.gate === 'edit' && a.result === 'restored'));
+});
+
+test('edit live PSI below threshold: restores last-good, aborts (F2)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  h.psiResult.value = { ok: true, performance: 96, accessibility: 85 }; // below the a11y floor
+  const prior = priorGoodSlots();
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: prior,
+    instruction: 'change the headline',
+  });
+
+  await processJobMessage(h.cfg, msg); // TERMINAL restore — no throw
+
+  const tool = await h.stores.tools.get(toolId);
+  assert.equal(tool?.status, 'live');
+  assert.deepEqual(tool?.slots, prior); // restored to prior-good
+  assert.deepEqual(tool?.goldens, CALC_GOLDENS);
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(audits.some((a) => a.gate === 'edit' && a.result === 'restored'));
+});
+
+test('edit PSI outage then below-threshold on retry: restores from persisted priorSlots, not the overwritten tool.slots (F2)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.recompileResult.value = { ok: true, set: UPDATED_CALC_GOLDENS, costUsd: 0.05 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  h.psiResult.value = { ok: false, error: 'psi down' }; // first pass: outage → park
+  const prior = priorGoodSlots();
+  const { msg, jobKey, toolId, contractId, requestId } = await h.seedEditJob({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+    slots: prior,
+    instruction: 'change the headline',
+  });
+
+  // First pass: promote runs (NEW slots go live), PSI outage parks psi_outage (resumable).
+  await processJobMessage(h.cfg, msg);
+  let job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'parked');
+  assert.equal(job?.parkReason, 'psi_outage');
+  // The prior-good slots were captured before the promote and persisted on the checkpoint.
+  assert.deepEqual(job?.checkpoint?.priorSlots, prior);
+  // The DB live slots are now the NEW slots — promote overwrote them.
+  assert.deepEqual((await h.stores.tools.get(toolId))?.slots, calcSlots());
+
+  // Retry (staged short-circuit): PSI now below-threshold → restore. Recompile MUST NOT re-run.
+  h.recompileResult.value = { ok: false, errors: ['should not be called'], costUsd: 0 };
+  h.psiResult.value = { ok: true, performance: 96, accessibility: 85 };
+  await h.stores.jobs.unpark(jobKey);
+  await processJobMessage(h.cfg, msg); // TERMINAL restore — no throw
+
+  const tool = await h.stores.tools.get(toolId);
+  assert.equal(tool?.status, 'live');
+  // Restored to the PERSISTED priorSlots, NOT the overwritten tool.slots (which were calcSlots()).
+  assert.deepEqual(tool?.slots, prior);
+  assert.equal(h.recompileCalls.length, 1); // no re-recompile (staged short-circuit)
+  assert.equal(h.codegenCalls.length, 1); // no regeneration
+  assert.equal((await h.stores.edits.get(requestId))?.status, 'failed');
+  assert.equal(await h.stores.usage.getUsed(`edit:${toolId}`, contractId), 0);
+  job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+});
