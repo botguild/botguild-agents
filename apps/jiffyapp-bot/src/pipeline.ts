@@ -272,6 +272,12 @@ export async function fetchImageAsset(
  * only THIS function's own active time — the single controlled exit (a PSI outage park) persists
  * it. Every other failure path THROWS (transient): the queue retries the whole message and the
  * `checkpoint.staged` short-circuit in `runBuildJob` re-enters here cheaply without regenerating.
+ *
+ * That retry re-runs stage (d) and stage 9 from scratch, so both real-world side effects there are
+ * made idempotent: the relay test send is skipped (and its prior messageId reused) if a `'test'`
+ * relay event was already recorded, and a `deliverMilestone` throw is followed by a contract
+ * re-fetch — if the platform already accepted a prior attempt (milestone now delivered/accepted),
+ * we continue to the tail steps instead of dead-lettering an already-delivered job.
  */
 export async function promoteAndDeliver(
   cfg: PipelineConfig,
@@ -431,32 +437,53 @@ export async function promoteAndDeliver(
   });
 
   // (d) relay-family: THE one deliberate real delivery — a test submission proving the relay works.
+  // Exactly-once across a promote retry: a prior invocation may already have sent this and then
+  // thrown on a LATER step (a live gate, packaging, deliverMilestone) — the queue retries the
+  // whole message and we re-enter here via the staged short-circuit. Check the relay_events table
+  // for a prior 'test' send before mailing the buyer again.
   let relayProof: { messageId: string | null } | undefined;
   if (isRelayTemplate(def, brief)) {
     const recipient = brief.notifyEmail as string;
-    const sent = await cfg.mailer.send({
-      to: recipient,
-      from: cfg.relayFromAddress,
-      subject: 'JiffyApp delivery verification — test submission',
-      text:
-        `This is an automated test submission from JiffyApp, sent once at delivery to prove your ` +
-        `form relay delivers to ${recipient}. It is the FR-8 relay-delivery proof recorded in your ` +
-        `evidence report — no action needed.\n`,
-    });
-    await cfg.relay.recordEvent({
-      toolId: tool.toolId,
-      kind: 'test',
-      status: 'sent',
-      messageId: sent.messageId ?? undefined,
-    });
-    relayProof = { messageId: sent.messageId };
-    await cfg.buildLog.append(token, 'relay', 'sent the live relay test submission');
-    await cfg.audit.record({
-      scope,
-      gate: 'relay',
-      result: 'sent',
-      detail: { messageId: sent.messageId },
-    });
+    const priorTest = await cfg.relay.latestEvent(tool.toolId, 'test');
+    if (priorTest) {
+      relayProof = { messageId: priorTest.messageId };
+      await cfg.buildLog.append(
+        token,
+        'relay',
+        'reusing prior live relay test submission (promote retry); not re-sending',
+        { messageId: priorTest.messageId },
+      );
+      await cfg.audit.record({
+        scope,
+        gate: 'relay',
+        result: 'reused',
+        detail: { messageId: priorTest.messageId },
+      });
+    } else {
+      const sent = await cfg.mailer.send({
+        to: recipient,
+        from: cfg.relayFromAddress,
+        subject: 'JiffyApp delivery verification — test submission',
+        text:
+          `This is an automated test submission from JiffyApp, sent once at delivery to prove your ` +
+          `form relay delivers to ${recipient}. It is the FR-8 relay-delivery proof recorded in your ` +
+          `evidence report — no action needed.\n`,
+      });
+      await cfg.relay.recordEvent({
+        toolId: tool.toolId,
+        kind: 'test',
+        status: 'sent',
+        messageId: sent.messageId ?? undefined,
+      });
+      relayProof = { messageId: sent.messageId };
+      await cfg.buildLog.append(token, 'relay', 'sent the live relay test submission');
+      await cfg.audit.record({
+        scope,
+        gate: 'relay',
+        result: 'sent',
+        detail: { messageId: sent.messageId },
+      });
+    }
   }
 
   // ---- Stage 9: package + deliver --------------------------------------------
@@ -527,19 +554,50 @@ export async function promoteAndDeliver(
   const funded = contract.milestones.find((m) => m.status === 'funded');
   if (!funded) throw new Error(`promote: no funded milestone on contract ${job.contractId}`);
 
-  await cfg.client.deliverMilestone(job.contractId, funded.id, {
-    note: buildDeliveryNote({
-      name: brief.name,
-      liveUrl,
-      reportUrl,
-      zipUrl,
-      buildLogUrl,
-      toolId: tool.toolId,
-      hostingPriceUsd: HOSTING_PRICE_USD,
-      goldenCount: goldens.goldens.length,
-    }),
-    attachments: [liveUrl, reportUrl, zipUrl, buildLogUrl],
-  });
+  try {
+    await cfg.client.deliverMilestone(job.contractId, funded.id, {
+      note: buildDeliveryNote({
+        name: brief.name,
+        liveUrl,
+        reportUrl,
+        zipUrl,
+        buildLogUrl,
+        toolId: tool.toolId,
+        hostingPriceUsd: HOSTING_PRICE_USD,
+        goldenCount: goldens.goldens.length,
+      }),
+      attachments: [liveUrl, reportUrl, zipUrl, buildLogUrl],
+    });
+  } catch (deliverErr) {
+    // Idempotency across a promote retry: this deliverMilestone call may have already reached
+    // and been accepted by the platform on a PRIOR attempt, with the failure actually coming
+    // from a tail step after it (setGoldens/markDelivered/a local write). Re-fetch the contract
+    // to check — if the platform already marked this milestone delivered/accepted, treat this
+    // attempt as done rather than dead-lettering an otherwise successfully-delivered job.
+    let refetched: Contract;
+    try {
+      refetched = await cfg.client.getContract(job.contractId);
+    } catch {
+      throw deliverErr; // can't confirm either way — surface the ORIGINAL deliver error
+    }
+    const refunded = refetched.milestones.find((m) => m.id === funded.id);
+    if (refunded && (refunded.status === 'delivered' || refunded.status === 'accepted')) {
+      await cfg.buildLog.append(
+        token,
+        'delivery',
+        'deliverMilestone failed locally, but the platform already accepted a prior attempt',
+        { milestoneId: funded.id, status: refunded.status },
+      );
+      await cfg.audit.record({
+        scope,
+        gate: 'delivery',
+        result: 'delivery-already-accepted',
+        detail: { toolId: tool.toolId, milestoneId: funded.id, status: refunded.status },
+      });
+    } else {
+      throw deliverErr; // genuine failure — the queue retries the whole message
+    }
+  }
 
   await cfg.tools.setGoldens(tool.toolId, goldens);
   await cfg.jobs.markDelivered(job.jobKey, 'delivered');

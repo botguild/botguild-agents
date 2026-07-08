@@ -255,6 +255,14 @@ export interface Harness {
     milestoneId: string;
     payload: { note: string; attachments?: string[] };
   }>;
+  /** Queue of errors the fake `deliverMilestone` throws, one per call, in order; once drained it
+   *  succeeds (a no-op beyond recording the call — it does NOT touch the fake contract's
+   *  milestone status, so a test wanting a subsequent `getContract` to see 'delivered' scripts
+   *  that itself, e.g. by monkeypatching `cfg.client.getContract` for the call(s) that follow). */
+  deliverMilestoneQueue: Error[];
+  /** The fake contracts keyed by contractId — exposed so a test can seed/inspect milestone
+   *  status directly. */
+  contracts: Map<string, Contract>;
   /** Live-reachability probe statuses, consumed in order; defaults to 200 when the queue is empty. */
   fetchStatuses: number[];
   fetchCalls: string[];
@@ -352,6 +360,7 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
   const gigsById = new Map<string, Gig>();
   const messages: Array<{ contractId: string; content: string }> = [];
   const deliverMilestoneCalls: Harness['deliverMilestoneCalls'] = [];
+  const deliverMilestoneQueue: Harness['deliverMilestoneQueue'] = [];
   const client: PipelineClient = {
     async getContract(contractId: string): Promise<Contract> {
       const c = contracts.get(contractId);
@@ -372,6 +381,8 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
       payload: { note: string; attachments?: string[] },
     ): Promise<void> {
       deliverMilestoneCalls.push({ contractId, milestoneId, payload });
+      const err = deliverMilestoneQueue.shift();
+      if (err) throw err;
     },
   };
 
@@ -522,6 +533,8 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     verifiedDestinations,
     deliverables,
     deliverMilestoneCalls,
+    deliverMilestoneQueue,
+    contracts,
     fetchStatuses,
     fetchCalls,
     psiResult,
@@ -1105,4 +1118,133 @@ test('staged short-circuit: a promote-time throw re-enters at promote, skipping 
   const job = await h.stores.jobs.get(jobKey);
   assert.equal(job?.outcome, 'delivered');
   assert.equal(h.deliverMilestoneCalls.length, 1);
+});
+
+// =============================================================================
+// Delivery idempotency across a promote retry — a throw AFTER the relay test send or AFTER a
+// platform-accepted deliverMilestone must not re-send a real email or dead-letter an already-
+// delivered job.
+// =============================================================================
+
+test('relay test send is exactly-once across a promote retry', async () => {
+  const h = await makeHarness();
+  const { msg, token, contractId } = await h.seedBuildGig({
+    templateId: 'form',
+    brief: FORM_BRIEF,
+    goldens: FORM_GOLDENS,
+  });
+
+  // First invocation parks awaiting double opt-in (and sends the verification email).
+  await processJobMessage(h.cfg, msg);
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const relayRow = await h.stores.relay.get(tool!.toolId);
+  await h.stores.relay.verifyByToken(relayRow!.verifyToken);
+  h.verifiedDestinations.add('owner@example.com');
+  h.setPage(formLivePage());
+  h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
+  await h.stores.jobs.unpark(msg.jobKey);
+
+  // First promoteAndDeliver pass: the relay test send succeeds, but deliverMilestone throws — a
+  // genuine failure (the refetched contract still shows the milestone 'funded') — so the queue
+  // retries the whole message.
+  h.deliverMilestoneQueue.push(new Error('platform blip'));
+  await assert.rejects(processJobMessage(h.cfg, msg), /platform blip/);
+
+  const afterFirstPass = h.mailerSent.filter((m) => /delivery verification/i.test(m.subject));
+  assert.equal(afterFirstPass.length, 1);
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+  assert.equal((await h.stores.jobs.get(msg.jobKey))?.checkpoint?.staged, true);
+
+  // Retry (the staged short-circuit re-enters at promote): deliverMilestone now succeeds, but the
+  // relay test send must NOT be re-sent — it reuses the recorded messageId instead.
+  await processJobMessage(h.cfg, msg); // completes
+
+  const testSubmissions = h.mailerSent.filter((m) => /delivery verification/i.test(m.subject));
+  assert.equal(testSubmissions.length, 1); // still exactly one across BOTH promote attempts
+  assert.equal(h.deliverMilestoneCalls.length, 2); // the failed attempt + the succeeding retry
+
+  const report = JSON.parse(String(h.deliverables.get(`${token}/report.json`)!.value));
+  assert.ok(report.liveGates.relayProof);
+  assert.equal(report.liveGates.relayProof.pass, true);
+  // The reused messageId in the final report is the ONE 'test' event ever recorded — proving the
+  // retry's relayProof came from the reuse path, not a second send.
+  const relayEvent = await h.stores.relay.latestEvent(tool!.toolId, 'test');
+  assert.equal(report.liveGates.relayProof.messageId, relayEvent?.messageId);
+
+  const job = await h.stores.jobs.get(msg.jobKey);
+  assert.equal(job?.outcome, 'delivered');
+
+  const relayAudits = (await h.stores.audit.listByScope(contractId)).filter(
+    (a) => a.gate === 'relay',
+  );
+  assert.ok(relayAudits.some((a) => a.result === 'sent'));
+  assert.ok(relayAudits.some((a) => a.result === 'reused'));
+});
+
+test('deliverMilestone retry after platform-side success completes the job', async () => {
+  const h = await makeHarness();
+  const { msg, contractId } = await h.seedBuildGig({
+    templateId: 'form',
+    brief: FORM_BRIEF,
+    goldens: FORM_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg); // parks awaiting double opt-in
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const relayRow = await h.stores.relay.get(tool!.toolId);
+  await h.stores.relay.verifyByToken(relayRow!.verifyToken);
+  h.verifiedDestinations.add('owner@example.com');
+  h.setPage(formLivePage());
+  h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
+  await h.stores.jobs.unpark(msg.jobKey);
+
+  // Simulate a local D1 write failing AFTER the platform accepted deliverMilestone: markDelivered
+  // throws exactly once (monkeypatched on the shared store instance underlying cfg.jobs).
+  const originalMarkDelivered = h.cfg.jobs.markDelivered.bind(h.cfg.jobs);
+  let markDeliveredCalls = 0;
+  h.cfg.jobs.markDelivered = async (jobKey, outcome) => {
+    markDeliveredCalls += 1;
+    if (markDeliveredCalls === 1) throw new Error('d1 write failed (simulated)');
+    return originalMarkDelivered(jobKey, outcome);
+  };
+
+  // getContract is called once per invocation at Stage 2 (to locate the funded milestone) plus
+  // once more by the idempotency guard whenever deliverMilestone throws. Calls 1 and 2 (Run 1's
+  // stage-2 fetch, and Run 2's stage-2 fetch) must still show the milestone 'funded' — otherwise
+  // the pipeline never gets far enough to attempt delivery at all. Only call 3 — Run 2's guard
+  // refetch, AFTER deliverMilestone's second (throwing) call — reflects the platform having
+  // actually accepted Run 1's delivery, i.e. 'delivered'.
+  let getContractCalls = 0;
+  const originalGetContract = h.cfg.client.getContract.bind(h.cfg.client);
+  h.cfg.client.getContract = async (id: string) => {
+    getContractCalls += 1;
+    const c = await originalGetContract(id);
+    if (getContractCalls < 3) return c;
+    return {
+      ...c,
+      milestones: c.milestones.map((m) => (m.id === 'm1' ? { ...m, status: 'delivered' } : m)),
+    };
+  };
+
+  // First run: deliverMilestone SUCCEEDS (the platform accepts it), but the tail markDelivered
+  // write throws — the whole message is retried by the queue.
+  await assert.rejects(processJobMessage(h.cfg, msg), /d1 write failed/);
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+
+  // Second run (retry, via the staged short-circuit): deliverMilestone is attempted again — the
+  // platform rejects re-delivery of an already-delivered milestone — but the guard's refetch shows
+  // the milestone 'delivered', so the pipeline treats it as already-accepted and completes through
+  // to markDelivered rather than dead-lettering an otherwise successfully-delivered job.
+  h.deliverMilestoneQueue.push(new Error('milestone already delivered'));
+  await processJobMessage(h.cfg, msg); // completes
+
+  assert.equal(h.deliverMilestoneCalls.length, 2);
+  assert.equal(getContractCalls, 3);
+  const job = await h.stores.jobs.get(msg.jobKey);
+  assert.equal(job?.outcome, 'delivered');
+
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(
+    audits.some((a) => a.gate === 'delivery' && a.result === 'delivery-already-accepted'),
+  );
 });
