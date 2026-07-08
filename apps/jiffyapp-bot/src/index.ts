@@ -61,6 +61,12 @@ import { createGigStore, type GigStore } from './gigStore.js';
 import { createGoldenCompiler, type GoldenCompiler } from './goldenCompiler.js';
 import { createJiffyProposer, pricingCalcWithClassifier } from './proposer.js';
 import { buildHandlers, wrapContractHandlers } from './handlers.js';
+import { createCodegen } from './codegen.js';
+import { createToolDeployer } from './deploy.js';
+import { createPsiClient } from './psi.js';
+import { createModerationClient } from './moderation.js';
+import { createPlaywrightLauncher, createPlaywrightPageFactory } from './playwrightDriver.js';
+import { processJobMessage, type PipelineConfig } from './pipeline.js';
 import type { JobMessage } from './types.js';
 
 // @cloudflare/workers-types (pinned in package.json) already declares `SendEmail`
@@ -117,6 +123,10 @@ interface Services {
   jiffyProposer: ReturnType<typeof createJiffyProposer>;
   seen: SeenStore;
   negotiationStore: D1NegotiationStore;
+  /** The full build/live-gate/deliver pipeline config for the queue consumer (Tasks 17/18). */
+  pipeline: PipelineConfig;
+  /** Tears down the per-invocation Playwright browser after each queue message. */
+  closeBrowser: () => Promise<void>;
   app: Hono;
 }
 
@@ -185,6 +195,70 @@ function getServices(env: Env): Services {
   const negotiationStore = createD1NegotiationStore(env.DB);
 
   const publicBaseUrl = env.WEBHOOK_BASE_URL.replace(/\/$/, '');
+
+  // --- Build/live-gate/deliver pipeline (Tasks 17/18) -----------------------
+  const codegen = createCodegen({ ai: env.AI, anthropicApiKey: env.ANTHROPIC_API_KEY, logger });
+  const deployer = createToolDeployer({
+    accountId: env.CF_ACCOUNT_ID,
+    namespace: env.DISPATCH_NAMESPACE,
+    apiToken: env.CF_API_TOKEN,
+    dispatch: env.DISPATCH,
+    logger,
+  });
+  const pageFactory = createPlaywrightPageFactory(createPlaywrightLauncher(env.BROWSER));
+  const psi = createPsiClient({ apiKey: env.PSI_API_KEY, logger });
+  const moderation = createModerationClient({ apiKey: env.MODERATION_API_KEY });
+
+  // Task 19 replaces both stubs with the real Cloudflare Email Sending binding + Email Routing
+  // client. Until then: the mailer no-ops (null messageId), and destination verification always
+  // reports `false` so relay tools honestly stay parked awaiting_verification rather than
+  // silently claiming a working relay.
+  const mailer = {
+    send: async (): Promise<{ messageId: string | null }> => {
+      logger.warn('mailer not wired (Task 19); dropping relay send');
+      return { messageId: null };
+    },
+  };
+  const emailRouting = {
+    ensureDestination: async (): Promise<void> => {},
+    isDestinationVerified: async (): Promise<boolean> => false,
+  };
+
+  const deliverables = {
+    put: async (key: string, value: string | Uint8Array, contentType: string): Promise<void> => {
+      await env.DELIVERABLES.put(key, value, { httpMetadata: { contentType } });
+    },
+  };
+
+  const pipeline: PipelineConfig = {
+    jobs,
+    tools,
+    gigs,
+    cycles,
+    usage,
+    edits: editRequests,
+    relay,
+    buildLog,
+    audit,
+    client,
+    codegen,
+    deployer,
+    compiler: goldenCompiler,
+    emailRouting,
+    openPage: pageFactory.openPage,
+    closeBrowser: pageFactory.closeAll,
+    psi,
+    moderation,
+    mailer,
+    deliverables,
+    queue: env.JOBS,
+    fetchImpl: globalThis.fetch,
+    publicBaseUrl,
+    toolHostSuffix: env.TOOL_HOST_SUFFIX,
+    relayFromAddress: env.RELAY_FROM_ADDRESS,
+    logger,
+  };
+
   const app = buildApp(env, {
     logger,
     client,
@@ -218,6 +292,8 @@ function getServices(env: Env): Services {
     jiffyProposer,
     seen,
     negotiationStore,
+    pipeline,
+    closeBrowser: pageFactory.closeAll,
     app,
   };
   return services;
@@ -486,7 +562,6 @@ async function queue(
   // idempotency claim + checkpoints make replay safe.
   if (batch.queue.endsWith('-dlq')) {
     for (const message of batch.messages) {
-      await recordDlqEvent(env.DB, batch.queue, message.body);
       s.logger.error(
         {
           queue: batch.queue,
@@ -496,22 +571,28 @@ async function queue(
         },
         'DEAD-LETTERED JOB — operator action required (see README runbook)',
       );
+      await recordDlqEvent(env.DB, batch.queue, message.body);
       message.ack();
     }
     return;
   }
 
-  // The build pipeline consumer isn't wired yet (Tasks 17/18). Ack rather than
-  // retry — the job stays `claimed` in D1 with no checkpoint, so once the
-  // pipeline lands, the next milestone.funded redelivery (or a cron re-enqueue)
-  // safely re-sends it; retrying here would just loop until it dead-lettered
-  // anyway, with no consumer ever having run.
+  // Build/cycle/edit jobs. A controlled exit inside the pipeline (park,
+  // re-enqueue continuation, hand-off to promote/abort) resolves cleanly and we
+  // ack; a THROWN error is a transient failure — retry so the queue redelivers,
+  // where the idempotency claim + checkpoints (incl. the banked-round + staged
+  // short-circuit) make the retry cheap and non-double-spending. The per-job
+  // Playwright browser is torn down after every message, success or failure.
   for (const message of batch.messages) {
-    s.logger.warn(
-      { queue: batch.queue, body: message.body, messageId: message.id },
-      'pipeline not yet wired (Task 17/18); acking without processing',
-    );
-    message.ack();
+    try {
+      await processJobMessage(s.pipeline, message.body);
+      message.ack();
+    } catch (err) {
+      s.logger.error({ err, body: message.body, messageId: message.id }, 'job failed — retrying');
+      message.retry();
+    } finally {
+      await s.closeBrowser().catch(() => {});
+    }
   }
 }
 

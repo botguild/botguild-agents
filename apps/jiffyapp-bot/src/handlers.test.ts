@@ -7,13 +7,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
-import { createConsoleLogger, type WebhookEvent, type WebhookHandler } from '@botguild/agent-core-workers';
+import {
+  createConsoleLogger,
+  type WebhookEvent,
+  type WebhookHandler,
+} from '@botguild/agent-core-workers';
 import { DEFAULT_DISPUTE_RESPONSE, type AgentMcpClient } from '@botguild/agent-core';
 import type { D1Like } from '@botguild/agent-core-workers';
 import { applyMigrations } from './testSupport.js';
 import { createGigStore } from './gigStore.js';
 import { createCycleStore, createJobStore, createToolStore, jobKeyFor, sha256Hex } from './jobs.js';
-import { buildHandlers, OWNERSHIP_FILTERED_EVENTS, wrapContractHandlers, type HandlerDeps, type QueueLike } from './handlers.js';
+import {
+  buildHandlers,
+  OWNERSHIP_FILTERED_EVENTS,
+  wrapContractHandlers,
+  type HandlerDeps,
+  type QueueLike,
+} from './handlers.js';
 import type { JobMessage } from './types.js';
 
 const logger = createConsoleLogger({ service: 'test', level: 'silent' });
@@ -171,6 +181,7 @@ test('milestone.funded: redelivery after a checkpoint is saved does not re-send'
     activeMs: 1000,
     staged: false,
     lastFailures: [],
+    bankedRound: null,
   });
 
   await h.handlers['milestone.funded']!(fundedEvent('c1'));

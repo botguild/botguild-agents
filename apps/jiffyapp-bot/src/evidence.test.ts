@@ -45,6 +45,7 @@ function checkpoint(overrides: Partial<BuildCheckpoint> = {}): BuildCheckpoint {
     activeMs: 60_000,
     staged: true,
     lastFailures: [],
+    bankedRound: null,
     ...overrides,
   };
 }

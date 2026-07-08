@@ -56,6 +56,11 @@ export interface BuildCheckpoint {
   activeMs: number;
   staged: boolean;
   lastFailures: string[];
+  /** The round whose codegen slots + spend are already banked (persisted BEFORE render/deploy),
+   *  so a queue retry after a transient stage/deploy throw re-uses them instead of re-generating
+   *  (no double spend). `null` once assertions have run for that round (a failed round regenerates
+   *  on repair). Older checkpoints predate the field — read `undefined` as `null`. */
+  bankedRound: number | null;
 }
 
 export interface JobRow {

@@ -1,10 +1,10 @@
-// Build pipeline (Task 17): the codegen → stage → assert → repair loop driven to GREEN
-// STAGING, exercised end-to-end over REAL D1-backed stores (in-memory sqlite, migrations
-// applied) with every external effect behind a recording/scripted fake. `makeHarness()` is
-// exported for Task 18 to extend (it adds the promote/live-gates/deliver cases on top of the
-// same seams). The Task-18 stubs `promoteAndDeliver`/`abortJob` throw `not implemented`, so
-// this task's happy path deliberately ends by catching `not implemented: promote`, and the
-// cap/deadline paths by catching `not implemented: abort`.
+// Build pipeline (Tasks 17/18): the full codegen → stage → assert → repair loop through
+// GREEN STAGING, then promote → live gates → package → deliver (and the abort leg), exercised
+// end-to-end over REAL D1-backed stores (in-memory sqlite, migrations applied) with every
+// external effect behind a recording/scripted fake. `makeHarness()` is exported (Task 18
+// extended it with psi/fetch/sleep/deliverMilestone scripting) so later tasks can reuse the
+// same seams. Happy paths run all the way to a captured `deliverMilestone`; cap/deadline paths
+// run to a completed `abortJob`.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -34,7 +34,12 @@ import type { CodegenArgs, CodegenResult } from './codegen.js';
 import type { ModerationOutcome } from './moderation.js';
 import type { PsiResult } from './psi.js';
 import type { GoldenSet, JiffyBrief, JobMessage, SlotValues, TemplateId } from './types.js';
-import { processJobMessage, type PipelineClient, type PipelineConfig } from './pipeline.js';
+import {
+  processJobMessage,
+  promoteAndDeliver,
+  type PipelineClient,
+  type PipelineConfig,
+} from './pipeline.js';
 
 const logger = createConsoleLogger({ service: 'test', level: 'silent' });
 const BOT_ID = 'bot-jiffyapp';
@@ -73,7 +78,11 @@ const FORM_BRIEF: JiffyBrief = {
 const FORM_GOLDENS: GoldenSet = {
   goldens: [
     { title: 'loads', steps: [], expect: [{ titleEquals: 'Get in touch' }] },
-    { title: 'success hidden on load', steps: [], expect: [{ testid: 'success-msg', hidden: true }] },
+    {
+      title: 'success hidden on load',
+      steps: [],
+      expect: [{ testid: 'success-msg', hidden: true }],
+    },
   ],
 };
 
@@ -108,8 +117,36 @@ function calcPage(resultText: string): PageState {
     elements: { result: [{ text: resultText, visible: true }], reset: [{ visible: true }] },
   });
 }
-function formPage(): PageState {
-  return newPage({ title: 'Get in touch', elements: { 'success-msg': [{ visible: false }] } });
+// Census-complete fixtures: every testid in the template's `elementContract(referenceSlots)` is
+// present (count > 0), so the live element-census gate passes. `calcLivePage` also carries the
+// calc goldens' result/reset; `formLivePage` the form goldens' title + hidden success message.
+function calcLivePage(resultText: string): PageState {
+  return newPage({
+    title: 'Rate Estimator',
+    elements: {
+      'input-hours': [{ visible: true }],
+      'input-seniority': [{ visible: true }],
+      'input-rush': [{ visible: true }],
+      'calc-submit': [{ visible: true }],
+      result: [{ text: resultText, visible: true }],
+      reset: [{ visible: true }],
+      footer: [{ visible: true }],
+    },
+  });
+}
+function formLivePage(): PageState {
+  return newPage({
+    title: 'Get in touch',
+    elements: {
+      'field-name': [{ visible: true }],
+      'field-email': [{ visible: true }],
+      'field-message': [{ visible: true }],
+      submit: [{ visible: true }],
+      'success-msg': [{ visible: false }],
+      'error-msg': [{ visible: false }],
+      footer: [{ visible: true }],
+    },
+  });
 }
 
 function fakeDriver(state: PageState): PageDriver {
@@ -201,8 +238,11 @@ export interface Harness {
   codegenCalls: CodegenArgs[];
   moderationText: ModerationOutcome[];
   moderationTextCalls: string[];
-  serves: { value: { ok: boolean; status: number } };
+  /** When true, the moderation fake throws on any call (proves the staged short-circuit skips it). */
+  moderationThrow: { value: boolean };
+  serves: { value: { ok: boolean; status: number }; throwOnce: boolean };
   deployerPuts: Array<{ slug: string; script: string }>;
+  deployerDeletes: string[];
   checkServesCalls: string[];
   messages: Array<{ contractId: string; content: string }>;
   queueSent: JobMessage[];
@@ -210,13 +250,30 @@ export interface Harness {
   ensuredDestinations: string[];
   verifiedDestinations: Set<string>;
   deliverables: Map<string, { value: string | Uint8Array; contentType: string }>;
+  deliverMilestoneCalls: Array<{
+    contractId: string;
+    milestoneId: string;
+    payload: { note: string; attachments?: string[] };
+  }>;
+  /** Live-reachability probe statuses, consumed in order; defaults to 200 when the queue is empty. */
+  fetchStatuses: number[];
+  fetchCalls: string[];
+  /** PSI result the fake returns; settable per test (default a passing 96/97). */
+  psiResult: { value: PsiResult };
+  psiCalls: string[];
   seedBuildGig: (opts: {
     templateId: TemplateId;
     brief: JiffyBrief;
     goldens: GoldenSet;
     contractId?: string;
     gigId?: string;
-  }) => Promise<{ contractId: string; gigId: string; jobKey: string; token: string; msg: JobMessage }>;
+  }) => Promise<{
+    contractId: string;
+    gigId: string;
+    jobKey: string;
+    token: string;
+    msg: JobMessage;
+  }>;
 }
 
 export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harness> {
@@ -255,26 +312,38 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
 
   const moderationText: ModerationOutcome[] = [];
   const moderationTextCalls: string[] = [];
+  const moderationThrow = { value: false };
   const moderation = {
     async moderate(text: string): Promise<ModerationOutcome> {
+      if (moderationThrow.value)
+        throw new Error('moderation fake: should not be called on this path');
       moderationTextCalls.push(text);
       return moderationText.shift() ?? PASS;
     },
     async moderateImage(): Promise<ModerationOutcome> {
+      if (moderationThrow.value)
+        throw new Error('moderation fake: should not be called on this path');
       return PASS;
     },
   };
 
-  const serves = { value: { ok: true, status: 200 } };
+  const serves = { value: { ok: true, status: 200 }, throwOnce: false };
   const deployerPuts: Array<{ slug: string; script: string }> = [];
+  const deployerDeletes: string[] = [];
   const checkServesCalls: string[] = [];
   const deployer = {
     async putScript(slug: string, script: string): Promise<void> {
       deployerPuts.push({ slug, script });
     },
-    async deleteScript(): Promise<void> {},
+    async deleteScript(slug: string): Promise<void> {
+      deployerDeletes.push(slug);
+    },
     async checkServes(slug: string): Promise<{ ok: boolean; status: number }> {
       checkServesCalls.push(slug);
+      if (serves.throwOnce) {
+        serves.throwOnce = false;
+        throw new Error('checkServes fake: transient binding error');
+      }
       return serves.value;
     },
   };
@@ -282,6 +351,7 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
   const contracts = new Map<string, Contract>();
   const gigsById = new Map<string, Gig>();
   const messages: Array<{ contractId: string; content: string }> = [];
+  const deliverMilestoneCalls: Harness['deliverMilestoneCalls'] = [];
   const client: PipelineClient = {
     async getContract(contractId: string): Promise<Contract> {
       const c = contracts.get(contractId);
@@ -295,6 +365,13 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     },
     async sendMessage(contractId: string, content: string): Promise<void> {
       messages.push({ contractId, content });
+    },
+    async deliverMilestone(
+      contractId: string,
+      milestoneId: string,
+      payload: { note: string; attachments?: string[] },
+    ): Promise<void> {
+      deliverMilestoneCalls.push({ contractId, milestoneId, payload });
     },
   };
 
@@ -340,13 +417,21 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     },
   };
 
+  const psiResult = { value: { ok: true, performance: 96, accessibility: 97 } as PsiResult };
+  const psiCalls: string[] = [];
   const psi = {
-    async run(): Promise<PsiResult> {
-      return { ok: true, performance: 96, accessibility: 97 };
+    async run(url: string): Promise<PsiResult> {
+      psiCalls.push(url);
+      return psiResult.value;
     },
   };
 
-  const fetchImpl = (async () => new Response('', { status: 404 })) as unknown as typeof fetch;
+  const fetchStatuses: number[] = [];
+  const fetchCalls: string[] = [];
+  const fetchImpl = (async (input: RequestInfo | URL): Promise<Response> => {
+    fetchCalls.push(String(input));
+    return new Response('', { status: fetchStatuses.shift() ?? 200 });
+  }) as unknown as typeof fetch;
 
   const cfg: PipelineConfig = {
     jobs,
@@ -376,6 +461,7 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     relayFromAddress: 'forms@jiffyapp.dev',
     logger,
     now,
+    sleep: async () => {}, // no-op — the reachability propagation retry never actually waits in tests
   };
 
   let seq = 0;
@@ -391,12 +477,22 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
       botId: BOT_ID,
       milestones: [{ id: 'm1', status: 'funded' }],
     } as unknown as Contract);
-    gigsById.set(gigId, { id: gigId, title: brief.name, description: brief.description } as unknown as Gig);
+    gigsById.set(gigId, {
+      id: gigId,
+      title: brief.name,
+      description: brief.description,
+    } as unknown as Gig);
     const hash = await sha256Hex(contractId);
     const jobKey = jobKeyFor(hash, 'build');
     await jobs.claim({ jobKey, contractId, kind: 'build', gigId });
     const job = await jobs.get(jobKey);
-    return { contractId, gigId, jobKey, token: job!.deliverableToken, msg: { kind: 'build', contractId, jobKey } };
+    return {
+      contractId,
+      gigId,
+      jobKey,
+      token: job!.deliverableToken,
+      msg: { kind: 'build', contractId, jobKey },
+    };
   };
 
   return {
@@ -414,8 +510,10 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     codegenCalls,
     moderationText,
     moderationTextCalls,
+    moderationThrow,
     serves,
     deployerPuts,
+    deployerDeletes,
     checkServesCalls,
     messages,
     queueSent,
@@ -423,6 +521,11 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
     ensuredDestinations,
     verifiedDestinations,
     deliverables,
+    deliverMilestoneCalls,
+    fetchStatuses,
+    fetchCalls,
+    psiResult,
+    psiCalls,
     seedBuildGig,
   };
 }
@@ -431,47 +534,65 @@ export async function makeHarness(opts: { now?: () => Date } = {}): Promise<Harn
 // Cases
 // =============================================================================
 
-test('happy path: reaches green staging in round 0 and hands off to promote', async () => {
+test('full happy path: green staging → promote → live gates → package → deliver', async () => {
   const h = await makeHarness();
-  h.setPage(calcPage('$100.00'));
+  h.setPage(calcLivePage('$100.00'));
   h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
-  const { msg, token, jobKey } = await h.seedBuildGig({
+  const { msg, token, jobKey, contractId } = await h.seedBuildGig({
     templateId: 'calculator',
     brief: CALC_BRIEF,
     goldens: CALC_GOLDENS,
   });
 
-  await assert.rejects(processJobMessage(h.cfg, msg), /not implemented: promote/);
+  await processJobMessage(h.cfg, msg); // completes to delivery — no throw
 
-  // One staging PUT under stg-<token24>, checked by the in-namespace serve probe.
   const stg = stagingSlug(token);
-  assert.equal(h.deployerPuts.length, 1);
-  assert.equal(h.deployerPuts[0].slug, stg);
-  assert.ok(h.checkServesCalls.includes(stg));
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  assert.ok(tool);
 
-  // Golden run hit the browser-reachable staging URL with test mode on.
-  assert.ok(h.page.gotoUrls.length > 0);
-  assert.ok(h.page.gotoUrls.every((u) => u === `https://${stg}.${TOOL_HOST_SUFFIX}/?jiffytest=1`));
+  // Staging PUT (round 0) + final PUT on the live slug, then staging DELETE.
+  assert.equal(h.deployerPuts.filter((p) => p.slug === stg).length, 1);
+  assert.equal(h.deployerPuts.filter((p) => p.slug === tool!.slug).length, 1);
+  assert.ok(h.deployerDeletes.includes(stg));
 
-  // Screenshots for every golden, stored under <token>/stg-r0-shot-*.png.
+  // Tool promoted live with hostedUntil ≈ now(2026-01-01) + 30d.
+  assert.equal(tool!.status, 'live');
+  assert.equal(tool!.hostedUntil?.slice(0, 10), '2026-01-31');
+
+  // Live goldens re-ran on the live url; screenshots stored under <token>/shot-*.png.
+  assert.ok(h.page.gotoUrls.includes(`https://${tool!.slug}.${TOOL_HOST_SUFFIX}/?jiffytest=1`));
   for (let i = 0; i < CALC_GOLDENS.goldens.length; i++) {
-    assert.ok(h.deliverables.has(`${token}/stg-r0-shot-${i}.png`), `missing screenshot ${i}`);
+    assert.ok(h.deliverables.has(`${token}/shot-${i}.png`), `missing live screenshot ${i}`);
   }
 
-  // Checkpoint: staged, round 0, active time banked.
-  const job = await h.stores.jobs.get(jobKey);
-  assert.equal(job?.checkpoint?.staged, true);
-  assert.equal(job?.checkpoint?.round, 0);
-  assert.ok((job?.checkpoint?.activeMs ?? 0) > 0);
+  // PSI recorded against the CLEAN live url; deliverables present.
+  assert.ok(h.psiCalls.includes(`https://${tool!.slug}.${TOOL_HOST_SUFFIX}`));
+  assert.ok(h.deliverables.has(`${token}/report.json`));
+  assert.ok(h.deliverables.has(`${token}/psi.json`));
+  assert.ok(h.deliverables.has(`${token}/source.zip`));
 
-  // Build log carries codegen / stage / assert entries.
+  // Evidence report content: reachability 200, live screenshots hashed under bare basenames.
+  const report = JSON.parse(String(h.deliverables.get(`${token}/report.json`)!.value));
+  assert.equal(report.liveGates.reachability.status, 200);
+  assert.equal(report.goldens[0].screenshot.key, 'shot-0.png');
+  assert.match(report.goldens[0].screenshot.sha256, /^[0-9a-f]{64}$/);
+
+  // deliverMilestone captured with the 4 attachments + toolId line in the note.
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+  assert.equal(h.deliverMilestoneCalls[0].payload.attachments?.length, 4);
+  assert.match(h.deliverMilestoneCalls[0].payload.note, new RegExp(`toolId: ${tool!.toolId}`));
+
+  // Job delivered; build log has the terminal entry.
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'delivered');
+  assert.equal(job?.outcome, 'delivered');
   const stages = new Set((await h.stores.buildLog.since(token, 0)).map((e) => e.stage));
-  assert.ok(stages.has('codegen') && stages.has('stage') && stages.has('assert'));
+  assert.ok(stages.has('promote') && stages.has('delivered'));
 });
 
-test('repair loop: round 0 fails, round 1 gets failures + priorSlots and passes', async () => {
+test('repair loop: round 0 fails, round 1 gets failures + priorSlots, passes, and delivers', async () => {
   const h = await makeHarness();
-  h.setPage(calcPage('$0.00')); // round 0: result is wrong
+  h.setPage(calcLivePage('$0.00')); // round 0: result is wrong
   h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
   h.codegenQueue.push({
     result: okCodegen(calcSlots(), 0.1),
@@ -479,13 +600,13 @@ test('repair loop: round 0 fails, round 1 gets failures + priorSlots and passes'
       h.page.elements.result = [{ text: '$100.00', visible: true }]; // repair fixes the page
     },
   });
-  const { msg, token, jobKey } = await h.seedBuildGig({
+  const { msg, token, jobKey, contractId } = await h.seedBuildGig({
     templateId: 'calculator',
     brief: CALC_BRIEF,
     goldens: CALC_GOLDENS,
   });
 
-  await assert.rejects(processJobMessage(h.cfg, msg), /not implemented: promote/);
+  await processJobMessage(h.cfg, msg);
 
   // Round 1 codegen received the prior slots + the round-0 failures.
   assert.equal(h.codegenCalls.length, 2);
@@ -494,15 +615,19 @@ test('repair loop: round 0 fails, round 1 gets failures + priorSlots and passes'
   assert.ok((h.codegenCalls[1].failures ?? []).length > 0);
 
   // Two staging PUTs (r0 + r1); checkpoint records repair round 1.
-  assert.equal(h.deployerPuts.length, 2);
+  const stg = stagingSlug(token);
+  assert.equal(h.deployerPuts.filter((p) => p.slug === stg).length, 2);
   const job = await h.stores.jobs.get(jobKey);
   assert.equal(job?.checkpoint?.round, 1);
   assert.equal(job?.repairRounds, 1);
-  assert.equal(job?.checkpoint?.staged, true);
+  assert.equal(job?.outcome, 'delivered');
 
-  // Screenshots exist for both rounds.
+  // Staging screenshots for both rounds; delivered.
   assert.ok(h.deliverables.has(`${token}/stg-r0-shot-0.png`));
   assert.ok(h.deliverables.has(`${token}/stg-r1-shot-0.png`));
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  assert.equal(tool?.status, 'live');
 });
 
 test('spend cap: exhausting MAX_SPEND_USD aborts (never promotes) and audits cap-exhausted', async () => {
@@ -510,19 +635,25 @@ test('spend cap: exhausting MAX_SPEND_USD aborts (never promotes) and audits cap
   h.setPage(calcPage('$0.00')); // goldens never pass
   h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.3) });
   h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.3) });
-  const { msg, contractId } = await h.seedBuildGig({
+  const { msg, jobKey, contractId } = await h.seedBuildGig({
     templateId: 'calculator',
     brief: CALC_BRIEF,
     goldens: CALC_GOLDENS,
   });
 
-  await assert.rejects(processJobMessage(h.cfg, msg), /not implemented: abort/);
+  await processJobMessage(h.cfg, msg); // abort is a controlled exit — no throw
 
   // Two rounds ran (0.3 + 0.3 = 0.6 ≥ 0.5), then the spend precheck broke to abort.
   assert.equal(h.codegenCalls.length, 2);
   assert.equal(h.deployerPuts.length, 2);
   const audits = await h.stores.audit.listByScope(contractId);
   assert.ok(audits.some((a) => a.result === 'cap-exhausted'));
+  assert.ok(audits.some((a) => a.gate === 'non-convergence'));
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  assert.match(h.messages[h.messages.length - 1].content, /cancel/i);
 });
 
 test('soft budget: crossing CONSUMER_SOFT_BUDGET_MS checkpoints and re-enqueues (no promote/abort)', async () => {
@@ -632,19 +763,19 @@ test('resume after both verifications proceeds without aborting (parked time is 
   const relayRow = await h.stores.relay.get(tool!.toolId);
   await h.stores.relay.verifyByToken(relayRow!.verifyToken);
   h.verifiedDestinations.add('owner@example.com');
-  h.setPage(formPage());
+  h.setPage(formLivePage());
   h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
   h.clock.advance(2 * 24 * 60 * 60 * 1000);
   await h.stores.jobs.unpark(msg.jobKey);
 
-  // It must proceed all the way to the promote hand-off — an abort would mean the parked
-  // wait was wrongly counted against the active-time cap.
-  await assert.rejects(processJobMessage(h.cfg, msg), /not implemented: promote/);
+  // It must proceed all the way to delivery — an abort would mean the parked wait was wrongly
+  // counted against the active-time cap.
+  await processJobMessage(h.cfg, msg);
 
   const job = await h.stores.jobs.get(msg.jobKey);
-  assert.equal(job?.checkpoint?.staged, true);
+  assert.equal(job?.outcome, 'delivered');
   assert.ok((job?.checkpoint?.activeMs ?? 0) < 25 * 60_000);
-  assert.equal(h.mailerSent.length, 1); // not re-sent on resume
+  assert.equal(h.deliverMilestoneCalls.length, 1);
 });
 
 test('active-time cap: a checkpoint already over 25 min aborts on entry', async () => {
@@ -661,11 +792,17 @@ test('active-time cap: a checkpoint already over 25 min aborts on entry', async 
     activeMs: 26 * 60_000,
     staged: false,
     lastFailures: [],
+    bankedRound: null,
   };
   await h.stores.jobs.saveCheckpoint(jobKey, over);
 
-  await assert.rejects(processJobMessage(h.cfg, msg), /not implemented: abort/);
+  await processJobMessage(h.cfg, msg); // abort is a controlled exit — no throw
+
   assert.equal(h.deployerPuts.length, 0);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  assert.match(h.messages[h.messages.length - 1].content, /cancel/i);
 });
 
 test('replay of a delivered job is a no-op', async () => {
@@ -682,4 +819,290 @@ test('replay of a delivered job is a no-op', async () => {
   assert.equal(h.deployerPuts.length, 0);
   assert.equal(h.messages.length, 0);
   assert.equal(h.queueSent.length, 0);
+});
+
+// =============================================================================
+// Task 18 — live gates, form-family relay, abort leg, eject-zip, resume fixes
+// =============================================================================
+
+test('form-family happy path: exactly one live relay test submission + relayProof in the report', async () => {
+  const h = await makeHarness();
+  const { msg, token, contractId } = await h.seedBuildGig({
+    templateId: 'form',
+    brief: FORM_BRIEF,
+    goldens: FORM_GOLDENS,
+  });
+
+  // First invocation parks awaiting double opt-in (and sends the verification email).
+  await processJobMessage(h.cfg, msg);
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const relayRow = await h.stores.relay.get(tool!.toolId);
+  await h.stores.relay.verifyByToken(relayRow!.verifyToken);
+  h.verifiedDestinations.add('owner@example.com');
+  h.setPage(formLivePage());
+  h.codegenQueue.push({ result: okCodegen(formSlots(), 0.1) });
+  await h.stores.jobs.unpark(msg.jobKey);
+
+  await processJobMessage(h.cfg, msg); // delivers
+
+  // Exactly one live relay TEST submission (distinct from the earlier verification email).
+  const testSubmissions = h.mailerSent.filter((m) => /delivery verification/i.test(m.subject));
+  assert.equal(testSubmissions.length, 1);
+  assert.equal(testSubmissions[0].to, 'owner@example.com');
+
+  // A 'test' relay event was recorded, and the evidence report carries the relay proof.
+  const evt = await h.stores.relay.latestEvent(tool!.toolId, 'test');
+  assert.equal(evt?.status, 'sent');
+  const report = JSON.parse(String(h.deliverables.get(`${token}/report.json`)!.value));
+  assert.ok(report.liveGates.relayProof);
+  assert.equal(report.liveGates.relayProof.pass, true);
+  assert.equal(h.deliverMilestoneCalls.length, 1);
+});
+
+test('PSI outage parks psi_outage (resumable), never delivering', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.psiResult.value = { ok: false, error: 'psi down' };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, jobKey } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg); // controlled park — no throw
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'parked');
+  assert.equal(job?.parkReason, 'psi_outage');
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  // Still staged, so a cron re-enqueue resumes cheaply via the staged short-circuit.
+  assert.equal(job?.checkpoint?.staged, true);
+});
+
+test('PSI accessibility below the floor audits and throws (message.retry), never delivering', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.psiResult.value = { ok: true, performance: 96, accessibility: 85 };
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await assert.rejects(processJobMessage(h.cfg, msg), /PSI below thresholds/);
+
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(audits.some((a) => a.gate === 'psi' && a.result === 'below-threshold'));
+});
+
+test('element census: a missing footer audits element-contract fail, throws, and never delivers', async () => {
+  const h = await makeHarness();
+  const page = calcLivePage('$100.00');
+  delete page.elements.footer; // present for goldens, absent for the census
+  h.setPage(page);
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await assert.rejects(processJobMessage(h.cfg, msg), /element-contract/);
+
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(audits.some((a) => a.gate === 'element-contract' && a.result === 'fail'));
+});
+
+test('eject-zip verify failure throws before delivery (unit: doctored empty worker script)', async () => {
+  // A corrupt eject ZIP is unreachable through a real template (index.html always renders), so
+  // this exercises the FR-9 gate directly: an empty worker script makes index.mjs an empty
+  // required path, which verifyEjectZip rejects. The full happy path proves the pass side.
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  const { contractId, jobKey, token } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+  const def = getTemplate('calculator');
+  await h.stores.tools.create({
+    toolId: 'tool-ejz',
+    slugCandidates: ['ratecalc'],
+    templateId: 'calculator',
+    templateVersion: def.version,
+    buildContractId: contractId,
+    name: CALC_BRIEF.name,
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  const job = await h.stores.jobs.get(jobKey);
+  const contract = await h.cfg.client.getContract(contractId);
+  const checkpoint: BuildCheckpoint = {
+    slotValues: calcSlots(),
+    round: 0,
+    spendUsd: 0.1,
+    activeMs: 1000,
+    staged: true,
+    lastFailures: [],
+    bankedRound: null,
+  };
+
+  await assert.rejects(
+    promoteAndDeliver(h.cfg, {
+      job: job!,
+      tool: tool!,
+      def,
+      brief: CALC_BRIEF,
+      goldens: CALC_GOLDENS,
+      slots: calcSlots(),
+      script: '', // doctored: empty index.mjs fails the required-path check
+      contract,
+      checkpoint,
+    }),
+    /eject-zip/i,
+  );
+
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  assert.ok(!h.deliverables.has(`${token}/report.json`));
+});
+
+test('abort leg: caps exhausted after all repair rounds — staging deleted, tool killed, buyer asked to cancel', async () => {
+  const h = await makeHarness();
+  h.setPage(calcPage('$0.00')); // goldens never pass; the live gates are never reached
+  for (let i = 0; i < 4; i++) h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, jobKey, token, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg); // abort is a controlled exit — no throw
+
+  // Rounds 0-3 all ran; the FINAL round escalated to Haiku (FR-6).
+  assert.equal(h.codegenCalls.length, 4);
+  assert.equal(h.codegenCalls[3].escalate, true);
+  assert.equal(h.codegenCalls[0].escalate, false);
+
+  // Staging torn down; nothing delivered.
+  assert.ok(h.deployerDeletes.includes(stagingSlug(token)));
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+
+  // Buyer message: itemized cancel request + a final-round staging-screenshot link + build log.
+  const abortMsg = h.messages[h.messages.length - 1].content;
+  assert.match(abortMsg, /cancel/i);
+  assert.match(abortMsg, /stg-r/);
+  assert.match(abortMsg, /\/p\//); // build-log link
+
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  assert.equal(tool?.status, 'killed');
+});
+
+test('resume: a codegen !ok round consumes a repair round with no staging PUT, then round 1 delivers', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.codegenQueue.push({
+    result: { ok: false, errors: ['bad slots'], costUsd: 0.1, model: 'qwen-test' },
+  });
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, token, jobKey } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg);
+
+  assert.equal(h.codegenCalls.length, 2);
+  const stg = stagingSlug(token);
+  // Round 0 (!ok) never staged; round 1 did.
+  assert.ok(!h.deliverables.has(`${token}/stg-r0-shot-0.png`));
+  assert.ok(h.deliverables.has(`${token}/stg-r1-shot-0.png`));
+  assert.equal(h.deployerPuts.filter((p) => p.slug === stg).length, 1);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'delivered');
+});
+
+test('resume: a SlotError from render consumes a repair round, then round 1 delivers', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  const badSlots = { ...calcSlots(), accentHex: 'not-a-hex' }; // fails the style validator in render
+  h.codegenQueue.push({ result: okCodegen(badSlots, 0.1) });
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, token, jobKey } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await processJobMessage(h.cfg, msg);
+
+  assert.equal(h.codegenCalls.length, 2);
+  const stg = stagingSlug(token);
+  // Round 0 threw a SlotError before staging; only round 1 staged.
+  assert.equal(h.deployerPuts.filter((p) => p.slug === stg).length, 1);
+  assert.ok(h.deliverables.has(`${token}/stg-r1-shot-0.png`));
+  // The repair round was fed the validator error.
+  assert.ok((h.codegenCalls[1].failures ?? []).some((f) => /accentHex/.test(f)));
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'delivered');
+});
+
+test('resume: a checkServes throw retries without a second codegen spend (banked round)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  h.serves.throwOnce = true; // first stage attempt: the serve probe throws (transient)
+  const { msg, jobKey } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  await assert.rejects(processJobMessage(h.cfg, msg), /transient binding error/);
+  // Codegen ran once and was BANKED (slots + spend persisted before the deploy/serve probe).
+  const cp1 = (await h.stores.jobs.get(jobKey))?.checkpoint;
+  assert.equal(cp1?.bankedRound, 0);
+  assert.equal(cp1?.spendUsd, 0.1);
+  assert.equal(h.codegenCalls.length, 1);
+
+  // Retry: serve probe now OK; the banked round is re-used — no re-generation, no double spend.
+  await processJobMessage(h.cfg, msg);
+  assert.equal(h.codegenCalls.length, 1);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'delivered');
+  assert.equal(job?.checkpoint?.spendUsd, 0.1);
+});
+
+test('staged short-circuit: a promote-time throw re-enters at promote, skipping codegen AND moderation', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  h.fetchStatuses.push(404, 404); // both live-reachability probes fail on the first promote
+  const { msg, jobKey } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  // First invocation reaches green staging, promotes, then the reachability gate throws.
+  await assert.rejects(processJobMessage(h.cfg, msg), /reachability/);
+  assert.equal(h.codegenCalls.length, 1);
+  assert.equal((await h.stores.jobs.get(jobKey))?.checkpoint?.staged, true);
+
+  // Re-entry: moderation would THROW if the pipeline re-ran stages 3-5, and codegen must not
+  // re-run. The staged short-circuit re-renders from banked slots and jumps straight to promote.
+  h.moderationThrow.value = true;
+  await processJobMessage(h.cfg, msg); // reachability now defaults to 200 → delivers
+
+  assert.equal(h.codegenCalls.length, 1); // no regeneration
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'delivered');
+  assert.equal(h.deliverMilestoneCalls.length, 1);
 });

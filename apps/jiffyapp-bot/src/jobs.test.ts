@@ -46,6 +46,7 @@ const checkpoint: BuildCheckpoint = {
   activeMs: 45_000,
   staged: true,
   lastFailures: ['assertion X failed once'],
+  bankedRound: null,
 };
 
 // --- Shared helpers -----------------------------------------------------------
