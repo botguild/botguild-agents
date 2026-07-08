@@ -64,6 +64,15 @@ function toolMissingMessage(toolId: string | undefined): string {
   );
 }
 
+function killedNoReviveMessage(toolId: string): string {
+  return (
+    `This tool (toolId ${toolId}) was administratively removed and cannot be revived by funding a ` +
+    'hosting cycle. We have not opened a hosting window for this payment — please cancel this ' +
+    'contract; cancellation and any refund are handled on your side (payer-side). If you believe ' +
+    'the removal was a mistake, reply here and a human operator can look into it.'
+  );
+}
+
 function graceMessage(toolId: string): string {
   return (
     `Hosting for this tool lapsed. It has a ${GRACE_DAYS}-day grace period before its URL starts ` +
@@ -168,6 +177,23 @@ export async function processCycleJob(
       detail: { toolId: msg.toolId ?? null },
     });
     await cfg.jobs.park(msg.jobKey, 'tool_missing');
+    return;
+  }
+
+  // FR-17: an operator-`killed` tool must NOT be revived by funding a cycle (that would defeat the
+  // kill switch — cf. admin/unsuspend, which refuses to revive anything but a killed tool). Don't
+  // create a window, extend, or send the "revived" confirm; tell the buyer it can't be revived and
+  // converge the job terminally. grace/suspended tools ARE revived (handled below) — only killed is
+  // protected.
+  if (tool.status === 'killed') {
+    await cfg.client.sendMessage(msg.contractId, killedNoReviveMessage(tool.toolId));
+    await cfg.audit.record({
+      scope: msg.contractId,
+      gate: 'cycle',
+      result: 'killed-no-revive',
+      detail: { toolId: tool.toolId },
+    });
+    await cfg.jobs.markDelivered(msg.jobKey, 'aborted');
     return;
   }
 

@@ -509,10 +509,12 @@ export function createToolStore(db: D1Like, now: () => Date = () => new Date()):
     },
 
     async promote(toolId, args): Promise<void> {
+      // `AND status != 'killed'` (F4): a kill landing mid-build/edit must never be resurrected to
+      // live by a promote, regardless of caller (belt-and-suspenders behind the build-seam re-check).
       await db
         .prepare(
           `UPDATE tools SET status = 'live', slots_json = ?, hosted_until = ?, grace_started_at = NULL, updated_at = ?
-           WHERE tool_id = ?`,
+           WHERE tool_id = ? AND status != 'killed'`,
         )
         .bind(JSON.stringify(args.slots), args.hostedUntil, touch(), toolId)
         .run();
@@ -533,10 +535,13 @@ export function createToolStore(db: D1Like, now: () => Date = () => new Date()):
     },
 
     async extendHosting(toolId, args): Promise<void> {
+      // `AND status != 'killed'` (F4): funding a hosting cycle must not revive an operator-killed
+      // tool (processCycleJob guards this too, but the data layer is the last line of defense).
+      // grace/suspended tools are still != 'killed', so they revive as intended.
       await db
         .prepare(
           `UPDATE tools SET hosted_until = ?, latest_hosting_contract_id = ?, status = 'live', grace_started_at = NULL, updated_at = ?
-           WHERE tool_id = ?`,
+           WHERE tool_id = ? AND status != 'killed'`,
         )
         .bind(args.hostedUntil, args.hostingContractId, touch(), toolId)
         .run();

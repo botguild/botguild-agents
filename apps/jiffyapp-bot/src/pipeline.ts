@@ -328,6 +328,25 @@ export async function promoteAndDeliver(
   const files = def.render(slots, ctx);
 
   // ---- Stage 7: promote ------------------------------------------------------
+  // FR-17: an operator kill landing mid-build must not be overwritten to 'live' by the promote.
+  // Re-fetch the current status right before deploying and, if killed, abort the build gracefully
+  // (deploy/serve nothing — the dispatcher already serves 410 off the killed status).
+  const currentTool = await cfg.tools.get(tool.toolId);
+  if (currentTool?.status === 'killed') {
+    await cfg.buildLog.append(
+      token,
+      'promote',
+      'tool was administratively killed mid-build; not promoting',
+    );
+    await cfg.audit.record({
+      scope,
+      gate: 'promotion',
+      result: 'killed-abort',
+      detail: { toolId: tool.toolId },
+    });
+    await cfg.jobs.markDelivered(job.jobKey, 'aborted');
+    return;
+  }
   await cfg.deployer.putScript(tool.slug, script);
   const hostedUntil = new Date(now().getTime() + HOSTING_WINDOW_DAYS * 86_400_000).toISOString();
   // Promote FIRST — the dispatcher only routes public traffic to a serving (live) row.

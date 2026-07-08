@@ -1217,6 +1217,40 @@ test('abort leg: caps exhausted after all repair rounds — staging deleted, too
   assert.equal(tool?.status, 'killed');
 });
 
+test('build seam: a tool killed mid-build is not promoted to live (F4)', async () => {
+  const h = await makeHarness();
+  h.setPage(calcLivePage('$100.00'));
+  h.codegenQueue.push({ result: okCodegen(calcSlots(), 0.1) });
+  const { msg, jobKey, contractId } = await h.seedBuildGig({
+    templateId: 'calculator',
+    brief: CALC_BRIEF,
+    goldens: CALC_GOLDENS,
+  });
+
+  // Kill the tool mid-build: the first staging deploy fires after the tool row exists (stage 4)
+  // and before promote (stage 7), so an operator kill here models FR-17 landing mid-build.
+  const origPut = h.cfg.deployer.putScript;
+  h.cfg.deployer.putScript = async (slug: string, script: string): Promise<void> => {
+    await origPut(slug, script);
+    if (slug.startsWith('stg-')) {
+      const t = await h.stores.tools.getByBuildContract(contractId);
+      if (t) await h.stores.tools.setStatus(t.toolId, 'killed');
+    }
+  };
+
+  await processJobMessage(h.cfg, msg); // aborts gracefully — no throw
+
+  const tool = await h.stores.tools.getByBuildContract(contractId);
+  assert.equal(tool?.status, 'killed'); // never flipped to live
+  // Never promoted: no putScript on the live (real) slug — only the staging one.
+  assert.ok(!h.deployerPuts.some((p) => p.slug === tool!.slug));
+  assert.equal(h.deliverMilestoneCalls.length, 0);
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.outcome, 'aborted');
+  const audits = await h.stores.audit.listByScope(contractId);
+  assert.ok(audits.some((a) => a.gate === 'promotion' && a.result === 'killed-abort'));
+});
+
 test('resume: a codegen !ok round consumes a repair round with no staging PUT, then round 1 delivers', async () => {
   const h = await makeHarness();
   h.setPage(calcLivePage('$100.00'));

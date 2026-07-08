@@ -373,6 +373,34 @@ test('processCycleJob: revives a suspended tool to live with a fresh window', as
   assert.match(h.messages[0].content, /revives/i);
 });
 
+test('processCycleJob: a killed tool is NOT revived by funding — stays killed, no extend (F4)', async () => {
+  const h = await makeHarness();
+  const hostedUntil = new Date(h.clock.now().getTime() + 10 * DAY_MS).toISOString();
+  await h.seedTool({ toolId: 'tool-k', slug: 'rate-calc-k', hostedUntil });
+  await h.stores.tools.setStatus('tool-k', 'killed');
+  const before = await h.stores.tools.get('tool-k');
+  const { jobKey, msg } = await h.claimCycleJob({ contractId: 'c-cyc-k', toolId: 'tool-k' });
+
+  await processCycleJob(h.cfg, msg);
+
+  const tool = await h.stores.tools.get('tool-k');
+  assert.equal(tool?.status, 'killed'); // not revived
+  assert.equal(tool?.hostedUntil, before?.hostedUntil); // not extended
+  assert.equal(tool?.latestHostingContractId ?? null, before?.latestHostingContractId ?? null);
+  // No cycle window created.
+  assert.equal(await h.stores.cycles.get('c-cyc-k'), null);
+  // Buyer told it cannot be revived; the job converged (not left claimed).
+  assert.match(
+    h.messages[h.messages.length - 1].content,
+    /removed|cannot be revived|administratively/i,
+  );
+  const job = await h.stores.jobs.get(jobKey);
+  assert.equal(job?.status, 'delivered');
+  assert.equal(job?.outcome, 'aborted');
+  const audits = await h.stores.audit.listByScope('c-cyc-k');
+  assert.ok(audits.some((a) => a.result === 'killed-no-revive'));
+});
+
 test('processCycleJob: unknown toolId parks tool_missing and messages the thread', async () => {
   const h = await makeHarness();
   const { jobKey, msg } = await h.claimCycleJob({ contractId: 'c-cyc-3', toolId: 'tool-nope' });
