@@ -7,13 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
-import { createConsoleLogger, type WebhookEvent } from '@botguild/agent-core-workers';
+import { createConsoleLogger, type WebhookEvent, type WebhookHandler } from '@botguild/agent-core-workers';
 import { DEFAULT_DISPUTE_RESPONSE, type AgentMcpClient } from '@botguild/agent-core';
 import type { D1Like } from '@botguild/agent-core-workers';
 import { applyMigrations } from './testSupport.js';
 import { createGigStore } from './gigStore.js';
 import { createCycleStore, createJobStore, createToolStore, jobKeyFor, sha256Hex } from './jobs.js';
-import { buildHandlers, type HandlerDeps, type QueueLike } from './handlers.js';
+import { buildHandlers, OWNERSHIP_FILTERED_EVENTS, wrapContractHandlers, type HandlerDeps, type QueueLike } from './handlers.js';
 import type { JobMessage } from './types.js';
 
 const logger = createConsoleLogger({ service: 'test', level: 'silent' });
@@ -247,3 +247,43 @@ function _typeCheck(real: AgentMcpClient): HandlerDeps['mcp'] {
   return real;
 }
 void _typeCheck;
+
+// --- wrapContractHandlers ---------------------------------------------------
+
+test('wrapContractHandlers wraps exactly the three contract-acting events', () => {
+  const handlers: Record<string, WebhookHandler> = {
+    'milestone.funded': async () => {},
+    'proposal.accepted': async () => {},
+    'milestone.accepted': async () => {},
+    'contract.status.changed': async () => {},
+    'milestone.delivered': async () => {},
+    'acceptance.auto_approved': async () => {},
+    'dispute.response_submitted': async () => {},
+  };
+
+  const wrappedFunctions = new Set<WebhookHandler>();
+
+  const wrap = (h: WebhookHandler): WebhookHandler => {
+    const wrapped = async () => {
+      await h({} as WebhookEvent);
+    };
+    wrappedFunctions.add(wrapped);
+    return wrapped;
+  };
+
+  const result = wrapContractHandlers(handlers, wrap);
+
+  // Verify exactly three handlers are wrapped (different function identity)
+  assert.equal(wrappedFunctions.size, 3, 'exactly 3 handlers are wrapped');
+
+  // Verify the three contract-acting events are wrapped
+  for (const event of OWNERSHIP_FILTERED_EVENTS) {
+    assert.ok(wrappedFunctions.has(result[event]!), `${event} is wrapped`);
+  }
+
+  // Verify other handlers are NOT wrapped (same function identity)
+  assert.equal(result['milestone.funded'], handlers['milestone.funded']);
+  assert.equal(result['milestone.delivered'], handlers['milestone.delivered']);
+  assert.equal(result['acceptance.auto_approved'], handlers['acceptance.auto_approved']);
+  assert.equal(result['dispute.response_submitted'], handlers['dispute.response_submitted']);
+});

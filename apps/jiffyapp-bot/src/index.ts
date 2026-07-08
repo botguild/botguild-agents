@@ -60,7 +60,7 @@ import {
 import { createGigStore, type GigStore } from './gigStore.js';
 import { createGoldenCompiler, type GoldenCompiler } from './goldenCompiler.js';
 import { createJiffyProposer, pricingCalcWithClassifier } from './proposer.js';
-import { buildHandlers } from './handlers.js';
+import { buildHandlers, wrapContractHandlers } from './handlers.js';
 import type { JobMessage } from './types.js';
 
 // @cloudflare/workers-types (pinned in package.json) already declares `SendEmail`
@@ -312,18 +312,11 @@ function buildApp(
     logger,
   });
   const ownership = { client, botId, logger };
-  // Every handler except milestone.funded is ownership-filtered here: webhooks
-  // are handler-scoped, so sibling bots' contract events WILL arrive at this
-  // endpoint. milestone.funded self-filters inline (it needs the contract
-  // anyway to classify the gig), so wrapping it too would just duplicate the
-  // getContract call.
-  const handlers = Object.fromEntries(
-    Object.entries(rawHandlers).map(([eventType, handler]) =>
-      eventType === 'milestone.funded'
-        ? [eventType, handler]
-        : [eventType, withOwnershipFilter(handler, ownership)],
-    ),
-  );
+  // Only the three contract-acting handlers are ownership-filtered: milestone.funded
+  // self-filters inline (it needs the contract anyway), and log-only handlers must
+  // pass through unwrapped to avoid pointless getContract calls and 500s on benign
+  // sibling-bot events.
+  const handlers = wrapContractHandlers(rawHandlers, (h) => withOwnershipFilter(h, ownership));
 
   const healthExtra = async (): Promise<Record<string, unknown>> => {
     const reputation = await loadReputationSnapshot(env.DB).catch(() => null);

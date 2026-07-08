@@ -23,6 +23,12 @@ import type { JobKind, JobMessage } from './types.js';
 
 export type QueueLike = { send(msg: JobMessage): Promise<unknown> };
 
+export const OWNERSHIP_FILTERED_EVENTS = [
+  'proposal.accepted',
+  'milestone.accepted',
+  'contract.status.changed',
+] as const;
+
 export interface HandlerDeps {
   // getContractReview is needed by milestone.accepted's logContractReview call.
   client: Pick<AgentClient, 'getContract' | 'getGig' | 'sendMessage' | 'getContractReview'>;
@@ -143,4 +149,21 @@ export function buildHandlers(deps: HandlerDeps): Record<string, WebhookHandler>
     'acceptance.auto_approved': logOnly('acceptance.auto_approved'),
     'dispute.response_submitted': logOnly('dispute.response_submitted'),
   };
+}
+
+/**
+ * Wraps exactly the contract-acting webhook handlers (those that modify contract state)
+ * with an ownership filter, leaving log-only handlers and others untouched.
+ * This prevents benign sibling-bot webhook events from being filtered unnecessarily.
+ */
+export function wrapContractHandlers(
+  handlers: Record<string, WebhookHandler>,
+  wrap: (h: WebhookHandler) => WebhookHandler,
+): Record<string, WebhookHandler> {
+  return Object.fromEntries(
+    Object.entries(handlers).map(([eventType, handler]) => [
+      eventType,
+      (OWNERSHIP_FILTERED_EVENTS as readonly string[]).includes(eventType) ? wrap(handler) : handler,
+    ]),
+  );
 }
