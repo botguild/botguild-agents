@@ -143,6 +143,10 @@ export function createLogEventStream(args: {
   const maxDurationMs = args.maxDurationMs ?? 55_000;
   const sleep = args.sleep ?? defaultSleep;
   const encoder = new TextEncoder();
+  // Set by the underlying source's cancel() when the client disconnects — the poll loop checks
+  // this every iteration so it doesn't keep running (and keep hitting the store) for up to
+  // maxDurationMs after nobody is reading anymore.
+  let cancelled = false;
 
   return new ReadableStream<Uint8Array>({
     async start(controller): Promise<void> {
@@ -150,20 +154,34 @@ export function createLogEventStream(args: {
       let elapsedMs = 0;
       try {
         for (;;) {
+          if (cancelled) break;
           const events = await store.since(token, lastId);
+          if (cancelled) break;
           let terminal = false;
           for (const evt of events) {
             lastId = evt.seq;
-            controller.enqueue(encoder.encode(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`));
+            try {
+              controller.enqueue(
+                encoder.encode(`id: ${evt.seq}\ndata: ${JSON.stringify(evt)}\n\n`),
+              );
+            } catch {
+              // Belt-and-braces on top of the `cancelled` check above: the controller can only
+              // throw here if the stream was cancelled between the check and this enqueue.
+              cancelled = true;
+              break;
+            }
             if (isTerminalStage(evt.stage)) terminal = true;
           }
-          if (terminal || elapsedMs >= maxDurationMs) break;
+          if (cancelled || terminal || elapsedMs >= maxDurationMs) break;
           await sleep(pollMs);
           elapsedMs += pollMs;
         }
       } finally {
         controller.close();
       }
+    },
+    cancel(): void {
+      cancelled = true;
     },
   });
 }

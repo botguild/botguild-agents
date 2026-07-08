@@ -17,7 +17,6 @@
 
 import { Hono } from 'hono';
 import type { Logger } from 'pino';
-import { createMimeMessage } from 'mimetext';
 import { EmailMessage } from 'cloudflare:email';
 import {
   AgentClient,
@@ -74,6 +73,7 @@ import { createPlaywrightLauncher, createPlaywrightPageFactory } from './playwri
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
 import { buildLogPageHtml, createLogEventStream, handleLogJson } from './buildlog.js';
 import {
+  buildRelayMime,
   createEmailRoutingClient,
   handleRelaySubmission,
   handleRelayVerification,
@@ -157,14 +157,9 @@ interface Services {
 function createBindingMailer(sendEmail: SendEmail, logger: Logger): RelayMailer {
   return {
     async send(msg): Promise<{ messageId: string | null }> {
-      const mime = createMimeMessage();
-      mime.setSender({ addr: msg.from });
-      mime.setRecipient(msg.to);
-      mime.setSubject(msg.subject);
-      mime.addMessage({ contentType: 'text/plain', data: msg.text });
-      const messageId = (mime.getHeader('Message-ID') as string | undefined) ?? null;
+      const { raw, messageId } = buildRelayMime(msg);
       try {
-        await sendEmail.send(new EmailMessage(msg.from, msg.to, mime.asRaw()));
+        await sendEmail.send(new EmailMessage(msg.from, msg.to, raw));
       } catch (err) {
         logger.warn({ err, to: msg.to }, 'mailer: send_email binding failed');
         throw err;

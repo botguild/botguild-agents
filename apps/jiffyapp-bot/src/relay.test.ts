@@ -13,6 +13,7 @@ import {
 } from './jobs.js';
 import { RELAY_PER_DAY_CAP, RELAY_PER_MINUTE_CAP } from './config.js';
 import {
+  buildRelayMime,
   buildVerificationEmail,
   createEmailRoutingClient,
   handleRelaySubmission,
@@ -327,6 +328,55 @@ test('day cap 429 releases the minute reservation (ThumbForge pattern)', async (
   assert.equal(await usage.getUsed(dayScope, dayPer), RELAY_PER_DAY_CAP); // unchanged
 });
 
+test('a throwing mailer releases BOTH reservations and 502s, without a CORS-less crash', async () => {
+  const db = await freshDb();
+  const token = await verifiedRelay(db, 'tool-m');
+  const throwingMailer: RelayMailer = {
+    send: async () => {
+      throw new Error('smtp: connection refused');
+    },
+  };
+  const fixedNow = new Date('2026-07-07T10:00:00Z');
+  const deps = buildDeps(db, throwingMailer, () => fixedNow);
+
+  const result = await handleRelaySubmission(deps, {
+    toolId: 'tool-m',
+    token,
+    body: { fields: { email: 'a@example.com' } },
+  });
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, { ok: false, error: 'delivery failed — please retry' });
+
+  const usage = createUsageStore(db);
+  const minuteScope = 'relay-min:tool-m';
+  const dayScope = 'relay-day:tool-m';
+  const minutePer = minutePeriod(fixedNow);
+  const dayPer = dayPeriod(fixedNow);
+  assert.equal(await usage.getUsed(minuteScope, minutePer), 0);
+  assert.equal(await usage.getUsed(dayScope, dayPer), 0);
+
+  // No submission event was persisted for the failed send.
+  const { results } = await db
+    .prepare("SELECT * FROM relay_events WHERE tool_id = ? AND kind = 'submission'")
+    .bind('tool-m')
+    .all<Record<string, unknown>>();
+  assert.equal(results.length, 0);
+
+  // A subsequent call with a working mailer still succeeds (reservations weren't left stuck).
+  const workingMailer = fakeMailer();
+  const depsRetry = buildDeps(db, workingMailer, () => fixedNow);
+  const retry = await handleRelaySubmission(depsRetry, {
+    toolId: 'tool-m',
+    token,
+    body: { fields: { email: 'a@example.com' } },
+  });
+  assert.equal(retry.status, 200);
+  assert.deepEqual(retry.body, { ok: true });
+  assert.equal(workingMailer.sent.length, 1);
+  assert.equal(await usage.getUsed(minuteScope, minutePer), 1);
+  assert.equal(await usage.getUsed(dayScope, dayPer), 1);
+});
+
 // --- CORS -----------------------------------------------------------------------
 
 test('relayCorsHeaders grants matching origins (incl. staging) and refuses others', () => {
@@ -370,6 +420,26 @@ test('verification 404s an unrecognized token', async () => {
   const deps = buildDeps(db, fakeMailer());
   const result = await handleRelayVerification(deps, 'not-a-real-token');
   assert.equal(result.status, 404);
+});
+
+// --- MIME construction ---------------------------------------------------------------
+
+test('buildRelayMime produces a real Message-ID and raw content with subject/recipient', () => {
+  const { raw, messageId } = buildRelayMime({
+    to: 'owner@example.com',
+    from: 'relay@jiffyapp.dev',
+    subject: 'New submission — tool-x',
+    text: 'name: Ada',
+  });
+
+  assert.ok(messageId, 'expected a non-null Message-ID');
+  assert.match(raw, /Message-ID:/);
+  assert.match(raw, /owner@example\.com/); // recipient appears literally in the To: header
+  // Subject is base64-encoded (mimetext always wraps it as =?utf-8?B?...?=), so decode rather
+  // than matching the literal text.
+  const encoded = raw.match(/Subject: =\?utf-8\?B\?([^?]+)\?=/)?.[1];
+  assert.ok(encoded, 'expected an encoded Subject header');
+  assert.equal(Buffer.from(encoded, 'base64').toString('utf8'), 'New submission — tool-x');
 });
 
 test('buildVerificationEmail composes the confirmation email', () => {

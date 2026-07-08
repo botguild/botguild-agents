@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
 import type { D1Like } from '@botguild/agent-core-workers';
 import { applyMigrations } from './testSupport.js';
-import { createBuildLogStore } from './jobs.js';
+import { createBuildLogStore, type BuildLogStore } from './jobs.js';
 import { buildLogPageHtml, createLogEventStream, handleLogJson } from './buildlog.js';
 
 async function freshDb(): Promise<D1Like> {
@@ -134,6 +134,44 @@ test('createLogEventStream honors lastEventId (Last-Event-ID reconnect)', async 
   assert.doesNotMatch(text, /id: 1\n/);
   assert.doesNotMatch(text, /id: 2\n/);
   assert.match(text, /id: 3\ndata: /);
+});
+
+test('createLogEventStream stops polling the store once the reader cancels', async () => {
+  const db = await freshDb();
+  const store = createBuildLogStore(db);
+  await store.append('tok-6', 'plan', 'planning');
+
+  let sinceCalls = 0;
+  const countingStore: BuildLogStore = {
+    ...store,
+    since: async (tok, after) => {
+      sinceCalls += 1;
+      return store.since(tok, after);
+    },
+  };
+
+  const stream = createLogEventStream({
+    store: countingStore,
+    token: 'tok-6',
+    lastEventId: 0,
+    pollMs: 1,
+    // Resolves immediately — a tight loop, so cancellation actually races the poll loop instead
+    // of trivially winning because nothing else is happening.
+    sleep: async () => {},
+  });
+
+  const reader = stream.getReader();
+  await reader.read(); // first frame — the 'plan' event already in the store
+  const callsAtCancel = sinceCalls;
+  await reader.cancel();
+
+  // Give any single in-flight iteration a chance to finish so we're not racing it.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.ok(
+    sinceCalls <= callsAtCancel + 1,
+    `expected since() polling to stop after cancel (callsAtCancel=${callsAtCancel}, sinceCalls=${sinceCalls})`,
+  );
 });
 
 // --- buildLogPageHtml ---------------------------------------------------------------

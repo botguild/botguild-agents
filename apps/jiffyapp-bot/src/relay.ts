@@ -10,6 +10,7 @@
 // around them and passes it in here.
 
 import type { Logger } from 'pino';
+import { createMimeMessage } from 'mimetext';
 import { RELAY_PER_DAY_CAP, RELAY_PER_MINUTE_CAP } from './config.js';
 import {
   dayPeriod,
@@ -40,6 +41,28 @@ export interface RelayDeps {
   fromAddress: string;
   logger: Logger;
   now?: () => Date;
+}
+
+// --- MIME construction (shared by the real Cloudflare mailer) ------------------
+
+/**
+ * Builds the raw RFC-5322 message for an outbound email. Node-testable: `mimetext` ships a Node
+ * entrypoint, unlike `cloudflare:email`/`EmailMessage`, which stay in index.ts.
+ *
+ * IMPORTANT: with the pinned mimetext@3.0.28, the `Message-ID` header has a `generator` that only
+ * runs when `MIMEMessageHeader.dump()` executes (i.e. inside `asRaw()`) — calling `getHeader`
+ * beforehand returns `undefined` because the field's `.value` hasn't been set yet. `asRaw()` must
+ * run first.
+ */
+export function buildRelayMime(msg: OutboundEmail): { raw: string; messageId: string | null } {
+  const mime = createMimeMessage();
+  mime.setSender({ addr: msg.from });
+  mime.setRecipient(msg.to);
+  mime.setSubject(msg.subject);
+  mime.addMessage({ contentType: 'text/plain', data: msg.text });
+  const raw = mime.asRaw();
+  const messageId = (mime.getHeader('Message-ID') as string | undefined) ?? null;
+  return { raw, messageId };
 }
 
 // --- Constants -----------------------------------------------------------------
@@ -159,12 +182,23 @@ export async function handleRelaySubmission(
 
   const subject = buildSubject(rawSubject, toolId);
   const text = buildText(fields);
-  const sent = await deps.mailer.send({
-    to: record.recipient,
-    from: deps.fromAddress,
-    subject,
-    text,
-  });
+  let sent: { messageId: string | null };
+  try {
+    sent = await deps.mailer.send({
+      to: record.recipient,
+      from: deps.fromAddress,
+      subject,
+      text,
+    });
+  } catch (err) {
+    // A throwing mailer must not permanently burn the reservations we just claimed above — give
+    // both back (mirrors the day-cap release pattern) so a retried submission after a transient
+    // delivery failure isn't also charged against the caps.
+    await deps.usage.release(`relay-min:${toolId}`, minutePer);
+    await deps.usage.release(`relay-day:${toolId}`, dayPer);
+    deps.logger.warn({ err, toolId }, 'relay: mailer send failed; reservations released');
+    return { status: 502, body: { ok: false, error: 'delivery failed — please retry' } };
+  }
   await deps.relay.recordEvent({
     toolId,
     kind: 'submission',
