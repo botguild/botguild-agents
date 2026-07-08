@@ -6,10 +6,10 @@
 // embedding them as the buyer-visible acceptance criteria (§12) — a build never gets
 // proposed without goldens the buyer can read and accept.
 
-import type { Gig, ProposalDraft, Proposer } from '@botguild/agent-core';
+import type { Gig, ProposalDraft, ProposalMilestone, Proposer } from '@botguild/agent-core';
 import type { Logger } from 'pino';
 import { briefErrorsForTemplate, extractToolId, matchTemplate, parseJiffyBrief } from './brief.js';
-import { EDITS_PER_CYCLE, GRACE_DAYS, HOSTING_WINDOW_DAYS } from './config.js';
+import { EDITS_PER_CYCLE, GRACE_DAYS, HOSTING_WINDOW_DAYS, pricingCalc } from './config.js';
 import type { GoldenCompiler } from './goldenCompiler.js';
 import { proposalBindable } from './goldenCompiler.js';
 import { formatGoldenBlock } from './goldens.js';
@@ -82,6 +82,26 @@ export function classifyGig(gig: Gig): ClassifiedGig | { kind: 'skip'; reason: s
   }
   return { kind: 'build', templateId: match.templateId, via: match.via, brief };
 }
+
+/**
+ * `config.pricingCalc` takes a `kindOf` classifier so it stays dependency-free of
+ * proposal-time gig classification; this closes over `classifyGig` so the base
+ * agent-core `Proposer` (whose `pricingCalc` is a plain `(gig) => ...` function) can
+ * be constructed with JiffyApp's actual classification. A `skip`-classified gig
+ * (off-catalog / incomplete brief) prices as an untemplated build fallback — the
+ * proposer is never invoked for a skipped gig, so this branch is unreachable in
+ * practice, but `kindOf` must be total.
+ */
+export const pricingCalcWithClassifier: (gig: Gig) => {
+  price: number;
+  timeline: string;
+  milestones: ProposalMilestone[];
+} = (gig) =>
+  pricingCalc(gig, (g) => {
+    const c = classifyGig(g);
+    if (c.kind === 'cycle') return { kind: 'cycle' };
+    return { kind: 'build', template: c.kind === 'build' ? c.templateId : null };
+  });
 
 export interface JiffyProposerDeps {
   base: Proposer; // agent-core createProposer output (with costEstimator wired)
