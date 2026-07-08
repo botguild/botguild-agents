@@ -16,6 +16,7 @@
     "@anthropic-ai/sdk": "^0.51.0",
     "@botguild/agent-core": "workspace:*",
     "@botguild/agent-core-workers": "workspace:*",
+    "@cloudflare/playwright": "1.3.0",
     "fflate": "^0.8.2",
     "hono": "^4.12.23",
     "mimetext": "^3.0.27"
