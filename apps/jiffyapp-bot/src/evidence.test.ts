@@ -20,6 +20,7 @@ import {
   sha256HexBytes,
   type EvidenceInputs,
 } from './evidence.js';
+import { extractToolId } from './brief.js';
 import type { BuildCheckpoint } from './jobs.js';
 import { MODERATION_MODEL, MODERATION_VENDOR } from './moderation.js';
 import type { FileSet } from './types.js';
@@ -52,7 +53,7 @@ function baseInputs(overrides: Partial<EvidenceInputs> = {}): EvidenceInputs {
   return {
     contractId: 'contract-1',
     gigId: 'gig-1',
-    toolId: 'tool-1',
+    toolId: '3f2c9d84-6a1b-4e9f-8c3d-2b7a5e901234',
     slug: 'acme-widget',
     liveUrl: 'https://acme-widget.jiffyapp.dev',
     template: { id: 'landing', version: '1' },
@@ -346,19 +347,21 @@ test('a missing required eject path fails verifyEjectZip (e.g. no public/index.h
 // ---- Delivery note --------------------------------------------------------------------------
 
 test('delivery note contains the toolId linkage line, live URL, warranty exclusion sentence, and golden count', () => {
+  const expectedToolId = '3f2c9d84-6a1b-4e9f-8c3d-2b7a5e901234';
   const note = buildDeliveryNote({
     name: 'Acme Widget',
     liveUrl: 'https://acme-widget.jiffyapp.dev',
     reportUrl: 'https://jiffyapp-bot.example.workers.dev/deliverables/tok/report.json',
     zipUrl: 'https://jiffyapp-bot.example.workers.dev/deliverables/tok/source.zip',
     buildLogUrl: 'https://jiffyapp-bot.example.workers.dev/build-log/tok',
-    toolId: 'tool-1',
+    toolId: expectedToolId,
     hostingPriceUsd: 5,
     goldenCount: 4,
   });
 
-  const linkageLine = note.split('\n').find((line) => line.trim() === 'toolId: tool-1');
-  assert.ok(linkageLine, 'expected an exact `toolId: tool-1` line');
+  const linkageLine = note.split('\n').find((line) => line.trim() === `toolId: ${expectedToolId}`);
+  assert.ok(linkageLine, `expected an exact 'toolId: ${expectedToolId}' line`);
+  assert.equal(extractToolId(note), expectedToolId);
   assert.ok(note.startsWith('# Acme Widget is live'));
   assert.ok(note.includes('https://acme-widget.jiffyapp.dev'));
   assert.ok(note.includes('explicitly excluded'));
