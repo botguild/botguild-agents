@@ -1,10 +1,14 @@
 // Build pipeline — the queue consumer's brain (Tasks 17/18: the full FR-4→FR-10 path).
 //
-// `processJobMessage` dispatches a `JobMessage` by kind: a `build` job runs the full
-// codegen → stage → assert → repair loop to GREEN STAGING, then `promoteAndDeliver` (stages
-// 7-9: promote → live gates → package → deliver) or `abortJob` (the non-convergence leg);
-// `cycle`/`edit` jobs are logged and skipped until Tasks 21/22 wire them (their typed stubs
-// `processCycleJob`/`processEditJob` are exported for those tasks to replace).
+// `processJobMessage` dispatches a `build` `JobMessage` through the full codegen → stage →
+// assert → repair loop to GREEN STAGING, then `promoteAndDeliver` (stages 7-9: promote → live
+// gates → package → deliver) or `abortJob` (the non-convergence leg). `cycle` jobs are handled
+// by `hosting.processCycleJob` instead — the queue consumer (index.ts) routes them there
+// directly rather than through this file, to avoid a runtime import cycle between pipeline.ts
+// and hosting.ts (hosting.ts only needs `PipelineConfig`'s *type*, which is erased at compile
+// time either way, but keeping the dependency one-directional keeps the layering honest).
+// `edit` jobs are logged and skipped until Task 22 wires them (its typed stub `processEditJob`
+// is exported for that task to replace).
 //
 // The build job is CHECKPOINTED and CAPPED: every stage transition appends to the public
 // build log and records a gate-audit row, and every controlled exit (park, re-enqueue
@@ -680,13 +684,6 @@ export async function abortJob(
   }
 }
 
-/** Hosting-cycle service report (Task 21). */
-export async function processCycleJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> {
-  void cfg;
-  void msg;
-  throw new Error('not implemented: cycle job (Task 21)');
-}
-
 /** Thread-driven edit re-gate (Task 22). */
 export async function processEditJob(cfg: PipelineConfig, msg: JobMessage): Promise<void> {
   void cfg;
@@ -699,7 +696,13 @@ export async function processEditJob(cfg: PipelineConfig, msg: JobMessage): Prom
 export async function processJobMessage(cfg: PipelineConfig, msg: JobMessage): Promise<void> {
   if (msg.kind === 'build') return runBuildJob(cfg, msg);
   if (msg.kind === 'cycle') {
-    cfg.logger.info({ jobKey: msg.jobKey }, 'cycle job not yet wired (Task 21); skipping');
+    // Cycle jobs are routed straight to hosting.processCycleJob by the queue consumer
+    // (index.ts) — reaching this branch means that routing was bypassed.
+    cfg.logger.warn(
+      { jobKey: msg.jobKey },
+      'cycle job reached processJobMessage; the queue consumer should route it to ' +
+        'hosting.processCycleJob directly',
+    );
     return;
   }
   cfg.logger.info({ jobKey: msg.jobKey }, 'edit job not yet wired (Task 22); skipping');

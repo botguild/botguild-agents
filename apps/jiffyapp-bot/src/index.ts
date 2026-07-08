@@ -71,6 +71,7 @@ import { createPsiClient } from './psi.js';
 import { createModerationClient } from './moderation.js';
 import { createPlaywrightLauncher, createPlaywrightPageFactory } from './playwrightDriver.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
+import { processCycleJob } from './hosting.js';
 import { buildLogPageHtml, createLogEventStream, handleLogJson } from './buildlog.js';
 import {
   buildRelayMime,
@@ -746,9 +747,16 @@ async function queue(
   // where the idempotency claim + checkpoints (incl. the banked-round + staged
   // short-circuit) make the retry cheap and non-double-spending. The per-job
   // Playwright browser is torn down after every message, success or failure.
+  // Cycle jobs are routed straight to hosting.processCycleJob (Task 21) rather than
+  // through processJobMessage, to avoid a runtime import cycle between pipeline.ts and
+  // hosting.ts.
   for (const message of batch.messages) {
     try {
-      await processJobMessage(s.pipeline, message.body);
+      if (message.body.kind === 'cycle') {
+        await processCycleJob(s.pipeline, message.body as JobMessage & { kind: 'cycle' });
+      } else {
+        await processJobMessage(s.pipeline, message.body);
+      }
       message.ack();
     } catch (err) {
       s.logger.error({ err, body: message.body, messageId: message.id }, 'job failed — retrying');

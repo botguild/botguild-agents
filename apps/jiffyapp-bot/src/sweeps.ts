@@ -18,11 +18,17 @@ import {
   type D1NegotiationStore,
   type SeenStore,
 } from '@botguild/agent-core-workers';
-import { scorerConfig } from './config.js';
+import {
+  BUILD_LOG_RETENTION_DAYS,
+  RELAY_METADATA_RETENTION_DAYS,
+  STUCK_CLAIM_MINUTES,
+  scorerConfig,
+} from './config.js';
 import { parseJiffyBrief } from './brief.js';
 import { classifyGig, createJiffyProposer, pricingCalcWithClassifier } from './proposer.js';
 import { findLatestCorrection, type ThreadReader } from './threads.js';
 import { saveReputationSnapshot } from './jobs.js';
+import { deliverCycleReports, sweepHostingExpiry } from './hosting.js';
 import type {
   AuditStore,
   BuildLogStore,
@@ -100,7 +106,9 @@ export async function maybePropose(s: SweepServices, gig: Gig): Promise<void> {
 
   if (c.kind === 'skip') {
     const isScoredSkipReason =
-      c.reason === 'off-catalog' || c.reason === 'no-brief' || c.reason.startsWith('incomplete-brief');
+      c.reason === 'off-catalog' ||
+      c.reason === 'no-brief' ||
+      c.reason.startsWith('incomplete-brief');
     if (isScoredSkipReason && shouldPropose(gig, scorerConfig)) {
       await s.audit.record({ scope: `gig:${gig.id}`, gate: 'off-catalog-skip', result: c.reason });
       logger.info(
@@ -268,8 +276,55 @@ export async function runFifteenMinuteSweep(s: SweepServices): Promise<void> {
   }
 }
 
-/** The daily (06:00 UTC) sweep (Task 21 replaces this stub with the hosting-cycle
- *  refresh/report checks + §8 stuck-claim recovery). */
+/** The daily (06:00 UTC) sweep (Task 21): hosting expiry/grace/suspend, month-end service
+ *  reports, §8 stuck-claim recovery, and the 30/90-day retention prunes. Every step is
+ *  isolated in its own try/catch — one step's failure must never stop the rest from running. */
 export async function runDailySweep(s: SweepServices): Promise<void> {
-  s.logger.info('runDailySweep: not wired (Task 21)');
+  const now = s.now ?? ((): Date => new Date());
+
+  try {
+    await sweepHostingExpiry(s);
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: hosting-expiry step failed; continuing');
+  }
+
+  try {
+    await deliverCycleReports(s);
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: cycle-report step failed; continuing');
+  }
+
+  try {
+    const cutoff = new Date(now().getTime() - STUCK_CLAIM_MINUTES * 60_000);
+    const stuck = await s.jobs.listStuckClaims(cutoff);
+    for (const job of stuck) {
+      await s.queue.send(toJobMessage(job));
+      s.logger.info(
+        { jobKey: job.jobKey, contractId: job.contractId },
+        'daily sweep: stuck claim re-enqueued',
+      );
+    }
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: stuck-claim recovery step failed; continuing');
+  }
+
+  try {
+    await s.relay.pruneEvents(
+      new Date(now().getTime() - RELAY_METADATA_RETENTION_DAYS * 86_400_000),
+    );
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: relay-events prune step failed; continuing');
+  }
+
+  try {
+    await s.buildLog.prune(new Date(now().getTime() - BUILD_LOG_RETENTION_DAYS * 86_400_000));
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: build-log prune step failed; continuing');
+  }
+
+  try {
+    await s.audit.prune(new Date(now().getTime() - BUILD_LOG_RETENTION_DAYS * 86_400_000));
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: gate-audit prune step failed; continuing');
+  }
 }
