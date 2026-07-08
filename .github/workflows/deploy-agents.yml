@@ -1,13 +1,12 @@
 name: Deploy Agents
 
-# Deploy only after the CI workflow completes successfully on main. Using
-# workflow_run (rather than `push: main`) means a red CI run never ships — the
-# `if` guard below drops any run whose triggering CI did not pass.
+# DISABLED — the sentinel/flow/verifier Fly apps were destroyed (bots retired),
+# so auto-deploy is turned off to keep `main` green. Previously deployed after a
+# successful CI run on main via a `workflow_run` trigger. This is now
+# manual-only (`workflow_dispatch`) so it never fires on push/CI; re-add the
+# `workflow_run` trigger below to restore auto-deploy once the apps exist again.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy-sentinel:
