@@ -1899,6 +1899,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   - `type NodeCensus = { path: number; shape: number; image: number; text: number; foreignObject: number; script: number; hasViewBox: boolean }`
 
 > **Why a regex/scan parser and not a DOM library:** Workers has no DOM, and pulling a full XML parser in for a census we can compute by scanning tag names is bundle weight the §13 size budget cannot spare. The gate is deliberately *conservative* — anything it cannot positively classify as a vector primitive counts as a violation.
+>
+> **⚠️ The code block below is the ORIGINAL draft and is KNOWN-VULNERABLE. The shipped `apps/logosmith-bot/src/gates/vector.ts` is authoritative.** Two execution-verified review rounds redesigned it; a reader implementing from this snippet would reintroduce a Critical bypass. What changed, and why:
+> - **Namespace-qualified tags bypassed everything.** `countTag`'s `` `<${tag}[\s/>]` `` and `sanitizeSvg`'s strippers only matched bare names, so `<ns1:script>`, `<ns1:foreignObject>` and `<ns1:image>` passed `pass: true` — and sanitizing *laundered* the foreignObject case from fail into pass. Every tag pattern now carries an optional `(?:[\w.-]+:)?` prefix.
+> - **The "conservative" claim was not implemented.** The census is a *blocklist*; the documented allowlist semantics now exist as a real check: scan opening tags with `/<([\w.-]+(?::[\w.-]+)?)(?=[\s/>])/g`, strip the prefix, and compare the local name against `svg, g, defs, path, circle, ellipse, rect, line, polyline, polygon, clipPath, mask, linearGradient, radialGradient, stop, pattern, symbol, use, title, desc, metadata`. Anything else is a violation *naming the element*. Note the capture must include `:` — the first attempt omitted it, and `matchAll` then yielded nothing for prefixed tags, leaving the backstop as dead code.
+> - `<style>` and `<a>` are deliberately **not** allowlisted (CSS can smuggle `url(data:…)`; `<a href="javascript:…">` was a confirmed hole, now also caught by an explicit scheme check).
+> - `sanitizeSvg` strips `<metadata>` subtrees so vendor `<rdf:RDF>`/`<dc:title>` are removed rather than newly false-rejected.
+> - The `viewBox` test is case-**sensitive** (`/\sviewBox\s*=/`, no `i`): XML attribute names are case-sensitive, and lowercase `viewbox=` does not scale the mark.
+> - Whitespace between `<` and a tag name is knowingly out of scope — no compliant XML/HTML parser treats `< script>` as a start tag.
 
 - [ ] **Step 1: Write the failing test**
 
