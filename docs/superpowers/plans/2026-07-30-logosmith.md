@@ -6304,6 +6304,17 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
 
         const transcription = parsed.text;
         const score = similarity(normalizeForMatch(transcription), normalizeForMatch(brandName));
+        // Same root cause as the canary guard above: `parsed.unsafe === true`
+        // silently reads the JSON string "true" as SAFE. A safety flag we
+        // can't type-trust is not a flag — refuse to verdict instead of
+        // coercing. Absent stays false (that's the documented default);
+        // only present-but-non-boolean is unavailable.
+        if (parsed.unsafe !== undefined && typeof parsed.unsafe !== 'boolean') {
+          return {
+            status: 'unavailable',
+            error: 'vision model returned a non-boolean unsafe flag',
+          };
+        }
         const unsafe = parsed.unsafe === true;
 
         return {
