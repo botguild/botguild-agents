@@ -3507,6 +3507,8 @@ Record the compressed bundle size in the commit message. If it approaches the Wo
 > **Carry-forwards, not resolved here:** (a) this was measured in Node, a proxy for a real `workerd` isolate; (b) the test SVG is simple — a complex real winner may cost more; (c) ~28 MB of headroom must be **re-checked at Task 12**, once real bindings and Hono share the isolate. If any of those erodes the margin, §16 is still the answer and the trigger condition stands.
 >
 > `mono.ts` needs no equivalent change — `esm-potrace-wasm` exposes two plain functions with no freeable handles.
+>
+> **⚠️ The fix is unguarded.** Existing tests assert byte-correctness *after* freeing, but nothing asserts that freeing happened — so a future refactor that deletes both `finally` blocks would pass the entire suite while silently reintroducing the leak, and the next symptom would be a 128 MB ceiling with no obvious cause. **Task 12 must add the guard while it re-measures:** spy on `Resvg.prototype.free` / `RenderedImage.prototype.free` and assert each is called exactly once per render.
 
 - [ ] **Step 7: Commit**
 
