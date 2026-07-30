@@ -73,6 +73,12 @@ export interface ConceptState {
   phash?: string;
   ocr?: OcrVerdict;
   r2Key?: string;
+  /** R2 key of the sanitized vendor-native SVG, when the vendor returned one
+   *  (Recraft). Lives on the checkpoint — not just the `concepts` row — because
+   *  the resume path rewrites that row in full from this state: a pointer the
+   *  checkpoint cannot hold is a pointer redelivery silently nulls, and losing
+   *  it costs stage 2 a Vectorizer.ai call for a vector already in R2. */
+  nativeSvgKey?: string;
   vendorRequestId?: string;
   failReason?: string;
 }

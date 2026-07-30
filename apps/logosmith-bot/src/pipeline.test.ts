@@ -212,19 +212,25 @@ const okConcept = (
 
 interface MemoryR2 extends DeliverableStore {
   objects: Map<string, { bytes: Uint8Array; contentType: string }>;
+  /** Set to a message to make every `put` throw — the vendor was paid, the
+   *  storage write then failed, and the queue is about to retry the message. */
+  failPut: string | null;
 }
 
 function memoryR2(): MemoryR2 {
   const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
-  return {
+  const store: MemoryR2 = {
     objects,
+    failPut: null,
     async put(key, value, contentType) {
+      if (store.failPut) throw new Error(store.failPut);
       objects.set(key, { bytes: value, contentType });
     },
     async get(key) {
       return objects.get(key)?.bytes ?? null;
     },
   };
+  return store;
 }
 
 interface Delivery {
@@ -724,6 +730,67 @@ describe('runConceptStage — vendor and gate outages park rather than burn', ()
   });
 });
 
+// Regression guards for review finding #1. The ledger is mutated in memory the
+// moment the vendor is paid, but four throwable awaits sit between that and the
+// gates: resvg on a vendor SVG, both R2 puts, and the D1 upsert. If the
+// checkpoint is not persisted BEFORE them, a throw loses the dollars and the
+// attempt, the queue retries the message, and the same slot is paid for again —
+// with the FR-5 cap none the wiser.
+describe('runConceptStage — the spend ledger is durable before anything can throw', () => {
+  it('persists the attempt and the dollars when the R2 write fails', async () => {
+    const h = await setup();
+    h.r2.failPut = 'R2 put failed';
+
+    await assert.rejects(runConceptStage(h.config, message(h.jobKey)), /R2 put failed/);
+
+    assert.equal(h.generated.length, 1, 'the vendor was called exactly once');
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(job?.checkpoint?.slots[0]?.attempts, 1, 'and that attempt is on the record');
+    assert.equal(job?.checkpoint?.spendUsd, IMAGE_COST_USD.ideogram, 'as are its dollars');
+    assert.equal(job?.spentUsd, IMAGE_COST_USD.ideogram);
+  });
+
+  it('does not let a retrying queue re-pay for slots whose storage write failed', async () => {
+    const h = await setup();
+    h.r2.failPut = 'R2 put failed';
+    // Three redeliveries, exactly as the queue's max_retries would produce.
+    for (let i = 0; i < 3; i++) {
+      await assert.rejects(runConceptStage(h.config, message(h.jobKey)));
+    }
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(h.generated.length, 3, 'three paid generations…');
+    assert.equal(job?.checkpoint?.slots[0]?.attempts, 3, '…and all three are counted');
+    assert.equal(job?.checkpoint?.spendUsd, 3 * IMAGE_COST_USD.ideogram);
+
+    // Slot 1 has now spent its cap honestly, so a recovered fourth run must not
+    // buy it a fourth image — while the two untouched slots still complete.
+    h.r2.failPut = null;
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'partial' });
+    assert.equal(h.generated.filter((id) => id === 'wordmark').length, 3, 'never a 4th');
+    assert.equal((await h.jobs.get(h.jobKey))?.checkpoint?.spendUsd, 5 * IMAGE_COST_USD.ideogram);
+  });
+
+  it('persists the attempt when resvg rejects a malformed vendor SVG', async () => {
+    // Recraft's response shape has never been exercised live, so an SVG resvg
+    // will not parse is a plausible first contact — and it throws from inside
+    // renderSvgToPng, after the vendor has already been paid.
+    const h = await setup({
+      generate: (axisId) => ({
+        ok: true,
+        costUsd: IMAGE_COST_USD.recraft,
+        concept: { axisId, vendor: 'recraft', png: new Uint8Array(0), nativeSvg: 'not an svg' },
+      }),
+    });
+
+    await assert.rejects(runConceptStage(h.config, message(h.jobKey)), /SVG data parsing failed/);
+
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(h.generated.length, 1);
+    assert.equal(job?.checkpoint?.slots[0]?.attempts, 1);
+    assert.equal(job?.checkpoint?.spendUsd, IMAGE_COST_USD.recraft);
+  });
+});
+
 describe('runConceptStage — gate behaviour', () => {
   it('rasterizes and persists a Recraft vector-native return', async () => {
     const nativeSvg =
@@ -767,6 +834,53 @@ describe('runConceptStage — gate behaviour', () => {
     assert.ok(row.phash);
   });
 
+  // Regression guard for review finding #2. `concepts.upsert` rewrites the
+  // whole row, so the re-gate path must restore every column it does not
+  // re-derive. `native_svg_key` is the one that costs money to lose: Task 21
+  // reads it to skip Vectorizer.ai when the winner came from Recraft's vector
+  // export, so a nulled pointer is a silent ~$0.20 regression invisible from
+  // stage 2's side.
+  it('keeps native_svg_key across a park and resume of a Recraft slot', async () => {
+    let vision = false;
+    const h = await setup({
+      generate: (axisId) =>
+        axisId === 'emblem'
+          ? {
+              ok: true,
+              costUsd: IMAGE_COST_USD.recraft,
+              concept: {
+                axisId,
+                vendor: 'recraft',
+                vendorRequestId: 'req-emblem',
+                png: new Uint8Array(0),
+                nativeSvg:
+                  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">' +
+                  '<path d="M1 1 H 9 V 9 H 1 Z" fill="#000"/></svg>',
+              },
+            }
+          : okConcept(axisId, MARKS[axisFixture(axisId)]!),
+      // The vision model goes dark exactly as the Recraft slot reaches it.
+      ocr: (fixture) =>
+        fixture === 'rasterized' && !vision
+          ? { status: 'unavailable', error: 'vision request carried no image' }
+          : verdict(true),
+    });
+
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'parked' });
+    const svgKey = `${h.token}/concept-3.svg`;
+    const parked = await h.jobs.get(h.jobKey);
+    assert.equal(parked?.parkReason, 'ocr_outage');
+    assert.equal(parked?.checkpoint?.slots[2]?.nativeSvgKey, svgKey, 'the checkpoint holds it');
+
+    vision = true;
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'delivered' });
+    assert.equal(h.generated.filter((id) => id === 'emblem').length, 1, 'no regeneration');
+
+    const row = (await h.concepts.list(CONTRACT_ID)).find((r) => r.slot === 3)!;
+    assert.equal(row.nativeSvgKey, svgKey, 'and the resumed upsert did not null it');
+    assert.ok(h.r2.objects.has(svgKey), 'the bytes were always safe; the pointer is the risk');
+  });
+
   it('regenerates the newer of two indistinct concepts', async () => {
     const h = await setup({
       // Slots 1 and 2 come back byte-identical the first time round.
@@ -794,7 +908,9 @@ describe('runConceptStage — gate behaviour', () => {
     );
   });
 
-  it('records a gate audit row for every verdict it reaches', async () => {
+  // `SELECT DISTINCT gate` proves each gate KIND is on the record at least
+  // once — not that every individual verdict was written. Named accordingly.
+  it('records a gate audit row for every gate it reaches', async () => {
     const h = await setup();
     await runConceptStage(h.config, message(h.jobKey));
     const { results } = await h.db

@@ -134,6 +134,15 @@ export type StageOutcome = { outcome: 'delivered' | 'partial' | 'aborted' | 'par
  * Spend is checked FIRST and against the accumulated checkpoint total, so a job
  * resumed by a queue retry decides against the remaining budget rather than
  * starting a fresh $2.50.
+ *
+ * NOTE ON `MAX_SPEND_USD`: it is a stop-AFTER threshold, not a ceiling. The
+ * generation that crosses the line completes and is paid for — we only decline
+ * to start the next one — so realized spend can exceed the cap by at most one
+ * generation (worst case ~$3.00 against a $2.50 cap at the $0.50 fake-vendor
+ * costs the tests use; ~$2.58 at real Recraft pricing). That is the intended
+ * policy: a price is not knowable until the vendor has been called. The
+ * overshoot is bounded by exactly one image, and the delivery note quotes both
+ * the cap and the realized figure so the buyer sees the true number.
  */
 export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAction {
   if (spendUsd >= MAX_SPEND_USD) return { action: 'stop', reason: 'spend-cap' };
@@ -541,9 +550,17 @@ export async function runConceptStage(
         continue;
       }
       png = stored;
+      // Every column the upsert below rewrites has to be restored from the
+      // checkpoint, not just the ones the gates are about to fill: `upsert`
+      // writes the WHOLE row (`ON CONFLICT DO UPDATE SET` every column, with
+      // `?? null` for absent fields), so a field left off `row` here is not
+      // preserved — it is nulled. `nativeSvgKey` is the expensive one: losing
+      // that pointer costs stage 2 a Vectorizer.ai call (~$0.20 against a $1
+      // anchor) for a vector already sitting in R2.
       row.r2Key = pending.r2Key;
       row.vendorRequestId = pending.vendorRequestId;
       row.attemptsUsed = pending.attempts;
+      row.nativeSvgKey = pending.nativeSvgKey;
       slotLog.info('re-gating a checkpointed concept without regenerating');
     } else {
       const result = await services.generator.generate(pending.axis, pending.axis.prompt);
@@ -579,7 +596,7 @@ export async function runConceptStage(
       }
 
       // The money is spent whether or not the image passes a gate, so it lands
-      // in the ledger BEFORE the gates — and before anything can throw.
+      // in the ledger BEFORE the gates.
       checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + result.costUsd);
       pending.attempts += 1;
       pending.status = 'pending';
@@ -587,8 +604,17 @@ export async function runConceptStage(
       pending.ocr = undefined;
       pending.phash = undefined;
       pending.failReason = undefined;
+      pending.nativeSvgKey = undefined;
       row.vendorRequestId = result.concept.vendorRequestId;
       row.attemptsUsed = pending.attempts;
+      // ...and it is PERSISTED here, immediately, because everything below can
+      // throw: resvg rejecting a malformed vendor SVG, either R2 put, the D1
+      // upsert. Mutating the ledger in memory and saving it 40 lines later
+      // means a throw in between loses both the dollars and the attempt, the
+      // queue retries, and we pay the vendor a second time for the same slot.
+      // The cap is only a cap if the spend that motivates it is durable before
+      // the next thing that can fail.
+      await jobs.saveCheckpoint(jobKey, checkpoint);
 
       // Recraft's vector-native return carries an EMPTY png and the SVG
       // instead. Rasterize it here — no gate does — and persist the sanitized
@@ -609,6 +635,7 @@ export async function runConceptStage(
         bytes = await renderSvgToPng(svg, CONCEPT_PX, config.sources);
         const svgKey = `${token}/concept-${slotNo}.svg`;
         await deliverables.put(svgKey, new TextEncoder().encode(svg), 'image/svg+xml');
+        pending.nativeSvgKey = svgKey;
         row.nativeSvgKey = svgKey;
       }
 
