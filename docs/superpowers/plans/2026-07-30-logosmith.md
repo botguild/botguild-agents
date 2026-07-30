@@ -6271,7 +6271,20 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
         // Without this check a silently-dropped image yields a confident wrong
         // verdict — the one failure this gate exists to prevent. Too-low means
         // UNAVAILABLE (park and retry), never a pass or a fail.
-        const promptTokens = output.usage?.prompt_tokens ?? 0;
+        // Type-guard, don't just null-guard: `?? 0` alone left the canary
+        // bypassable, because `NaN < 500`, `'abc' < 500`, `{} < 500` and
+        // `Infinity < 500` are all `false` — so a malformed usage field
+        // sailed straight past the check and produced a full pass verdict.
+        // `typeof x === 'number'` is NOT enough on its own (`typeof NaN`
+        // is `'number'`); `Number.isFinite` is what closes NaN and Infinity
+        // together. Anything not a finite number collapses to 0 and fails
+        // closed: refusing to verdict when the image DID arrive costs one
+        // regeneration, while verdicting when it did not ships a broken logo.
+        const rawPromptTokens = output.usage?.prompt_tokens;
+        const promptTokens =
+          typeof rawPromptTokens === 'number' && Number.isFinite(rawPromptTokens)
+            ? rawPromptTokens
+            : 0;
         if (promptTokens < MIN_VISION_PROMPT_TOKENS) {
           return {
             status: 'unavailable',
