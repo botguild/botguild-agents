@@ -5930,6 +5930,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
   - `normalizeForMatch(text: string): string`
   - `similarity(a: string, b: string): number` — normalized Levenshtein ratio in [0, 1]
   - `createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate`
+  - `MIN_VISION_PROMPT_TOKENS` — the hallucination canary (see the verified-live note below)
   - `interface OcrGate { check(png: Uint8Array, brandName: string, threshold?: number): Promise<OcrOutcome> }`
   - `type OcrOutcome = { status: 'ok'; verdict: OcrVerdict } | { status: 'unavailable'; error: string }`
 
@@ -6121,6 +6122,23 @@ const VISION_PROMPT =
   'rendered. Also report whether the image contains unsafe or inappropriate content. ' +
   'Respond with ONLY JSON: {"text":"<exact transcription>","unsafe":<true|false>}';
 
+/**
+ * Floor on `usage.prompt_tokens` below which we assume the image never
+ * reached the model. Measured: 40 with the image silently dropped, 2497 with
+ * a 1024px image ingested. 500 sits far from both.
+ */
+export const MIN_VISION_PROMPT_TOKENS = 500;
+
+/** base64 for Workers (no Buffer): chunked to avoid blowing the arg limit. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
 /** Pull the first JSON object out of a response that may carry prose or fences. */
 function extractJson(text: string): { text?: unknown; unsafe?: unknown } | null {
   const match = /\{[\s\S]*\}/.exec(text);
@@ -6138,16 +6156,49 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
   return {
     async check(png, brandName, threshold = OCR_SIMILARITY_THRESHOLD) {
       try {
+        // VERIFIED LIVE 2026-07-30. Scout is a CHAT model: it takes
+        // `messages` with content parts and a base64 data URI. The
+        // byte-array `{ prompt, image: [...png] }` form used by the older
+        // llava-style models is ACCEPTED WITH HTTP 200 AND SILENTLY IGNORES
+        // THE IMAGE — measured prompt_tokens 40, and the model returned a
+        // confident, well-formed, entirely hallucinated transcription ("The
+        // quick brown fox jumps over the lazy dog" for an image reading
+        // "ACME"). The correct form measured prompt_tokens 2497 and returned
+        // "ACME". Do not "simplify" this back to the byte-array form.
         const output = (await deps.ai.run(SCOUT_MODEL_ID, {
-          prompt: VISION_PROMPT,
-          image: [...png],
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: VISION_PROMPT },
+                { type: 'image_url', image_url: { url: `data:image/png;base64,${toBase64(png)}` } },
+              ],
+            },
+          ],
           // Nondeterminism is the risk (§13); pin it as far down as the API allows.
           temperature: 0,
           max_tokens: 256,
-        })) as { response?: unknown };
+        })) as { response?: unknown; usage?: { prompt_tokens?: number } };
 
-        const raw = typeof output.response === 'string' ? output.response : '';
-        const parsed = extractJson(raw);
+        // Hallucination canary. A prompt that carried a 1024px image measures
+        // in the thousands of tokens; an ignored image measures in the tens.
+        // Without this check a silently-dropped image yields a confident wrong
+        // verdict — the one failure this gate exists to prevent. Too-low means
+        // UNAVAILABLE (park and retry), never a pass or a fail.
+        const promptTokens = output.usage?.prompt_tokens ?? 0;
+        if (promptTokens < MIN_VISION_PROMPT_TOKENS) {
+          return {
+            status: 'unavailable',
+            error: `vision request carried no image (prompt_tokens=${promptTokens}); refusing to verdict on a text-only response`,
+          };
+        }
+
+        // `response` arrives already parsed when the model emits clean JSON,
+        // and as a string otherwise — handle both.
+        const parsed =
+          typeof output.response === 'string'
+            ? extractJson(output.response)
+            : ((output.response ?? null) as { text?: unknown; unsafe?: unknown } | null);
         if (!parsed || typeof parsed.text !== 'string') {
           return { status: 'unavailable', error: 'vision model returned no usable transcription' };
         }
@@ -6176,7 +6227,14 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
 }
 ```
 
-> **Verify at the first live call:** the `{ prompt, image: [...png] }` input shape follows the Workers AI vision-model convention (llava-style). Llama 4 Scout is a chat model and may instead require the `messages` content-parts form. The `AiLike` seam confines the fix to this one call site — but confirm the schema against a real `env.AI.run` before Task 18 depends on it, and update the adapter and this comment together.
+> **VERIFIED LIVE 2026-07-30 — and the naive shape is actively dangerous.** Both forms were run against `@cf/meta/llama-4-scout-17b-16e-instruct` with a real 1024×1024 logo reading "ACME":
+>
+> | Input shape | HTTP | `prompt_tokens` | Transcription |
+> |---|---|---|---|
+> | `{ prompt, image: [...bytes] }` (the original guess) | **200** | **40** | **"The quick brown fox jumps over the lazy dog"** — pure hallucination |
+> | `{ messages: [{ role, content: [text part, image_url data URI] }] }` | 200 | 2497 | **"ACME"** — correct |
+>
+> The byte-array form does not error. It returns a **confident, well-formed, entirely fabricated** transcription, which for this gate is the worst possible failure: concepts would pass or fail on invented text while the report snapshotted it as evidence, and "AI logos that can actually spell" would rest on noise. Hence `MIN_VISION_PROMPT_TOKENS` — a cheap canary that turns a silent-wrong into a loud-unavailable. Add a test asserting a low-`prompt_tokens` response yields `unavailable`, never a verdict.
 
 Add to `apps/logosmith-bot/src/gates/index.ts`:
 
