@@ -183,4 +183,82 @@ describe('namespace-prefix bypass regression tests (critical)', () => {
       `vendor SVG should pass; got violations: ${result.violations.join(', ')}`,
     );
   });
+
+  it('CRITICAL: rejects namespace-prefixed <ns2:style>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><ns2:style xmlns:ns2="http://www.w3.org/2000/svg">*{fill:red}</ns2:style><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject ns2:style
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns2:style');
+    assert.ok(
+      rawResult.violations.some((v) => /style/i.test(v)),
+      'violation should name style element',
+    );
+    // After sanitize, ns2:style is still there (not a dangerous element in the stripped list)
+    // but allowlist rejects it
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'ns2:style should fail the gate (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /style/i.test(v)));
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <ns9:iframe>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><ns9:iframe xmlns:ns9="http://www.w3.org/2000/svg" src="https://evil.example.com/x"/><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject ns9:iframe
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns9:iframe');
+    assert.ok(
+      rawResult.violations.some((v) => /iframe/i.test(v)),
+      'violation should name iframe element',
+    );
+    // After sanitize, ns9:iframe remains but should still fail
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'ns9:iframe should fail the gate (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /iframe/i.test(v)));
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <weird:animateTransform>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><weird:animateTransform xmlns:weird="http://www.w3.org/2000/svg" xlink:href="#x"/><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject weird:animateTransform
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject weird:animateTransform');
+    assert.ok(
+      rawResult.violations.some((v) => /animateTransform/i.test(v)),
+      'violation should name animateTransform',
+    );
+    // After sanitize, weird:animateTransform remains but should still fail
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'weird:animateTransform should fail (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /animateTransform/i.test(v)));
+  });
+
+  it('positive guard: vendor SVG with metadata+RDF must PASS after sanitize (metadata stripped)', () => {
+    // Vendor metadata with RDF: raw gate may reject due to rdf:RDF and dc:title,
+    // but sanitize removes the metadata subtree, leaving clean output.
+    // Test only the sanitize→gate sequence.
+    const vendorWithMetadata =
+      '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+      '<metadata>' +
+      '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+      '<rdf:Description>' +
+      '<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">My Logo</dc:title>' +
+      '</rdf:Description>' +
+      '</rdf:RDF>' +
+      '</metadata>' +
+      '<defs><linearGradient id="g1"><stop offset="0%"/></linearGradient></defs>' +
+      '<path d="M 10 10 L 90 90" stroke="url(#g1)" stroke-width="2"/>' +
+      '</svg>';
+    // After sanitize: metadata subtree is stripped, leaving only defs + path + viewBox
+    const sanitized = sanitizeSvg(vendorWithMetadata);
+    const result = checkTrueVector(sanitized);
+    assert.equal(
+      result.pass,
+      true,
+      `vendor SVG with metadata should pass after sanitize; got violations: ${result.violations.join(', ')}`,
+    );
+  });
 });

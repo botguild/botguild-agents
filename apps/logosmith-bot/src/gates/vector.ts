@@ -15,6 +15,9 @@
 // Workers has no DOM, and a full XML parser is bundle weight the §13 size
 // budget cannot spare, so this is a conservative tag/attribute scan: anything
 // not positively classified as a vector primitive counts as a violation.
+//
+// NOTE: We do not handle malformed XML with whitespace-after-< (e.g., "< script>").
+// No compliant XML/HTML parser treats this as a start tag, so it is out of scope.
 // ---------------------------------------------------------------------------
 
 export interface NodeCensus {
@@ -80,6 +83,11 @@ export function sanitizeSvg(svg: string): string {
       // ForeignObject: both bare and namespace-prefixed forms, paired and self-closing
       .replace(/<(?:[\w.-]+:)?foreignObject\b[\s\S]*?<\/(?:[\w.-]+:)?foreignObject\s*>/gi, '')
       .replace(/<(?:[\w.-]+:)?foreignObject\b[^>]*\/>/gi, '')
+      // Metadata: strip entire metadata subtrees (namespace-aware) to prevent false
+      // rejections of vendor metadata like <rdf:RDF> nested inside <metadata>.
+      // SVGO does this in the real pipeline.
+      .replace(/<(?:[\w.-]+:)?metadata\b[\s\S]*?<\/(?:[\w.-]+:)?metadata\s*>/gi, '')
+      .replace(/<(?:[\w.-]+:)?metadata\b[^>]*\/>/gi, '')
       // Event attributes: remove on* handlers
       .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
       .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
@@ -112,10 +120,11 @@ export function checkTrueVector(svg: string): VectorGateResult {
   // Allowlist check: every opening tag must be in the vector allowlist.
   // This catches namespace-prefixed dangerous elements and any unrecognized tags.
   // Deliberately excludes <style> (can smuggle url(data:...)) and <a> (facilitates javascript: bypass).
-  const tagMatches = svg.matchAll(/<([\w.-]+)(?=[\s/>])/g);
+  // Regex captures optional namespace prefix: <(prefix:)?localName
+  const tagMatches = svg.matchAll(/<([\w.-]+(?::[\w.-]+)?)(?=[\s/>])/g);
   for (const match of tagMatches) {
     const fullTag = match[1];
-    // Strip namespace prefix if present (e.g., "ns1:script" → "script")
+    // Strip namespace prefix if present (e.g., "ns1:script" → "script", "ns2:style" → "style")
     const tag = fullTag.includes(':') ? fullTag.split(':')[1] : fullTag;
     const tagLower = tag.toLowerCase();
 
