@@ -1,0 +1,24 @@
+{
+  "name": "@botguild/thumbforge-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ThumbForge reachability probe — a trivial Worker on its own workers.dev hostname that fetches a delivered URL with a cache-buster and reports status + byte length (the §9 URL-probe leg; avoids the bot Worker's same-zone self-fetch hazard).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "tsx --test src/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.107.0"
+  }
+}

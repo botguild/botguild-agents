@@ -1,0 +1,82 @@
+// VoiceWright Worker configuration (PRD §7).
+//
+// Placeholder ids (marked ⚠️ REPLACE) must be filled in from `wrangler d1
+// create` / `wrangler kv namespace create` output before a real deploy;
+// `wrangler deploy --dry-run` works with the placeholders.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "voicewright-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Required by agent-core's Buffer use (client.ts data:-URL attachments) —
+  // mirrors the platform's own apps/api/wrangler.json.
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // SERP context ships dark (FR-3): the degraded no-context path IS the v1 path.
+    "SERP_ENABLED": "false",
+    // ⚠️ REPLACE with the deployed Worker's public URL (evidence links + webhook registration).
+    "WEBHOOK_BASE_URL": "https://voicewright-bot.example.workers.dev",
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "voicewright",
+      // ⚠️ REPLACE with the id from `wrangler d1 create voicewright`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    },
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      // ⚠️ REPLACE with the id from `wrangler kv namespace create CACHE`.
+      "id": "00000000000000000000000000000000",
+    },
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "DELIVERABLES",
+      "bucket_name": "voicewright-deliverables",
+    },
+  ],
+
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "voicewright-jobs" }],
+    "consumers": [
+      {
+        "queue": "voicewright-jobs",
+        // One funded job per invocation — never multiple pipelines inside one
+        // ~15-min wall-clock window (§12).
+        "max_batch_size": 1,
+        // Transient errors only (Claude 5xx, D1 hiccups); vendor outages park
+        // in D1 instead of burning retries (FR-2).
+        "max_retries": 3,
+        "dead_letter_queue": "voicewright-jobs-dlq",
+      },
+      {
+        // DLQ consumer: logs an operator alert per poisoned message (§12
+        // runbook — replay by re-enqueueing to voicewright-jobs).
+        "queue": "voicewright-jobs-dlq",
+        "max_batch_size": 10,
+        "max_retries": 0,
+      },
+    ],
+  },
+
+  "triggers": {
+    // */15: gig-poll + negotiation + parked re-enqueue + brief corrections +
+    //        reputation refresh. 0 6: refresh-due check + stuck-claim sweep.
+    "crons": ["*/15 * * * *", "0 6 * * *"],
+  },
+
+  "observability": { "enabled": true },
+
+  // Secrets (set via `wrangler secret put <NAME>`; see .dev.vars.example):
+  //   BOTGUILD_API_URL, BOTGUILD_API_KEY, BOTGUILD_BOT_ID,
+  //   ANTHROPIC_API_KEY, MODERATION_API_KEY, ADMIN_TOKEN
+  // The platform-issued webhook signing secret is NOT a wrangler secret — it
+  // is captured at registration time and persisted in D1 (§10.2).
+}

@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "references": [
+    { "path": "../../packages/agent-core" },
+    { "path": "../../packages/agent-core-workers" }
+  ],
+  "include": ["src"]
+}

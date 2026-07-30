@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jiffyapp-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Required by agent-core's Buffer use (client.ts data:-URL attachments).
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // Public origin of THIS bot Worker (webhooks, deliverables, build log, relay).
+    "WEBHOOK_BASE_URL": "https://jiffyapp-bot.example.workers.dev", // ⚠️ REPLACE
+    "TOOL_HOST_SUFFIX": "jiffyapp.dev",
+    "CF_ACCOUNT_ID": "0000000000000000000000000000000000000000", // ⚠️ REPLACE
+    "DISPATCH_NAMESPACE": "jiffyapp-tools",
+    "RELAY_FROM_ADDRESS": "relay@jiffyapp.dev", // ⚠️ REPLACE — Email Service sender (SPF/DKIM, Phase 0)
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jiffyapp",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    }, // ⚠️ REPLACE (same id as jiffyapp-dispatch)
+  ],
+  "kv_namespaces": [
+    // Non-billing caches only (poller seen-gig ids) — never idempotency/usage.
+    { "binding": "CACHE", "id": "00000000000000000000000000000000" }, // ⚠️ REPLACE
+  ],
+  "r2_buckets": [{ "binding": "DELIVERABLES", "bucket_name": "jiffyapp-deliverables" }],
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "jiffyapp-jobs" }],
+    "consumers": [
+      // max_concurrency 1: max_batch_size alone does NOT bound concurrent invocations —
+      // serialize jobs (one Browser Rendering session; no staging-slug races).
+      {
+        "queue": "jiffyapp-jobs",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "jiffyapp-jobs-dlq",
+      },
+      { "queue": "jiffyapp-jobs-dlq", "max_batch_size": 10, "max_retries": 0 },
+    ],
+  },
+  "ai": { "binding": "AI" },
+  "browser": { "binding": "BROWSER" },
+  "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "jiffyapp-tools" }],
+  "send_email": [{ "name": "SEND_EMAIL" }],
+  "triggers": { "crons": ["*/15 * * * *", "0 6 * * *"] },
+  "observability": { "enabled": true },
+  // Secrets via `wrangler secret put`: BOTGUILD_API_URL, BOTGUILD_API_KEY, BOTGUILD_BOT_ID,
+  // ANTHROPIC_API_KEY, MODERATION_API_KEY, CF_API_TOKEN (scoped to dispatch-namespace script
+  // edit ONLY), CF_EMAIL_API_TOKEN (second token, scoped to Email Routing addresses read/write
+  // ONLY — destination-address verification, Task 19), PSI_API_KEY, ADMIN_TOKEN.
+  // The platform webhook signing secret lives in D1, NOT wrangler secrets.
+}

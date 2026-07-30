@@ -1,0 +1,19 @@
+// ThumbForge reachability probe (PRD §7/§9).
+//
+// A deliberately trivial second Worker on its OWN `workers.dev` hostname — NOT
+// the bot's custom domain / zone. The bot Worker invokes it through the `PROBE`
+// service binding to fetch a delivered custom-domain URL from a genuinely
+// different hostname, sidestepping the same-zone self-hostname fetch hazard
+// (err 1042 / self-routing). It has no bindings and stores nothing.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thumbforge-probe",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+
+  // Keep the dedicated workers.dev hostname enabled: the whole point is a
+  // hostname on a different zone from the bot's custom domain.
+  "workers_dev": true,
+
+  "observability": { "enabled": true },
+}

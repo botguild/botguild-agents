@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jiffyapp-dispatch",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Routed on the wildcard tool zone. Zone + DNS + TLS are Phase 0 ops (see bot README).
+  "routes": [{ "pattern": "*.jiffyapp.dev/*", "zone_name": "jiffyapp.dev" }],
+  "vars": { "TOOL_HOST_SUFFIX": "jiffyapp.dev" },
+  "d1_databases": [
+    // Shared with jiffyapp-bot — same database, read-only usage here.
+    {
+      "binding": "DB",
+      "database_name": "jiffyapp",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    }, // ⚠️ REPLACE
+  ],
+  "dispatch_namespaces": [{ "binding": "DISPATCH", "namespace": "jiffyapp-tools" }],
+  "observability": { "enabled": true },
+}
