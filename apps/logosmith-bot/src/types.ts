@@ -45,6 +45,9 @@ export interface Concept {
   vendor: string;
   vendorRequestId?: string;
   png: Uint8Array;
+  /** Vendor RNG seed when returned (Ideogram does) — makes a concept
+   *  reproducible; recorded in the gate audit detail, not its own column. */
+  seed?: number;
   /** Present when the vendor returned a native vector export (Recraft). */
   nativeSvg?: string;
 }
