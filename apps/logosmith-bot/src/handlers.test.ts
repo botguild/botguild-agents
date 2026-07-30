@@ -28,4 +28,25 @@ describe('resolveDeliverable', () => {
     assert.ok(resolveDeliverable(token, 'concept-3.png'));
     assert.equal(resolveDeliverable(token, 'concept-4.png'), null);
   });
+
+  it('rejects Object.prototype-inherited property names, not just absent ones', () => {
+    // DELIVERABLE_TYPES is a plain object literal used as a lookup map; a
+    // bracket-access lookup returns a truthy inherited value for these names
+    // instead of undefined, bypassing a falsy-check guard. None of these are
+    // ever whitelisted files, so every one must resolve to null.
+    const token = 'a'.repeat(64);
+    const inheritedNames = [
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+      'valueOf',
+      'toLocaleString',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+    ];
+    for (const file of inheritedNames) {
+      assert.equal(resolveDeliverable(token, file), null, `expected null for file=${file}`);
+    }
+  });
 });

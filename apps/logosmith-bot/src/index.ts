@@ -136,14 +136,21 @@ const DELIVERABLE_TYPES: Record<string, string> = {
  * unguessable capability token (§12) — never the recomputable job key — and
  * file names are whitelisted, so the R2 namespace is neither enumerable nor
  * derivable from a known contract id.
+ *
+ * `DELIVERABLE_TYPES` is a plain object literal, so a bare `[file]` lookup
+ * would return a truthy inherited value (not `undefined`) for names like
+ * `__proto__`/`constructor`/`toString`/etc. — sailing past a falsy check
+ * instead of being rejected. `Object.hasOwn` guards against exactly that,
+ * matching the same plain-object-as-map idiom already used in this repo
+ * (agent-core-workers' webhookApp.ts uses it for its handlers map).
  */
 export function resolveDeliverable(
   token: string,
   file: string,
 ): { key: string; contentType: string } | null {
   if (!/^[0-9a-f]{64}$/.test(token)) return null;
+  if (!Object.hasOwn(DELIVERABLE_TYPES, file)) return null;
   const contentType = DELIVERABLE_TYPES[file];
-  if (!contentType) return null;
   return { key: `${token}/${file}`, contentType };
 }
 
