@@ -125,6 +125,61 @@ describe('OcrGate', () => {
     assert.ok(!('verdict' in outcome));
   });
 
+  it('fails closed when prompt_tokens is not a finite number — the canary must not be bypassable', async () => {
+    // `output.usage?.prompt_tokens ?? 0` only guards null/undefined: a NaN,
+    // a non-numeric string, an object, or Infinity all sail past `?? 0` and
+    // then past `x < 500` too (NaN compares false in both directions; a
+    // string/object triggers implicit coercion; Infinity is never < 500).
+    // Every one of these must still collapse to `unavailable`, using a
+    // transcription that matches the brand name exactly so the test fails
+    // loudly (a wrongly-issued `ok`/`pass:true`) if the guard regresses.
+    for (const hostilePromptTokens of [NaN, '2497', { valueOf: () => 2497 }, Infinity]) {
+      const gate = createOcrGate({
+        ai: {
+          run: async () => ({
+            response: '{"text":"Harbor & Vine","unsafe":false}',
+            usage: { prompt_tokens: hostilePromptTokens },
+          }),
+        },
+      });
+      const outcome = await gate.check(PNG, 'Harbor & Vine');
+      assert.equal(outcome.status, 'unavailable', String(hostilePromptTokens));
+      assert.ok(!('verdict' in outcome), String(hostilePromptTokens));
+    }
+  });
+
+  it('accepts prompt_tokens exactly at the MIN_VISION_PROMPT_TOKENS boundary (< not <=)', async () => {
+    const gate = createOcrGate({
+      ai: {
+        run: async () => ({
+          response: '{"text":"Harbor & Vine","unsafe":false}',
+          usage: { prompt_tokens: 500 },
+        }),
+      },
+    });
+    const outcome = await gate.check(PNG, 'Harbor & Vine');
+    assert.ok(outcome.status === 'ok');
+    assert.equal(outcome.verdict.pass, true);
+  });
+
+  it('reports unavailable when unsafe is present but not a boolean (e.g. the JSON string "true")', async () => {
+    // A wrong-typed `unsafe` can't be trusted in either direction — coercing
+    // the string "true" to boolean true (or, worse, falling through
+    // `=== true` to a silent false) both misrepresent what the model said.
+    const gate = createOcrGate({ ai: aiReturning('{"text":"Harbor & Vine","unsafe":"true"}') });
+    const outcome = await gate.check(PNG, 'Harbor & Vine');
+    assert.equal(outcome.status, 'unavailable');
+    assert.ok(!('verdict' in outcome));
+  });
+
+  it('leaves unsafe defaulted to false when the field is absent entirely (unchanged behavior)', async () => {
+    const gate = createOcrGate({ ai: aiReturning('{"text":"Harbor & Vine"}') });
+    const outcome = await gate.check(PNG, 'Harbor & Vine');
+    assert.ok(outcome.status === 'ok');
+    assert.equal(outcome.verdict.unsafe, false);
+    assert.equal(outcome.verdict.pass, true);
+  });
+
   it('fails the gate on a hostile transcription that does not match the brand name, never a pass', async () => {
     // The mirror of the "clean readback" happy path: a transcription for a
     // wholly different string (not a near-miss typo) must drive the gate to

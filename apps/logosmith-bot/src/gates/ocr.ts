@@ -130,7 +130,16 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
         // Without this check a silently-dropped image yields a confident wrong
         // verdict — the one failure this gate exists to prevent. Too-low means
         // UNAVAILABLE (park and retry), never a pass or a fail.
-        const promptTokens = output.usage?.prompt_tokens ?? 0;
+        //
+        // `typeof x === 'number'` is NOT sufficient on its own: `typeof NaN
+        // === 'number'`, and `NaN < 500` is false, which would let the canary
+        // silently pass through. Anything that isn't a finite number collapses
+        // to 0 and fails closed.
+        const rawPromptTokens = output.usage?.prompt_tokens;
+        const promptTokens =
+          typeof rawPromptTokens === 'number' && Number.isFinite(rawPromptTokens)
+            ? rawPromptTokens
+            : 0;
         if (promptTokens < MIN_VISION_PROMPT_TOKENS) {
           return {
             status: 'unavailable',
@@ -146,6 +155,16 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
             : ((output.response ?? null) as { text?: unknown; unsafe?: unknown } | null);
         if (!parsed || typeof parsed.text !== 'string') {
           return { status: 'unavailable', error: 'vision model returned no usable transcription' };
+        }
+        // A present-but-wrong-typed `unsafe` (e.g. the JSON string "true"
+        // rather than the boolean true) can't be trusted either way — refuse
+        // to verdict rather than silently coercing it. Absent is fine: that's
+        // today's default-to-false behavior, unchanged below.
+        if (parsed.unsafe !== undefined && typeof parsed.unsafe !== 'boolean') {
+          return {
+            status: 'unavailable',
+            error: 'vision model returned a non-boolean unsafe flag',
+          };
         }
 
         const transcription = parsed.text;
