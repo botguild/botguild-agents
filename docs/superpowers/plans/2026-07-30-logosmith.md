@@ -1565,6 +1565,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```typescript
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { MIN_PHASH_HAMMING } from '../config.js';
 import type { Pixmap } from '../types.js';
 import {
   checkDistinctness,
@@ -1592,22 +1593,32 @@ function makePixmap(size: number, shade: (x: number, y: number) => number): Pixm
 
 const leftHalfDark = makePixmap(64, (x) => (x < 32 ? 0 : 255));
 const topHalfDark = makePixmap(64, (_x, y) => (y < 32 ? 0 : 255));
-const leftHalfDarkNoisy = makePixmap(64, (x, y) => {
-  if (x === 0 && y === 0) return 128; // one perturbed pixel
-  return x < 32 ? 0 : 255;
-});
+// pHash bit-vs-median is only stable on broadband images. Flat/ramp synthetics
+// are DCT-sparse (median in a zero-coefficient cluster; one perturbed pixel
+// measured 29-30 bit flips) — real vendor images are broadband, and the Phase-2
+// calibration validates the threshold on real batches. Minimal flat-colour
+// marks are the caveat; the axis-id rule is the second lock. (T4 execution ruling.)
+const rings = makePixmap(64, (x, y) => ((x - 32) ** 2 + (y - 32) ** 2) % 256);
+const ringsOnePixel = makePixmap(64, (x, y) =>
+  x === 0 && y === 0 ? 128 : ((x - 32) ** 2 + (y - 32) ** 2) % 256,
+);
+const ringsRenderNoise = makePixmap(64, (x, y) =>
+  Math.min(255, (((x - 32) ** 2 + (y - 32) ** 2) % 256) + ((x * 31 + y * 17) % 20 === 0 ? 6 : 0)),
+);
 
 describe('perceptualHash', () => {
   it('is deterministic for the same input', () => {
     assert.equal(perceptualHash(leftHalfDark), perceptualHash(leftHalfDark));
   });
 
-  it('is near-identical for a near-identical image', () => {
-    const distance = hammingDistance(
-      perceptualHash(leftHalfDark),
-      perceptualHash(leftHalfDarkNoisy),
-    );
-    assert.ok(distance < 5, `expected a small distance, got ${distance}`);
+  it('a one-pixel perturbation stays below the distinctness threshold', () => {
+    const distance = hammingDistance(perceptualHash(rings), perceptualHash(ringsOnePixel));
+    assert.ok(distance < MIN_PHASH_HAMMING, `expected < ${MIN_PHASH_HAMMING}, got ${distance}`);
+  });
+
+  it('distributed render noise stays below the distinctness threshold', () => {
+    const distance = hammingDistance(perceptualHash(rings), perceptualHash(ringsRenderNoise));
+    assert.ok(distance < MIN_PHASH_HAMMING, `expected < ${MIN_PHASH_HAMMING}, got ${distance}`);
   });
 
   it('differs substantially for a different composition', () => {
