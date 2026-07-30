@@ -35,7 +35,7 @@ const googleUrl = (family: string): string =>
 const ref = (family: string, category: string): FontRef => ({
   family,
   category,
-  license: 'See the specimen page for this family\'s licence.',
+  license: "See the specimen page for this family's licence.",
   url: googleUrl(family),
 });
 
@@ -46,8 +46,18 @@ const ref = (family: string, category: string): FontRef => ({
  * path may not.
  */
 const FALLBACK: FontPairing = {
-  heading: { family: 'Inter', category: 'sans-serif', license: 'SIL Open Font License 1.1', url: googleUrl('Inter') },
-  body: { family: 'Source Serif 4', category: 'serif', license: 'SIL Open Font License 1.1', url: googleUrl('Source Serif 4') },
+  heading: {
+    family: 'Inter',
+    category: 'sans-serif',
+    license: 'SIL Open Font License 1.1',
+    url: googleUrl('Inter'),
+  },
+  body: {
+    family: 'Source Serif 4',
+    category: 'serif',
+    license: 'SIL Open Font License 1.1',
+    url: googleUrl('Source Serif 4'),
+  },
   note: ADVISORY_NOTE,
 };
 
