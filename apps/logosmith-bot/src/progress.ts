@@ -12,11 +12,14 @@ import type { ConceptRow, JobRow } from './jobs.js';
 const SSE_RETRY_MS = 5000;
 
 function escapeHtml(text: string): string {
+  // Encode all five unsafe characters to prevent injection, even in attribute contexts.
+  // & must be first to avoid corrupting the entity encodings.
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function conceptCard(concept: ConceptRow, token: string): string {

@@ -87,6 +87,20 @@ describe('renderProgressPage', () => {
     assert.match(html, /&lt;img/);
   });
 
+  it('encodes apostrophes in concept text to prevent attribute breakout', () => {
+    const apostrophed = [
+      {
+        ...concepts[0]!,
+        r2Key: null,
+        axisId: "designer's logo",
+        ocrTranscription: "it's a brand",
+      },
+    ];
+    const html = renderProgressPage(job, apostrophed);
+    assert.match(html, /designer&#39;s logo/);
+    assert.match(html, /it&#39;s a brand/);
+  });
+
   it('renders a waiting state when no concept has landed yet', () => {
     const html = renderProgressPage(job, []);
     assert.match(html, /generating|waiting|in progress/i);
