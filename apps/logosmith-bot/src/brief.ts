@@ -32,7 +32,9 @@ const nonBlankString = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
 const stringArray = (value: unknown): string[] | undefined =>
-  Array.isArray(value) && value.every((v) => typeof v === 'string') ? (value as string[]) : undefined;
+  Array.isArray(value) && value.every((v) => typeof v === 'string')
+    ? (value as string[])
+    : undefined;
 
 /**
  * Latin-script check (v1 scope, PRD §13). Accepts Basic Latin plus Latin-1

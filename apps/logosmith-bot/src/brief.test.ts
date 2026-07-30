@@ -96,7 +96,11 @@ describe('checkLogoUrl', () => {
   });
 
   it('rejects non-https schemes', () => {
-    for (const url of ['http://example.com/a.png', 'file:///etc/passwd', 'data:image/png;base64,x']) {
+    for (const url of [
+      'http://example.com/a.png',
+      'file:///etc/passwd',
+      'data:image/png;base64,x',
+    ]) {
       const result = checkLogoUrl(url);
       assert.ok(!result.ok, `expected rejection: ${url}`);
     }
