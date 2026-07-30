@@ -2,6 +2,12 @@ node_modules/
 dist/
 .env
 *.local
+
+# Wrangler local secrets — .dev.vars.example is the committed template,
+# .dev.vars itself holds real keys and must never be tracked.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
 .turbo/
 *.tsbuildinfo
 data/
