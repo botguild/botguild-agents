@@ -83,4 +83,51 @@ describe('checkIco', () => {
     view.setUint32(6 + 12, 0xfffffff0, true); // corrupt entry 0's offset
     assert.equal(checkIco(ico).pass, false);
   });
+
+  it('fails when the entry table lists extra sizes', () => {
+    const extraEntries = [16, 32, 48, 64].map((size) => ({ size, png: fakePng(size) }));
+    const result = checkIco(assembleIco(extraEntries));
+    assert.equal(result.pass, false);
+    assert.match(result.reason ?? '', /64/);
+  });
+
+  it('fails when a payload dimension does not match its declared size', () => {
+    // Entry declared as 16 but PNG actually encodes 32x32.
+    const mismatchedEntries = [
+      { size: 16, png: fakePng(32) }, // declared 16, actual 32
+      { size: 32, png: fakePng(32) },
+      { size: 48, png: fakePng(48) },
+    ];
+    const result = checkIco(assembleIco(mismatchedEntries));
+    assert.equal(result.pass, false);
+    assert.match(result.reason ?? '', /32/); // should mention the actual dimension
+  });
+
+  it('fails when a payload is not a valid PNG', () => {
+    const ico = assembleIco(entries);
+    const view = new DataView(ico.buffer, ico.byteOffset, ico.byteLength);
+    // Corrupt the first PNG by overwriting its magic bytes.
+    const firstOffset = view.getUint32(6 + 12, true);
+    ico[firstOffset] = 0xff;
+    ico[firstOffset + 1] = 0xff;
+    const result = checkIco(ico);
+    assert.equal(result.pass, false);
+    assert.match(result.reason ?? '', /PNG/);
+  });
+
+  it('fails when an entry offset points into the directory table', () => {
+    const ico = assembleIco(entries);
+    const view = new DataView(ico.buffer, ico.byteOffset, ico.byteLength);
+    view.setUint32(6 + 12, 0, true); // corrupt entry 0's offset to 0 (into header)
+    const result = checkIco(ico);
+    assert.equal(result.pass, false);
+    assert.match(result.reason ?? '', /directory/);
+  });
+
+  it('still passes a well-formed 16/32/48 ICO with payloads that genuinely encode those sizes', () => {
+    // This guards against over-rejection in the dimension check.
+    const result = checkIco(assembleIco(entries));
+    assert.equal(result.pass, true);
+    assert.deepEqual(result.sizes, [16, 32, 48]);
+  });
 });

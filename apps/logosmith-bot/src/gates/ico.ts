@@ -3,6 +3,7 @@
 // not evidence that it is readable — reading it back is.
 
 import { ICO_SIZES } from '../config.js';
+import { readPngDimensions } from './dimensions.js';
 
 export interface IcoParseResult {
   count: number;
@@ -51,16 +52,55 @@ export function checkIco(
   const parsed = parseIco(ico);
   if (!parsed) return { pass: false, sizes: [], reason: 'buffer did not parse as an ICO' };
 
+  // Validate structural constraints before attempting to decode payloads.
+  const headerEnd = ICONDIR_BYTES + ICONDIRENTRY_BYTES * parsed.count;
   for (const entry of parsed.entries) {
+    // Check offset lower bound (must not point into the directory table).
+    if (entry.offset < headerEnd) {
+      return { pass: false, sizes: [], reason: 'an entry offset points into the directory table' };
+    }
+    // Check offset upper bound (must not run past buffer end).
     if (entry.offset + entry.byteLength > ico.byteLength) {
       return { pass: false, sizes: [], reason: 'an entry offset runs past the end of the buffer' };
     }
   }
 
+  // Validate each payload's actual dimensions match its declared size.
+  for (let i = 0; i < parsed.entries.length; i++) {
+    const entry = parsed.entries[i]!;
+    const payload = ico.subarray(entry.offset, entry.offset + entry.byteLength);
+    const dims = readPngDimensions(payload);
+    if (!dims) {
+      return {
+        pass: false,
+        sizes: [],
+        reason: `entry ${i}: payload does not parse as a valid PNG`,
+      };
+    }
+    if (dims.width !== entry.width || dims.height !== entry.height) {
+      return {
+        pass: false,
+        sizes: [],
+        reason: `entry ${i}: declared ${entry.width}x${entry.height} but contains ${dims.width}x${dims.height} PNG`,
+      };
+    }
+  }
+
   const sizes = parsed.entries.map((e) => e.width).sort((a, b) => a - b);
   const missing = expectedSizes.filter((size) => !sizes.includes(size));
+  const extra = sizes.filter((size) => !expectedSizes.includes(size));
+
+  const reasons: string[] = [];
   if (missing.length > 0) {
-    return { pass: false, sizes, reason: `entry table is missing size(s): ${missing.join(', ')}` };
+    reasons.push(`entry table is missing size(s): ${missing.join(', ')}`);
   }
+  if (extra.length > 0) {
+    reasons.push(`entry table has extra size(s): ${extra.join(', ')}`);
+  }
+
+  if (reasons.length > 0) {
+    return { pass: false, sizes, reason: reasons.join('; ') };
+  }
+
   return { pass: true, sizes };
 }
