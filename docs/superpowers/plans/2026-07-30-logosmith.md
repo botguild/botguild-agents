@@ -477,6 +477,9 @@ export interface Concept {
   vendor: string;
   vendorRequestId?: string;
   png: Uint8Array;
+  /** Vendor RNG seed when returned (Ideogram does) — makes a concept
+   *  reproducible; recorded in the gate audit detail, not its own column. */
+  seed?: number;
   /** Present when the vendor returned a native vector export (Recraft). */
   nativeSvg?: string;
 }
@@ -5774,15 +5777,27 @@ export function createGenerator(deps: {
         error: `ideogram returned ${response.status}`,
       };
     }
-    const body = (await response.json()) as { created?: string; data?: Array<{ url?: string }> };
-    const url = body.data?.[0]?.url;
+    // VERIFIED LIVE 2026-07-30 against the real API. `created` is an ISO
+    // TIMESTAMP, not an id — the real per-request id is the `x-request-id`
+    // RESPONSE HEADER, and that is what the licence manifest must persist.
+    const requestId = response.headers.get('x-request-id') ?? undefined;
+    const body = (await response.json()) as {
+      created?: string;
+      data?: Array<{ url?: string; seed?: number; is_image_safe?: boolean }>;
+    };
+    const first = body.data?.[0];
+    const url = first?.url;
     if (!url) return { ok: false, retryable: true, error: 'ideogram returned no image url' };
+    // The URL is EPHEMERAL — signed, with a 24 h `exp`. Fetch it now; never
+    // persist it. The pipeline PUTs the bytes to R2 immediately (Task 18) so a
+    // parked or DLQ-replayed job never depends on a dead vendor link.
     const png = await fetchBytes(url);
     if (!isPng(png)) return { ok: false, retryable: true, error: 'ideogram asset was not a PNG' };
     return {
       ok: true,
       costUsd: IMAGE_COST_USD.ideogram,
-      concept: { axisId: '', vendor: 'ideogram', vendorRequestId: body.created, png },
+      // `seed` makes a concept reproducible; record it in the gate audit detail.
+      concept: { axisId: '', vendor: 'ideogram', vendorRequestId: requestId, png, seed: first.seed },
     };
   }
 
@@ -5879,7 +5894,15 @@ export function createGenerator(deps: {
 
 The request bodies above are written from each vendor's documented v3 API. Before Task 18 depends on them, make one live call per vendor with a real key and confirm the response field names (`created` / `data[].url` for Ideogram, `id` / `data[].url` for Recraft). If a field differs, fix the adapter and the test fixture together — do not leave the test asserting a shape the vendor does not return.
 
-Note Ideogram's `created` is a **timestamp**, not a request id. If the live response exposes a real request/generation id (body field or response header), record that as `vendorRequestId` instead — the license manifest's provenance claim is only as strong as this id.
+**Ideogram is now VERIFIED LIVE (2026-07-30)** — the adapter above encodes the real shape, so do not "correct" it back toward the guess:
+- `POST /v1/ideogram-v3/generate` with header `Api-Key` and a JSON body ✅
+- top level is `{ created, data[] }`; `created` is an ISO **timestamp**, NOT an id
+- the real per-request id is the **`x-request-id` response header**
+- `data[0]` = `{ url, seed, resolution, style_type, prompt, is_image_safe, upscaled_resolution }`
+- `data[0].url` is **signed and ephemeral (24 h `exp`)**, returning a genuine 1024×1024 PNG
+- `rendering_speed: "TURBO"` is the cheap tier for calibration runs
+
+Recraft remains unverified — make one live call and fix its adapter + fixtures together if the shape differs.
 
 - [ ] **Step 4: Run it to verify it passes → Commit**
 
@@ -6301,13 +6324,14 @@ export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAct
 4. Loop until every slot is `passed` or `decideSlotAction` says stop, incrementing the slot's `attempts` after **every** generation call, pass or fail:
    - `generator.generate(axis, axis.prompt)` → on `retryable: false`, mark the slot failed permanently; on `retryable: true`, save the checkpoint and `jobs.park(jobKey, 'vendor_outage')` for cron re-enqueue — vendor outages must **not** burn queue retries (the Task 1 wrangler comment and the FR-2 pattern; the queue's 3 retries are reserved for infra errors thrown outside these handled paths).
    - Add `costUsd` to `checkpoint.spendUsd` **before** the gate runs — the money is spent whether or not the image passes.
+   - **PUT the PNG to R2 immediately, before the gates run** (`${deliverableToken}/concept-N.png`), and record `r2Key` on the checkpoint slot and the `concepts` row in the same step. Vendor asset URLs are **ephemeral** — Ideogram's carry a 24 h signed `exp` (verified live 2026-07-30) — so a job that parks on an OCR/vendor outage, or is replayed from the DLQ days later, cannot re-fetch them. Without a durable copy the resumed job must regenerate, burning the FR-5 cap and real money for an image already paid for. All later steps (gates, M1 delivery, stage 2) read bytes back from R2 via `deliverables.get`, never from a vendor URL.
    - **Recraft SVG-only returns:** when `concept.nativeSvg` is set and `png` is empty, `sanitizeSvg` the SVG, rasterize it with `renderSvgToPng(svg, 1024, config.sources)` to obtain the gate-able PNG, and PUT the sanitized SVG to R2 as `${deliverableToken}/concept-N.svg`, recording the key via `conceptStore.upsert({ nativeSvgKey })`. Without this, the empty PNG breaks every gate AND stage 2's Recraft-native short-circuit can never fire — every winner would pay Vectorizer.ai.
    - `ocrGate.check(png, brandName)` → `unavailable` ⇒ park as `'ocr_outage'`; otherwise record the verdict.
    - `perceptualHash` the decoded pixmap; `conceptStore.upsert(...)`; `jobs.saveCheckpoint(...)` after **every** slot so a retry never redoes paid work.
    - `checkDistinctness` across passing slots; a failing pair marks the *newer* slot failed for regeneration.
    - `recordGateAudit` for every verdict.
 5. Count passing slots: 3 ⇒ `delivered`; 2 (and distinct) ⇒ `partial`; <2 ⇒ `aborted`.
-6. **M1 delivery (FR-8).** On `delivered`/`partial`: PUT each concept PNG to R2 under `${deliverableToken}/concept-N.png`, `selection.open(contractId)`, then `client.deliverMilestone(...)` — with the milestone id fetched via REST off the contract, since the funding payload carries none — passing the Worker-served links, the progress-page URL, and the selection instruction `reply with 'concept 1|2|3'`. On `aborted`: deliver nothing, post the itemized evidence to the thread, and **request** payer cancellation (§9 — the bot cannot refund).
+6. **M1 delivery (FR-8).** On `delivered`/`partial`: the concept PNGs are already in R2 from step 4 — do NOT re-fetch or re-PUT them. `selection.open(contractId)`, then `client.deliverMilestone(...)` — with the milestone id fetched via REST off the contract, since the funding payload carries none — passing the Worker-served links, the progress-page URL, and the selection instruction `reply with 'concept 1|2|3'`. On `aborted`: deliver nothing, post the itemized evidence to the thread, and **request** payer cancellation (§9 — the bot cannot refund).
 
 `processJobMessage` dispatches on `message.stage` (`concepts` → `runConceptStage`, `vector` → `runVectorStage` from Task 21, `single` → the free-gig path from Task 23).
 
