@@ -1,0 +1,79 @@
+// LogoSmith Worker configuration (PRD §7).
+//
+// Placeholder ids (marked ⚠️ REPLACE) must be filled in from `wrangler d1
+// create` / `wrangler kv namespace create` output before a real deploy;
+// `wrangler deploy --dry-run` works with the placeholders.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "logosmith-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Required by agent-core's Buffer use (client.ts data:-URL attachments).
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // ⚠️ REPLACE with the deployed Worker's public URL (evidence links,
+    // progress page, webhook registration).
+    "WEBHOOK_BASE_URL": "https://logosmith-bot.example.workers.dev",
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "logosmith",
+      // ⚠️ REPLACE with the id from `wrangler d1 create logosmith`.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+    },
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      // ⚠️ REPLACE with the id from `wrangler kv namespace create CACHE`.
+      "id": "00000000000000000000000000000000",
+    },
+  ],
+
+  "r2_buckets": [{ "binding": "DELIVERABLES", "bucket_name": "logosmith-deliverables" }],
+
+  // Workers AI: Llama 4 Scout vision (OCR gate) + FLUX.2 [klein] (free taster).
+  // Account binding — no API key.
+  "ai": { "binding": "AI" },
+
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "logosmith-jobs" }],
+    "consumers": [
+      {
+        "queue": "logosmith-jobs",
+        // One job stage per invocation — pixmap work is memory-bound (§12).
+        "max_batch_size": 1,
+        // Transient errors only; vendor outages park in D1 instead of
+        // burning retries (FR-2).
+        "max_retries": 3,
+        "dead_letter_queue": "logosmith-jobs-dlq",
+      },
+      {
+        // DLQ consumer: one operator alert per poisoned message (§12 runbook —
+        // replay by re-enqueueing to logosmith-jobs; claims make it safe).
+        "queue": "logosmith-jobs-dlq",
+        "max_batch_size": 10,
+        "max_retries": 0,
+      },
+    ],
+  },
+
+  "triggers": {
+    // */15: gig-poll + negotiation + thread-selection poll + parked re-enqueue
+    //        + reputation refresh. 0 6: stuck-claim sweep.
+    "crons": ["*/15 * * * *", "0 6 * * *"],
+  },
+
+  "observability": { "enabled": true },
+
+  // Secrets (via `wrangler secret put <NAME>`; see .dev.vars.example):
+  //   BOTGUILD_API_URL, BOTGUILD_API_KEY, BOTGUILD_BOT_ID, ANTHROPIC_API_KEY,
+  //   MODERATION_API_KEY, IDEOGRAM_API_KEY, RECRAFT_API_KEY,
+  //   VECTORIZER_AI_TOKEN, GOOGLE_FONTS_API_KEY, ADMIN_TOKEN
+  // The platform-issued webhook signing secret is NOT a wrangler secret — it is
+  // captured at registration and persisted in D1 (§10.2).
+}
