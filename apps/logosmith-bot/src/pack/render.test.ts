@@ -28,6 +28,20 @@ describe('renderSvgToPng', () => {
     assert.notEqual(small.length, large.length);
     assert.ok(large.length > small.length);
   });
+
+  it('returns bytes that stay correct after the underlying wasm resources are freed and reused', async () => {
+    // render.ts frees the Resvg/RenderedImage handles in `finally` once the
+    // PNG bytes are extracted (§12 memory discipline). If the returned
+    // Uint8Array were a live view into that wasm memory instead of a copy, a
+    // later, larger render reusing/growing the same wasm memory would
+    // corrupt it.
+    const sources = nodeWasmSources();
+    const first = await renderSvgToPng(SQUARE_SVG, 64, sources);
+    const snapshot = Uint8Array.from(first);
+    await renderSvgToPng(SQUARE_SVG, 16, sources);
+    await renderSvgToPng(SQUARE_SVG, 2048, sources);
+    assert.deepEqual(first, snapshot);
+  });
 });
 
 describe('renderSvgToPixmap', () => {
@@ -45,5 +59,14 @@ describe('renderSvgToPixmap', () => {
     assert.equal(pixmap.data[centre + 1], 0x3d);
     assert.equal(pixmap.data[centre + 2], 0x3e);
     assert.equal(pixmap.data[centre + 3], 255);
+  });
+
+  it('returns pixel data that stays correct after the underlying wasm resources are freed and reused', async () => {
+    const sources = nodeWasmSources();
+    const first = await renderSvgToPixmap(SQUARE_SVG, 64, sources);
+    const snapshot = Uint8Array.from(first.data);
+    await renderSvgToPixmap(SQUARE_SVG, 16, sources);
+    await renderSvgToPixmap(SQUARE_SVG, 2048, sources);
+    assert.deepEqual(first.data, snapshot);
   });
 });
