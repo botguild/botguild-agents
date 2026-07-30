@@ -2742,11 +2742,26 @@ const okFetch = async (): Promise<Response> =>
   new Response(JSON.stringify(apiPayload), { status: 200 });
 
 describe('fetchFontPairing', () => {
-  it('returns a heading and body family with license metadata', async () => {
+  it('returns a heading and body family with a licence pointer, not a claim', async () => {
     const pairing = await fetchFontPairing({ fetchImpl: okFetch, apiKey: 'k' });
     assert.ok(pairing.heading.family.length > 0);
     assert.ok(pairing.body.family.length > 0);
-    assert.match(pairing.heading.license, /OFL|Apache/);
+    // The API carries no licence field (verified live), so a dynamically
+    // selected family must NOT assert a specific licence — it points at the
+    // specimen page. Asserting OFL here would re-introduce the false claim.
+    assert.match(pairing.heading.license, /specimen page/i);
+    assert.ok(!/SIL Open Font License/.test(pairing.heading.license));
+    assert.match(pairing.heading.url, /fonts\.google\.com/);
+  });
+
+  it('states the verified licence on the pinned fallback pairing', async () => {
+    const pairing = await fetchFontPairing({
+      fetchImpl: async () => new Response('nope', { status: 500 }),
+      apiKey: 'k',
+    });
+    // Inter and Source Serif 4 were licence-verified at Phase 0, so the
+    // fallback may name the licence where the dynamic path may not.
+    assert.match(pairing.heading.license, /SIL Open Font License/);
   });
 
   it('labels the pairing advisory (§9: not a warranted property)', async () => {
@@ -2800,23 +2815,36 @@ export interface FontPairing {
 }
 
 const ADVISORY_NOTE =
-  'Advisory recommendation only. Both families are served by Google Fonts under the SIL Open ' +
-  'Font License; verify the licence for your own distribution. Font choice is not covered by the warranty.';
+  'Advisory recommendation only. Both families are served by Google Fonts; open each specimen page ' +
+  'to confirm its licence before redistributing. Font choice is not covered by the warranty.';
 
 const googleUrl = (family: string): string =>
   `https://fonts.google.com/specimen/${encodeURIComponent(family.replace(/\s+/g, '+'))}`;
 
+/**
+ * VERIFIED LIVE 2026-07-30: the Google Fonts API returns NO licence field —
+ * items carry only family/variants/subsets/version/lastModified/files/category/
+ * kind/menu. The catalogue is NOT uniformly OFL (it also contains Apache-2.0
+ * and Ubuntu Font Licence families), so a hardcoded licence string on a
+ * dynamically-selected font would be an unverified assertion shipped inside
+ * brand.json. Say where to check instead of claiming a licence we did not read.
+ */
 const ref = (family: string, category: string): FontRef => ({
   family,
   category,
-  license: 'SIL Open Font License 1.1',
+  license: 'See the specimen page for this family’s licence.',
   url: googleUrl(family),
 });
 
-/** The pinned pairing used whenever the API is unavailable. */
+/**
+ * The pinned fallback pairing. These two families' licences ARE verified (both
+ * SIL OFL 1.1, confirmed at Phase 0 and recorded in the vendor-terms decision
+ * record), which is exactly why the fallback may state them and the dynamic
+ * path may not.
+ */
 const FALLBACK: FontPairing = {
-  heading: ref('Inter', 'sans-serif'),
-  body: ref('Source Serif 4', 'serif'),
+  heading: { family: 'Inter', category: 'sans-serif', license: 'SIL Open Font License 1.1', url: googleUrl('Inter') },
+  body: { family: 'Source Serif 4', category: 'serif', license: 'SIL Open Font License 1.1', url: googleUrl('Source Serif 4') },
   note: ADVISORY_NOTE,
 };
 
@@ -2852,6 +2880,10 @@ export async function fetchFontPairing(deps: {
   }
 }
 ```
+
+> **VERIFIED LIVE 2026-07-30 (Google Fonts API).** Endpoint, key format, and `sort=popularity` all confirmed — 200 with 1951 items. Two things the plan got wrong:
+> - **There is no `license` field.** Items carry only `family`, `variants`, `subsets`, `version`, `lastModified`, `files`, `category`, `kind`, `menu`. The draft hardcoded `SIL Open Font License 1.1` on every selected family, and that string ships inside the buyer's `brand.json`. Google Fonts is not uniformly OFL — Apache-2.0 and Ubuntu Font Licence families are in the catalogue — so this was an unverified licence assertion in a contractual deliverable, exactly the class of claim §9 exists to prevent. Fixed: the dynamic path points at the specimen page; only the Phase-0-verified fallback names a licence.
+> - **`items.find(f => f.category === 'sans-serif')` is deterministic.** Against a popularity sort it returns **Roboto** every time (and `serif` returns **Playfair Display**). That is not a correctness bug, but "the most-used font on the web" is a weak brand-identity recommendation — consider seeding the choice from the brief's style axis in a later revision. Categories available: `display`, `handwriting`, `monospace`, `sans-serif`, `serif`.
 
 - [ ] **Step 6: Run both tests to verify they pass**
 
