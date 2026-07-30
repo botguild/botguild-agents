@@ -3500,6 +3500,14 @@ du -sh /tmp/logosmith-bundle
 
 Record the compressed bundle size in the commit message. If it approaches the Workers limit, or if the 2048 px render in the test above shows runaway memory, **stop and escalate** — §16 names a plain Cloudflare Container for the pack stage as the fallback, and taking it here is far cheaper than at Task 21.
 
+> **MEASURED 2026-07-30 — checkpoint fired, container fallback NOT taken.** §13 predicted the WASM stack would press the *bundle* limit. It does not: **986 KiB gzip**, ~10% of the 10 MB Paid cap. The real constraint was memory, and the first measurement came in at **129.5 MB** (heapUsed + external) for one `buildPack` — at the 128 MB isolate ceiling.
+>
+> **Root cause was a missing free, not an inherent ceiling.** `render.ts` never called `.free()` on the `Resvg` / `RenderedImage` handles, so each of the 8 renders in a pack grew wasm linear memory instead of reusing it — despite §12 already specifying "buffers released between artifacts". After adding `.free()` in `finally` blocks: **99.7 MB**, and the decisive signal is the *shape*, not the number — `external` is flat across all 8 renders within a pack, and plateaus at 92.6–92.7 MB from pack #3 through pack #7 in one process. A monotonic climb would have meant the ceiling was real; a plateau means it was the leak.
+>
+> **Carry-forwards, not resolved here:** (a) this was measured in Node, a proxy for a real `workerd` isolate; (b) the test SVG is simple — a complex real winner may cost more; (c) ~28 MB of headroom must be **re-checked at Task 12**, once real bindings and Hono share the isolate. If any of those erodes the margin, §16 is still the answer and the trigger condition stands.
+>
+> `mono.ts` needs no equivalent change — `esm-potrace-wasm` exposes two plain functions with no freeable handles.
+
 - [ ] **Step 7: Commit**
 
 ```bash
