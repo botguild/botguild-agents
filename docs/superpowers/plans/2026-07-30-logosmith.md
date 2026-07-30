@@ -5492,6 +5492,13 @@ export interface AxisCompiler {
   compile(brief: LogoBrief): Promise<StyleAxis[]>;
 }
 
+// MEASURED 2026-07-30: this system prompt plus a representative user message is
+// 143 tokens. Haiku 4.5's minimum cacheable prefix is 4096, so the
+// `cache_control` marker below is a NO-OP — two identical live calls each
+// returned cache_creation_input_tokens: 0 and cache_read_input_tokens: 0, with
+// no error. The marker is kept (it is free, and becomes live if the prompt
+// grows past the floor or the model changes) but prompt caching is NOT a cost
+// control on this call. See the verified-live note under this task.
 const SYSTEM_PROMPT =
   'You write image-generation prompts for logo design. You will be given a brand brief and three ' +
   'fixed style axes. Return ONLY JSON of the shape {"axes":[{"id":"...","label":"...","prompt":"..."}]} ' +
@@ -5551,6 +5558,10 @@ export function createAxisCompiler(deps: {
   };
 }
 ```
+
+> **VERIFIED LIVE 2026-07-30 — prompt caching does not engage here, and that is not a bug to fix.** The minimum cacheable prefix is **model-dependent and not monotonic**: 512 tokens on Opus 5, 1024 on Opus 4.8 / Sonnet, but **4096 on Haiku 4.5**. This task's prefix measures 143 tokens (`count_tokens`, real API), and two identical live calls both returned `cache_creation_input_tokens: 0` / `cache_read_input_tokens: 0` — the API accepts the `cache_control` marker and silently ignores it. Model ids confirmed: both `claude-haiku-4-5` (alias, what `config.ts` uses) and `claude-haiku-4-5-20251001` return 200; the alias is the documented preference.
+>
+> **Consequence for the fleet, not just this task.** `CLAUDE.md` lists "**Prompt caching** — Always cache the Claude system prompt to control token costs" as a key design decision, and `agent-core`'s `proposer.ts:179` and `estimator.ts:221` both set `cache_control` on Haiku calls. Any of those whose prefix is under 4096 tokens is paying full price while appearing to be cached. `proposer.ts` already logs `cacheCreationTokens` / `cacheReadTokens` — **read those fields in production before claiming caching works anywhere in this fleet.** If the numbers are zero, the options are: accept it (these prompts are small, so the absolute cost is low), grow the cached prefix past 4096, or move the call to a model with a lower floor. Do not "fix" it by deleting the marker — it is free and becomes live if either changes.
 
 - [ ] **Step 3: Run it to verify it passes → Commit**
 
