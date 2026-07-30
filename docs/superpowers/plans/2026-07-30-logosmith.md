@@ -27,6 +27,8 @@ Copied from `docs/prds/logosmith.md` and the fleet conventions established by Vo
 - **Moderation fails closed:** pinned vendor OpenAI Moderation. Outage ⇒ `park(jobKey, 'moderation_outage')` + cron re-enqueue, thread notice after 3 attempts. Never skipped, never a pass on error. Never generate from an unscreened brief.
 - **Hard caps (FR-5):** ≤2 regenerations per concept slot, ≤$2.50 image-API spend per job. Cap state lives in the D1 checkpoint so queue retries resume against the *remaining* budget, never restart it.
 - **Numeric defaults are provisional until Phase 2 calibration** (PRD §9): OCR normalized-similarity ≥ 0.85, pHash Hamming ≥ 10, free-gig cap 3 per payer per rolling 30 days, stuck-claim sweep 30 minutes, queue `max_batch_size: 1` / `max_retries: 3` + DLQ. They live as named constants in `config.ts` marked `PROVISIONAL`.
+- **Pricing is INTRODUCTORY, not the PRD's (handler ruling, 2026-07-30).** Measured live: 78/78 open gigs priced $0.08–$0.99 (median $0.44), against a PRD seed price of $25. LogoSmith launches at a **$1** anchor with a rate card calibrated to real cost-to-serve, a **$0.60** spend cap, and scorer bounds of **0.25 / 5**. The four move together — changing the anchor alone does nothing, because the bid is `max(1.5 × cost, gig.budget)` and the original rate card floored every bid at ~$9.53. **Revert target is the PRD block: price 25, cap 2.5, bounds 5/150, original rate card** — all four, together. Note the PRD's "97% margin" no longer holds: at a $1 anchor with ~$0.33 typical spend the margin is ~65%, and ~40% at the cap.
+- **Briefs arrive as PROSE, not fenced JSON (handler ruling, 2026-07-30).** Measured live: **0 of 78** open gigs contain a fenced ```` ```json ```` block, and **0 of 78** contain any `{...}` object — so the fleet-standard extractor (fenced JSON, else largest inline object) finds nothing on any real gig, and a scorer that skips un-parseable briefs would never bid. Intake keeps fenced JSON as a fast path and falls back to Haiku extraction over the prose description plus the structured fields the API really does provide (`acceptance_criteria`, `deliverables`, `tags`, `title`, `timeline`). See Task 27.
 - **Gate wording is contractual and deliberately honest.** Never claim trademark clearance, never claim aesthetic quality, never claim "Meta/registry approval". The warranty covers the OCR readback threshold, the true-vector parse, byte-verified dimensions, and ZIP integrity — nothing else.
 - **Non-convergence is a contractual outcome, not an exception** (§9): 2-of-3 passing ⇒ deliver the pair with the shortfall itemized; <2 passing ⇒ deliver nothing, post itemized evidence to the thread, and **request** payer cancellation. Bot-side refund does not exist on the platform — gig terms say "request", never "initiate".
 - **Latin script only in v1.** Intake validation skips non-Latin briefs at proposal time so un-intakeable work is never won.
@@ -592,8 +594,13 @@ export const scorerConfig: ScorerConfig = {
     'svg',
   ],
   keywordsForFullScore: 3,
-  budgetMin: 5,
-  budgetMax: 150,
+  // INTRODUCTORY (2026-07-30 ruling). Measured live: all 78 open gigs carry
+  // budgets between $0.08 and $0.99 (median $0.44). `scoreBudget` returns 0
+  // below `min`, so the original 5/150 bounds made the whole 20-point budget
+  // factor dead on every real gig. These bounds bracket the observed range.
+  // Revert to 5 / 150 with the rest of the pricing block.
+  budgetMin: 0.25,
+  budgetMax: 5,
   proposalThreshold: 40,
 };
 
@@ -601,15 +608,29 @@ export const scorerConfig: ScorerConfig = {
 // Gig-listing anchors (PRD §11). The estimator may bid above these
 // (max(1.5×cost, gig.budget)); pricingCalc supplies the deterministic baseline
 // plus the timeline and the two milestone checkpoints.
-export const SEED_PRICE_USD = 25;
+// ─── INTRODUCTORY PRICING (handler ruling, 2026-07-30) ───────────────────────
+// Live marketplace measurement: 78/78 open gigs priced $0.08–$0.99, median
+// $0.44. The PRD's $25 seed gig is ~50x the observed market, so LogoSmith
+// launches at a $1 introductory anchor. REVERT TARGET: SEED_PRICE_USD = 25 with
+// the original rate card below, once budgets support it.
+//
+// Changing the anchor ALONE would not have worked. The bid is
+// `max(1.5 x estimatedCost, gig.budget)`, so the rate card sets the real floor:
+// the original card (fixedOverhead 5 alone) produced cost $6.35 -> a $9.53 bid
+// on a $0.44 gig, regardless of the anchor. The card below is calibrated to the
+// PRD §11 cost-to-serve (~$0.33 typical: 3 images ~$0.16, vectorize ~$0.15,
+// OCR + Haiku ~$0.02) and yields cost ~$0.39 -> a ~$0.59 floor.
+export const SEED_PRICE_USD = 1; // INTRODUCTORY (original: 25)
 
 export const rateCard: RateCard = {
-  perClaudeCall: 0.05,
-  perKToken: 0.01,
+  // Original (revert target): perClaudeCall 0.05, perKToken 0.01,
+  // perComputeMinute 0.05, perRun 0.5, fixedOverhead 5.
+  perClaudeCall: 0.002,
+  perKToken: 0.004,
   perBrowserMinute: 0, // no browser in this bot
-  perComputeMinute: 0.05,
-  perRun: 0.5,
-  fixedOverhead: 5,
+  perComputeMinute: 0.003,
+  perRun: 0.25, // the per-job vendor image + vectorization spend
+  fixedOverhead: 0.05,
 };
 
 export const fallbackEstimate: ResourceEstimate = {
@@ -684,7 +705,11 @@ export function pricingCalc(gig: Gig): {
 // --- Hard caps (FR-5, FR-14) --------------------------------------------------
 export const CONCEPT_COUNT = 3;
 export const MAX_REGENS_PER_SLOT = 2;
-export const MAX_SPEND_USD = 2.5;
+// INTRODUCTORY (original: 2.5). At a $1 anchor the original cap was 2.5x
+// revenue — a cap-hitting job would have lost money by design. 0.60 keeps the
+// worst case at ~40% margin while still funding the initial 3 concepts plus the
+// FR-5 regenerations (~$0.50). Revert to 2.5 with the rest of the pricing block.
+export const MAX_SPEND_USD = 0.6;
 export const FREE_GIGS_PER_PAYER = 3;
 export const FREE_GIG_WINDOW_DAYS = 30;
 
@@ -6811,6 +6836,97 @@ git commit -m "feat(logosmith): dispute response path with D1-sourced evidence
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
+
+---
+
+### Task 26: Introductory pricing recalibration
+
+**Files:**
+- Modify: `apps/logosmith-bot/src/config.ts`
+- Modify: `apps/logosmith-bot/src/config.test.ts`
+
+**Why this is its own task.** Task 1 shipped `config.ts` with the PRD's pricing before the live marketplace was measured. All four values move together or the change does nothing — see the Global Constraints entry.
+
+- [ ] **Step 1: Update the failing assertions first**
+
+`config.test.ts` currently asserts `SEED_PRICE_USD === 25` and `MAX_SPEND_USD === 2.5`. Change those to `1` and `0.6`, add assertions for `budgetMin === 0.25` / `budgetMax === 5`, and run the suite to watch them fail against the shipped config (RED).
+
+- [ ] **Step 2: Apply the four coupled changes to `config.ts`**
+
+Exactly as written in the Task 1 config block above (now amended): `SEED_PRICE_USD = 1`; the recalibrated `rateCard` (`perClaudeCall 0.002`, `perKToken 0.004`, `perComputeMinute 0.003`, `perRun 0.25`, `fixedOverhead 0.05`); `MAX_SPEND_USD = 0.6`; `scorerConfig.budgetMin = 0.25` / `budgetMax = 5`. Keep every revert-target comment — the originals must stay discoverable.
+
+- [ ] **Step 3: Add a regression test proving the bid floor actually moved**
+
+The bug this guards against is subtle: the anchor is not the bid. Assert on the *estimator floor*, not just the constant —
+
+```typescript
+it('produces a bid floor at or below the live market, not the PRD anchor', () => {
+  // cost = 8(perClaudeCall) + 15(perKToken) + 6(perComputeMinute)
+  //      + 1(perRun) + fixedOverhead, then target = 1.5 x cost.
+  const c = fallbackEstimate;
+  const cost =
+    c.claudeCalls * rateCard.perClaudeCall +
+    c.claudeKTokens * rateCard.perKToken +
+    c.browserMinutes * rateCard.perBrowserMinute +
+    c.computeMinutes * rateCard.perComputeMinute +
+    c.runs * rateCard.perRun +
+    rateCard.fixedOverhead;
+  const floor = 1.5 * cost;
+  // Live gigs measured $0.08-$0.99 (median $0.44). A floor above ~$1 means
+  // LogoSmith cannot win anything, whatever SEED_PRICE_USD says.
+  assert.ok(floor < 1, `bid floor ${floor.toFixed(2)} exceeds the live market`);
+  assert.ok(floor > 0.3, `bid floor ${floor.toFixed(2)} is below cost-to-serve`);
+});
+
+it('never lets a capped job cost more than it earns', () => {
+  assert.ok(MAX_SPEND_USD < SEED_PRICE_USD, 'spend cap exceeds revenue');
+});
+```
+
+- [ ] **Step 4: Full suite green, typecheck, lint, prettier → commit**
+
+`fix(logosmith): introductory $1 pricing calibrated to the live market` with the usual trailer.
+
+---
+
+### Task 27: Prose brief intake (Haiku fallback)
+
+**Files:**
+- Create: `apps/logosmith-bot/src/proseBrief.ts`
+- Modify: `apps/logosmith-bot/src/brief.ts` (export a combined resolver)
+- Test: `apps/logosmith-bot/src/proseBrief.test.ts`
+
+**Interfaces:**
+- Consumes: `AiLike`-style injected Anthropic client (same seam as `axes.ts`), `LogoBrief` from `./types.js`, `parseLogoBrief` from `./brief.js`.
+- Produces:
+  - `buildProseExtractionInput(gig: GigLike): string` — pure; folds description + `acceptanceCriteria` + `deliverables` + `tags` + `title` into one prompt payload
+  - `createProseBriefExtractor(deps: { anthropic: Anthropic }): ProseBriefExtractor` with `extract(gig): Promise<BriefResult<LogoBrief>>`
+  - `resolveBrief(gig, extractor): Promise<BriefResult<LogoBrief>>` — fenced JSON first, prose fallback second
+
+**Why.** Measured live: 0 of 78 open gigs carry a fenced block or any `{...}`. The fenced-only path wins nothing. Real gigs *do* carry rich structured fields — `acceptance_criteria` (typed text array), `deliverables`, `tags`, `timeline`, `urgency` — plus prose descriptions that name the brand.
+
+- [ ] **Step 1: Write the failing tests**
+
+Use a real captured gig shape (prose description, populated `acceptanceCriteria`/`deliverables`/`tags`, no JSON anywhere). Cover:
+
+1. `buildProseExtractionInput` includes the title, the description, every acceptance-criterion text, the deliverables, and the tags — assert each appears in the output. Pure, no network.
+2. `resolveBrief` prefers a fenced block when present and does **not** call the extractor (assert the injected extractor was never invoked) — the fast path must stay free.
+3. `resolveBrief` falls back to the extractor when no fenced block exists, and returns its `LogoBrief`.
+4. The extractor returns `{ok:false}` with an actionable reason when the model's JSON lacks a usable `brandName` — a hallucinated or empty brand name must NOT become a contract. This is the analogue of the OCR gate's hallucination canary: an extractor that invents a brand name would have LogoSmith generating logos for a company that was never named.
+5. Non-Latin extracted brand names are rejected by reusing `isLatinScript` (v1 scope holds regardless of extraction path).
+6. A model error or unparseable response yields `{ok:false}`, never a throw and never a fabricated brief.
+
+- [ ] **Step 2: Implement**
+
+`buildProseExtractionInput` is pure string assembly. `createProseBriefExtractor` calls Haiku (same prompt-cached shape as `axes.ts` — and see the caching note there: at this prefix size the marker is inert) with a system prompt instructing: extract `brandName` and `industry` from the gig, return ONLY JSON, and **return `{"brandName": null}` if the gig does not clearly name a brand rather than guessing**. Validate the result through the existing `parseLogoBrief` field rules (non-blank, Latin-script) so both paths converge on one validation implementation.
+
+- [ ] **Step 3: Wire into the scorer path**
+
+The scorer skip decision must consult `resolveBrief`, not `parseLogoBrief` alone. Because extraction costs a Haiku call per scored gig (~$0.001), only run it for gigs that already clear the keyword/category relevance bar — never on every gig in the poll sweep. Record that ordering in a comment; it is the difference between ~$0.001 per candidate and ~$0.001 × every gig on the marketplace, every 15 minutes.
+
+- [ ] **Step 4: Full suite green, typecheck, lint, prettier → commit**
+
+`feat(logosmith): Haiku prose brief extraction for real-world gigs` with the usual trailer.
 
 ---
 
