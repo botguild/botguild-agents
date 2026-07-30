@@ -94,3 +94,93 @@ describe('sanitizeSvg', () => {
     assert.equal(checkTrueVector(sanitizeSvg(dirty)).pass, true);
   });
 });
+
+describe('namespace-prefix bypass regression tests (critical)', () => {
+  it('CRITICAL: raw gate detects namespace-prefixed <ns1:script>', () => {
+    const probe =
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/2000/svg" ' +
+      'viewBox="0 0 10 10"><ns1:script>alert(document.domain)</ns1:script><path d="M0 0 L1 1" ' +
+      'fill="#000"/></svg>';
+    // Raw gate must detect and reject the ns1:script
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns1:script');
+    assert.ok(rawResult.violations.some((v) => /script/i.test(v)));
+    // Sanitize+gate: sanitize strips the ns1:script, so gate passes on cleaned output
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(
+      gatedResult.pass,
+      true,
+      'after sanitize, ns1:script is removed so gate should pass',
+    );
+  });
+
+  it('CRITICAL: raw gate detects namespace-prefixed <ns1:foreignObject>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<ns1:foreignObject xmlns:ns1="http://www.w3.org/2000/svg">' +
+      '<div xmlns="http://www.w3.org/1999/xhtml" onclick="evil()">x</div>' +
+      '</ns1:foreignObject><path d="M0 0 L1 1" fill="#000"/></svg>';
+    // Raw gate must reject on both foreignObject and onclick
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns1:foreignObject');
+    assert.ok(
+      rawResult.violations.some((v) => /foreignObject/i.test(v)),
+      'should detect foreignObject in violations',
+    );
+    // Sanitize removes the ns1:foreignObject entirely (it's a dangerous element), so gate passes
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, true, 'sanitize removes foreignObject, leaving clean output');
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <ns1:image> raster bypass', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<ns1:image xmlns:ns1="http://www.w3.org/2000/svg" href="https://evil.example.com/raster.png"/>' +
+      '<path d="M0 0 L1 1" fill="#000"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'ns1:image should fail even with a legitimate path sibling');
+  });
+
+  it('rejects javascript: href in <a> element', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<a href="javascript:alert(document.cookie)"><circle cx="5" cy="5" r="2"/></a></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'javascript: href should fail');
+    assert.ok(result.violations.some((v) => /javascript:/i.test(v)));
+  });
+
+  it('rejects lowercase "viewbox=" (case-sensitive per XML)', () => {
+    const probe = '<svg viewbox="0 0 10 10"><path d="M0 0 L1 1" fill="#000"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'lowercase viewbox should not satisfy the gate');
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+  });
+
+  it('positive guard: realistic vendor SVG with defs/gradients/clipPath must PASS', () => {
+    // A realistic SVG using all allowlisted elements should pass
+    const vendor =
+      '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+      '<defs>' +
+      '<linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="0%">' +
+      '<stop offset="0%" style="stop-color:rgb(255,255,0);stop-opacity:1" />' +
+      '<stop offset="100%" style="stop-color:rgb(255,0,0);stop-opacity:1" />' +
+      '</linearGradient>' +
+      '<clipPath id="clip"><rect x="10" y="10" width="80" height="80"/></clipPath>' +
+      '</defs>' +
+      '<title>My Logo</title>' +
+      '<g clip-path="url(#clip)">' +
+      '<path d="M 10 10 L 90 90" stroke="url(#grad1)" stroke-width="2"/>' +
+      '<path d="M 90 10 L 10 90" stroke="url(#grad1)" stroke-width="2"/>' +
+      '</g>' +
+      '</svg>';
+    const result = checkTrueVector(vendor);
+    assert.equal(
+      result.pass,
+      true,
+      `vendor SVG should pass; got violations: ${result.violations.join(', ')}`,
+    );
+  });
+});
