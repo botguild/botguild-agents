@@ -1029,6 +1029,7 @@ describe('checkLogoUrl', () => {
     for (const host of [
       'https://127.0.0.1/a.png',
       'https://localhost/a.png',
+      'https://localhost./a.png',
       'https://169.254.169.254/latest/meta-data',
       'https://[::1]/a.png',
       'https://0.0.0.0/a.png',
@@ -1172,7 +1173,9 @@ export function checkLogoUrl(rawUrl: string): UrlCheck {
   if (url.protocol !== 'https:') {
     return { ok: false, reason: 'logoUrl must use https' };
   }
-  const host = url.hostname;
+  // Strip one trailing dot: `localhost.` is the absolute-domain form of
+  // localhost and resolves identically (Task 2 review finding — SSRF bypass).
+  const host = url.hostname.replace(/\.$/, '');
   if (host.length === 0 || IP_LITERAL_RE.test(host) || BLOCKED_HOST_RE.test(host)) {
     return { ok: false, reason: 'logoUrl host is not permitted' };
   }
