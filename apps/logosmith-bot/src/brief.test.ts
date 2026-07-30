@@ -106,6 +106,7 @@ describe('checkLogoUrl', () => {
     for (const host of [
       'https://127.0.0.1/a.png',
       'https://localhost/a.png',
+      'https://localhost./a.png',
       'https://169.254.169.254/latest/meta-data',
       'https://[::1]/a.png',
       'https://0.0.0.0/a.png',

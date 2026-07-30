@@ -113,7 +113,7 @@ export function checkLogoUrl(rawUrl: string): UrlCheck {
   if (url.protocol !== 'https:') {
     return { ok: false, reason: 'logoUrl must use https' };
   }
-  const host = url.hostname;
+  const host = url.hostname.replace(/\.$/, '');
   if (host.length === 0 || IP_LITERAL_RE.test(host) || BLOCKED_HOST_RE.test(host)) {
     return { ok: false, reason: 'logoUrl host is not permitted' };
   }
