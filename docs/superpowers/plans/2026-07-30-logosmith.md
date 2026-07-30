@@ -4544,6 +4544,14 @@ export function resolveDeliverable(
   file: string,
 ): { key: string; contentType: string } | null {
   if (!/^[0-9a-f]{64}$/.test(token)) return null;
+  // `Object.hasOwn`, NOT a bare index — a plain object literal inherits from
+  // Object.prototype, so `DELIVERABLE_TYPES["__proto__"]` (and "constructor",
+  // "toString", "hasOwnProperty", "valueOf", "toLocaleString",
+  // "isPrototypeOf", "propertyIsEnumerable") returns a TRUTHY inherited value
+  // and sails past a falsy check — silently defeating the whitelist this
+  // function's docstring promises. Found by execution in the Task 12 review.
+  // Same idiom as agent-core-workers/src/webhookApp.ts:96.
+  if (!Object.hasOwn(DELIVERABLE_TYPES, file)) return null;
   const contentType = DELIVERABLE_TYPES[file];
   if (!contentType) return null;
   return { key: `${token}/${file}`, contentType };
