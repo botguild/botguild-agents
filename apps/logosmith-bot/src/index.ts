@@ -137,12 +137,17 @@ const DELIVERABLE_TYPES: Record<string, string> = {
  * file names are whitelisted, so the R2 namespace is neither enumerable nor
  * derivable from a known contract id.
  *
- * `DELIVERABLE_TYPES` is a plain object literal, so a bare `[file]` lookup
- * would return a truthy inherited value (not `undefined`) for names like
- * `__proto__`/`constructor`/`toString`/etc. — sailing past a falsy check
- * instead of being rejected. `Object.hasOwn` guards against exactly that,
- * matching the same plain-object-as-map idiom already used in this repo
- * (agent-core-workers' webhookApp.ts uses it for its handlers map).
+ * Two distinct guards after the token check, asking two different questions:
+ * `Object.hasOwn` asks "is this key in the map?" — `DELIVERABLE_TYPES` is a
+ * plain object literal, so a bare `[file]` lookup would return a truthy
+ * inherited value (not `undefined`) for names like
+ * `__proto__`/`constructor`/`toString`/etc., sailing past a falsy check
+ * instead of being rejected (same idiom as agent-core-workers' webhookApp.ts
+ * uses for its handlers map). The subsequent falsy check on `contentType`
+ * asks "is the value usable?" — today every entry is a non-empty literal, so
+ * this can't currently fire through this function's public inputs, but it's
+ * kept as defence-in-depth against a future entry added with an empty-string
+ * value (a plausible typo), which `Object.hasOwn` alone would not catch.
  */
 export function resolveDeliverable(
   token: string,
@@ -151,6 +156,7 @@ export function resolveDeliverable(
   if (!/^[0-9a-f]{64}$/.test(token)) return null;
   if (!Object.hasOwn(DELIVERABLE_TYPES, file)) return null;
   const contentType = DELIVERABLE_TYPES[file];
+  if (!contentType) return null;
   return { key: `${token}/${file}`, contentType };
 }
 
