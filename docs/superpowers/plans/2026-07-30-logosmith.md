@@ -102,6 +102,8 @@ apps/logosmith-bot/
 - Create: `apps/logosmith-bot/src/types.ts`
 - Create: `apps/logosmith-bot/src/config.ts`
 - Create: `apps/logosmith-bot/src/testSupport.ts`
+- Create: `apps/logosmith-bot/src/brief.ts` — **inert stub only** (`parseFaviconBrief` always `{ok:false}`, `BriefResult<T>` shape per Task 2's contract): config.ts imports it, so Task 1 cannot build without it. Task 2 overwrites it wholesale — its RED evidence is failing assertions, not a missing module.
+- Create: `apps/logosmith-bot/src/index.ts` — **bare 501 stub**: wrangler `main` points here and Step 10's dry-run must pass. Task 12 replaces it.
 - Test: `apps/logosmith-bot/src/config.test.ts`
 
 **Interfaces:**
