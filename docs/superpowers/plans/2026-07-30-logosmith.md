@@ -85,7 +85,7 @@ apps/logosmith-bot/
   src/calibration/goldens.json # ≥30-name golden set fixture
 ```
 
-**Dependency direction:** `gates/*` and `pack/*` are leaf modules — they import only `types.ts` and their WASM/pure-JS libraries, never `jobs.ts` or `index.ts`. `pipeline.ts` orchestrates and is injected with everything. `index.ts` builds the graph. This keeps every gate unit-testable with no bindings and no network.
+**Dependency direction:** `gates/*` and `pack/*` are leaf modules — they import only `types.ts`, `config.ts` (threshold/size constants), and their WASM/pure-JS libraries, never `jobs.ts`, `generate.ts`, or `index.ts`. `pipeline.ts` orchestrates and is injected with everything. `index.ts` builds the graph. This keeps every gate unit-testable with no bindings and no network.
 
 ---
 
@@ -319,6 +319,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 CREATE INDEX IF NOT EXISTS idx_jobs_contract ON jobs (contract_id);
+-- The public progress page resolves jobs by capability token on every request.
+CREATE INDEX IF NOT EXISTS idx_jobs_token ON jobs (deliverable_token);
 
 -- One row per generated concept. Survives beyond the checkpoint because the
 -- selection state machine and the M2 report both read it after stage 1 ends.
@@ -336,6 +338,9 @@ CREATE TABLE IF NOT EXISTS concepts (
   ocr_model TEXT,
   ocr_pass INTEGER NOT NULL DEFAULT 0,
   attempts_used INTEGER NOT NULL DEFAULT 0,
+  -- R2 key of the sanitized Recraft-native SVG, when the vendor returned one.
+  -- Stage 2 reads this to skip Vectorizer.ai entirely (the §13 mitigation).
+  native_svg_key TEXT,
   created_at TEXT NOT NULL,
   PRIMARY KEY (contract_id, slot)
 );
@@ -376,6 +381,13 @@ CREATE TABLE IF NOT EXISTS license_manifest (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_license_contract ON license_manifest (contract_id);
+
+-- One-shot dispute-response claim (§10.9): the MCP dispute response must fire
+-- exactly once per contract even when dispute webhooks are redelivered.
+CREATE TABLE IF NOT EXISTS dispute_responses (
+  contract_id TEXT PRIMARY KEY,
+  responded_at TEXT NOT NULL
+);
 
 -- Gate audit log (FR-17): every gate decision, cap counter, and selection
 -- event, retained for the warranty window and dispute evidence.
@@ -534,6 +546,7 @@ import type {
   ResourceEstimate,
   ScorerConfig,
 } from '@botguild/agent-core';
+import { parseFaviconBrief } from './brief.js';
 
 // --- Bot profile (registerBot) ----------------------------------------------
 export const botProfile: BotConfig = {
@@ -602,11 +615,39 @@ export const fallbackEstimate: ResourceEstimate = {
   runs: 1,
 };
 
-export function pricingCalc(_gig: Gig): {
+export function pricingCalc(gig: Gig): {
   price: number;
   timeline: string;
   milestones: ProposalMilestone[];
 } {
+  const description = gig.description ?? '';
+  // Free-funnel gigs anchor at $0 (US-2/US-3) and go through the estimator-free
+  // proposer — otherwise the 1.5x-cost floor would re-price them. A favicon gig
+  // is recognised by its brief shape; the taster shares the paid brief shape
+  // and is recognised by its $0 budget.
+  const isFavicon = parseFaviconBrief(description).ok;
+  if (isFavicon || (gig.budget ?? 0) === 0) {
+    return {
+      price: 0,
+      timeline: '1 business day',
+      milestones: [
+        {
+          title: isFavicon
+            ? 'Milestone 1 — Favicon package from your logo'
+            : 'Milestone 1 — One free concept with its OCR verdict',
+          duration: '1 business day',
+          deliverables: isFavicon
+            ? [
+                'ZIP: favicon.ico (16/32/48, parse-back verified), PNGs at 16/32/48/180/192/512, site.webmanifest, HTML snippet.',
+              ]
+            : [
+                'One 1024px logo concept with its lettering-readback verdict attached as labelled, non-blocking evidence.',
+              ],
+        },
+      ],
+    };
+  }
+
   return {
     price: SEED_PRICE_USD,
     timeline: '2 business days',
@@ -683,7 +724,6 @@ export const IMAGE_COST_USD = {
 export const FAVICON_SIZES = [16, 32, 48, 180, 192, 512] as const;
 export const ICO_SIZES = [16, 32, 48] as const;
 export const MASTER_SIZES = [1024, 2048] as const;
-export const MIN_LOGO_URL_PX = 512;
 ```
 
 - [ ] **Step 7: Write `src/testSupport.ts`**
@@ -764,6 +804,23 @@ describe('config', () => {
     assert.ok(!('amount' in quote.milestones[0]!));
   });
 
+  it('anchors the free gigs at $0 with a single milestone', () => {
+    const favicon = pricingCalc({
+      id: 'g2',
+      description: '```json\n{ "logoUrl": "https://example.com/logo.png" }\n```',
+      budget: 0,
+    } as never);
+    assert.equal(favicon.price, 0);
+    assert.equal(favicon.milestones.length, 1);
+
+    const taster = pricingCalc({
+      id: 'g3',
+      description: '```json\n{ "brandName": "Acme", "industry": "tools" }\n```',
+      budget: 0,
+    } as never);
+    assert.equal(taster.price, 0);
+  });
+
   it('pins the FR-5/FR-6 caps and thresholds', () => {
     assert.equal(CONCEPT_COUNT, 3);
     assert.equal(MAX_REGENS_PER_SLOT, 2);
@@ -788,6 +845,7 @@ describe('migrations', () => {
       'selection',
       'free_gig_usage',
       'license_manifest',
+      'dispute_responses',
       'gate_audit',
       'reputation_snapshot',
       'webhook_secret',
@@ -847,7 +905,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Test: `apps/logosmith-bot/src/brief.test.ts`
 
 **Interfaces:**
-- Consumes: `LogoBrief`, `FaviconBrief` from `./types.js`; `MIN_LOGO_URL_PX` from `./config.js`.
+- Consumes: `LogoBrief`, `FaviconBrief` from `./types.js`. (Deliberately imports nothing from `config.js` — config imports `parseFaviconBrief` from here for the $0 pricing branch.)
 - Produces:
   - `parseLogoBrief(description: string): BriefResult<LogoBrief>`
   - `parseFaviconBrief(description: string): BriefResult<FaviconBrief>`
@@ -1005,7 +1063,6 @@ Expected: FAIL with `Cannot find module './brief.js'`.
 // Every function here is pure: `checkLogoUrl` decides the URL *policy* and does
 // NOT fetch. The size/type/timeout guards run at fetch time in the pipeline.
 
-import { MIN_LOGO_URL_PX } from './config.js';
 import type { FaviconBrief, LogoBrief } from './types.js';
 
 export type BriefResult<T> = { ok: true; brief: T } | { ok: false; reason: string };
@@ -1120,8 +1177,10 @@ export function checkLogoUrl(rawUrl: string): UrlCheck {
   return { ok: true, url };
 }
 
-/** The minimum source resolution the favicon gig accepts (US-2 AC1). */
-export const MIN_SOURCE_PX = MIN_LOGO_URL_PX;
+/** The minimum source resolution the favicon gig accepts (US-2 AC1). Lives
+ *  here, not in config.ts — config imports parseFaviconBrief from this module
+ *  for the $0 pricing branch, so this file must stay import-free of config. */
+export const MIN_SOURCE_PX = 512;
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -2793,12 +2852,12 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `fflate`; `FAVICON_SIZES`, `MASTER_SIZES` from `../config.js`.
 - Produces:
-  - `REQUIRED_ZIP_ENTRIES: readonly string[]`
+  - `REQUIRED_ZIP_ENTRIES: readonly string[]` (the paid M2 contract) and `FAVICON_ZIP_ENTRIES: readonly string[]` (the free favicon gig's US-2 subset — Task 23 gates against this one)
   - `buildWebmanifest(brandName: string): string`
   - `buildHtmlSnippet(): string`
   - `zipFiles(files: Record<string, Uint8Array>): Uint8Array`
   - `unzipFiles(zip: Uint8Array): Record<string, Uint8Array>`
-  - `checkZipCompleteness(zip: Uint8Array): ZipGateResult`
+  - `checkZipCompleteness(zip: Uint8Array, required?: readonly string[]): ZipGateResult` — defaults to the paid contract; the favicon gig passes `FAVICON_ZIP_ENTRIES`
   - `type ZipGateResult = { pass: boolean; present: string[]; missing: string[]; reasons: string[] }`
 
 - [ ] **Step 1: Write the failing test**
@@ -2943,6 +3002,24 @@ export const REQUIRED_ZIP_ENTRIES = [
   'brand.json',
 ] as const;
 
+/**
+ * The FREE favicon gig's smaller contract (US-2 AC2) — favicons, manifest, and
+ * snippet only. Deliberately NO logo.svg, mono mark, colour masters, or
+ * brand.json: the source is the buyer's existing logo, usually a raster, so
+ * there is no true-vector deliverable to promise.
+ */
+export const FAVICON_ZIP_ENTRIES = [
+  'favicon.ico',
+  'favicon-16.png',
+  'favicon-32.png',
+  'favicon-48.png',
+  'apple-touch-icon.png',
+  'icon-192.png',
+  'icon-512.png',
+  'site.webmanifest',
+  'snippet.html',
+] as const;
+
 export function zipFiles(files: Record<string, Uint8Array>): Uint8Array {
   return zipSync(files, { level: 6 });
 }
@@ -3003,20 +3080,23 @@ export interface ZipGateResult {
   reasons: string[];
 }
 
-export function checkZipCompleteness(zip: Uint8Array): ZipGateResult {
+export function checkZipCompleteness(
+  zip: Uint8Array,
+  required: readonly string[] = REQUIRED_ZIP_ENTRIES,
+): ZipGateResult {
   let files: Record<string, Uint8Array>;
   try {
     files = unzipFiles(zip);
   } catch {
-    return { pass: false, present: [], missing: [...REQUIRED_ZIP_ENTRIES], reasons: ['buffer did not unzip'] };
+    return { pass: false, present: [], missing: [...required], reasons: ['buffer did not unzip'] };
   }
 
   const present = Object.keys(files);
-  const missing = REQUIRED_ZIP_ENTRIES.filter((name) => !(name in files));
+  const missing = required.filter((name) => !(name in files));
   const reasons: string[] = [];
   if (missing.length > 0) reasons.push(`missing entries: ${missing.join(', ')}`);
 
-  for (const name of REQUIRED_ZIP_ENTRIES) {
+  for (const name of required) {
     const bytes = files[name];
     if (bytes && bytes.byteLength === 0) reasons.push(`${name} is present but empty`);
   }
@@ -3916,6 +3996,7 @@ export interface ConceptRow {
   vendor: string;
   vendorRequestId: string | null;
   r2Key: string | null;
+  nativeSvgKey: string | null;
   phash: string | null;
   ocrTranscription: string | null;
   ocrScore: number | null;
@@ -3931,6 +4012,7 @@ export interface ConceptUpsert {
   vendor: string;
   vendorRequestId?: string;
   r2Key?: string;
+  nativeSvgKey?: string;
   phash?: string;
   ocrTranscription?: string;
   ocrScore?: number;
@@ -3952,6 +4034,7 @@ interface RawConceptRow {
   vendor: string;
   vendor_request_id: string | null;
   r2_key: string | null;
+  native_svg_key: string | null;
   phash: string | null;
   ocr_transcription: string | null;
   ocr_score: number | null;
@@ -3967,6 +4050,7 @@ const toConceptRow = (raw: RawConceptRow): ConceptRow => ({
   vendor: raw.vendor,
   vendorRequestId: raw.vendor_request_id,
   r2Key: raw.r2_key,
+  nativeSvgKey: raw.native_svg_key,
   phash: raw.phash,
   ocrTranscription: raw.ocr_transcription,
   ocrScore: raw.ocr_score,
@@ -3982,11 +4066,13 @@ export function createConceptStore(db: D1Like, now: () => Date = () => new Date(
       await db
         .prepare(
           `INSERT INTO concepts (contract_id, slot, axis_id, vendor, vendor_request_id, r2_key,
-             phash, ocr_transcription, ocr_score, ocr_model, ocr_pass, attempts_used, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             native_svg_key, phash, ocr_transcription, ocr_score, ocr_model, ocr_pass,
+             attempts_used, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(contract_id, slot) DO UPDATE SET
              axis_id = excluded.axis_id, vendor = excluded.vendor,
              vendor_request_id = excluded.vendor_request_id, r2_key = excluded.r2_key,
+             native_svg_key = excluded.native_svg_key,
              phash = excluded.phash, ocr_transcription = excluded.ocr_transcription,
              ocr_score = excluded.ocr_score, ocr_model = excluded.ocr_model,
              ocr_pass = excluded.ocr_pass, attempts_used = excluded.attempts_used`,
@@ -3998,6 +4084,7 @@ export function createConceptStore(db: D1Like, now: () => Date = () => new Date(
           concept.vendor,
           concept.vendorRequestId ?? null,
           concept.r2Key ?? null,
+          concept.nativeSvgKey ?? null,
           concept.phash ?? null,
           concept.ocrTranscription ?? null,
           concept.ocrScore ?? null,
@@ -4196,6 +4283,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `apps/logosmith-bot/src/index.ts`
+- Create: `apps/logosmith-bot/src/assets.d.ts`
 - Test: `apps/logosmith-bot/src/handlers.test.ts`
 
 **Interfaces:**
@@ -4285,6 +4373,13 @@ import {
   type WebhookHandler,
 } from '@botguild/agent-core-workers';
 import type { Hono } from 'hono';
+// Bundled wasm — wrangler compiles .wasm imports to CompiledWasm modules;
+// assets.d.ts supplies the TypeScript module type. Node tests never import
+// these (wasm.node.ts reads the same files off disk). The potrace path carries
+// the Task 3 hedge: if the package ships its wasm elsewhere, fix the specifier
+// here and in wasm.node.ts together.
+import resvgWasm from '@resvg/resvg-wasm/index_bg.wasm';
+import potraceWasm from 'esm-potrace-wasm/dist/potrace.wasm';
 import { botProfile, fallbackEstimate, pricingCalc, rateCard } from './config.js';
 import {
   buildJobKey,
@@ -4300,7 +4395,12 @@ import {
 } from './jobs.js';
 import { renderProgressPage, renderProgressEvent } from './progress.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
-import { runDailySweep, runFifteenMinuteSweep, type SweepServices } from './sweeps.js';
+import {
+  resolveSelectionForContract,
+  runDailySweep,
+  runFifteenMinuteSweep,
+  type SweepServices,
+} from './sweeps.js';
 import type { JobMessage } from './types.js';
 
 export interface Env {
@@ -4445,7 +4545,15 @@ function getServices(env: Env): Services {
       put: async (key, value, contentType) => {
         await env.DELIVERABLES.put(key, value, { httpMetadata: { contentType } });
       },
+      // Stage 2 reads the winner's artifacts back (Task 21); null on a miss.
+      get: async (key) => {
+        const object = await env.DELIVERABLES.get(key);
+        return object ? new Uint8Array(await object.arrayBuffer()) : null;
+      },
     },
+    // Once-per-isolate wasm sources for the pack stack (pack/wasm.ts memoizes
+    // the init promises; these callbacks just hand over the bundled modules).
+    sources: { resvg: () => resvgWasm, potrace: () => potraceWasm },
     secrets: {
       moderationApiKey: env.MODERATION_API_KEY,
       anthropicApiKey: env.ANTHROPIC_API_KEY,
@@ -4478,7 +4586,7 @@ function getServices(env: Env): Services {
     logger,
   };
 
-  const app = buildApp(env, { logger, client, secretStore, jobs, concepts, botId });
+  const app = buildApp(env, { logger, client, secretStore, jobs, concepts, selection, botId });
   services = {
     logger,
     client,
@@ -4505,10 +4613,11 @@ function buildApp(
     secretStore: D1WebhookSecretStore;
     jobs: JobStore;
     concepts: ConceptStore;
+    selection: SelectionStore;
     botId: string;
   },
 ): Hono {
-  const { logger, client, secretStore, jobs, concepts, botId } = deps;
+  const { logger, client, secretStore, jobs, concepts, selection, botId } = deps;
 
   // Funding starts stage 1 only. Stage 2 (`vector`) is claimed by the selection
   // sweep, not by a webhook — the payload has no milestone id and M2 begins
@@ -4531,12 +4640,31 @@ function buildApp(
     );
   };
 
+  // M1 acceptance and auto-accept are FR-9 selection triggers: a buyer who
+  // accepted the concepts without ever posting a selection gets the thread read
+  // once more, then the default rule — instead of idling until the 72 h cron
+  // timeout. The helper no-ops unless the selection row is at
+  // `concepts_delivered`, so M2-side events fall through harmlessly.
+  const selectionDeps = () => ({
+    client,
+    jobs,
+    selection,
+    queue: env.JOBS,
+    apiUrl: env.BOTGUILD_API_URL,
+    apiKey: env.BOTGUILD_API_KEY,
+    botId,
+    logger,
+  });
+
   const onMilestoneAccepted: WebhookHandler = async (event) => {
-    await logContractReview({
-      client,
-      contractId: (event.payload as { contractId: string }).contractId,
-      logger,
-    });
+    const { contractId } = event.payload as { contractId: string };
+    await logContractReview({ client, contractId, logger });
+    await resolveSelectionForContract(selectionDeps(), contractId, { force: true });
+  };
+
+  const onAutoApproved: WebhookHandler = async (event) => {
+    const { contractId } = event.payload as { contractId: string };
+    await resolveSelectionForContract(selectionDeps(), contractId, { force: true });
   };
 
   const logOnly =
@@ -4560,7 +4688,7 @@ function buildApp(
       'proposal.accepted': withOwnershipFilter(onProposalAccepted, ownership),
       'milestone.accepted': withOwnershipFilter(onMilestoneAccepted, ownership),
       'milestone.delivered': logOnly('milestone.delivered'),
-      'acceptance.auto_approved': logOnly('acceptance.auto_approved'),
+      'acceptance.auto_approved': withOwnershipFilter(onAutoApproved, ownership),
       'contract.status.changed': logOnly('contract.status.changed'),
       'dispute.response_submitted': logOnly('dispute.response_submitted'),
     },
@@ -4716,7 +4844,16 @@ export default {
 };
 ```
 
-> This file imports `./progress.js`, `./pipeline.js`, and `./sweeps.js`, which are written in Tasks 13, 18/21, and 22. Until those land, create each as a stub exporting the named symbol with a `throw new Error('not implemented')` body so `tsc` passes; every later task replaces its stub. Record the stubs in the commit message so nothing ships unimplemented by accident.
+> This file imports `./progress.js`, `./pipeline.js`, and `./sweeps.js`, which are written in Tasks 13, 18/21, and 22. Until those land, create each as a stub exporting the named symbols with `throw new Error('not implemented')` bodies so `tsc` passes; every later task replaces its stub. Record the stubs in the commit message so nothing ships unimplemented by accident.
+
+`apps/logosmith-bot/src/assets.d.ts` (mirrors ThumbForge's `assets.d.ts` — types the bundled `.wasm` imports):
+
+```typescript
+declare module '*.wasm' {
+  const module: WebAssembly.Module;
+  export default module;
+}
+```
 
 - [ ] **Step 4: Run it to verify it passes**
 
@@ -4726,7 +4863,7 @@ Expected: PASS — 4 tests. Also run `pnpm --filter @botguild/logosmith-bot type
 - [ ] **Step 5: Commit**
 
 ```bash
-git add apps/logosmith-bot/src/index.ts apps/logosmith-bot/src/handlers.test.ts apps/logosmith-bot/src/progress.ts apps/logosmith-bot/src/pipeline.ts apps/logosmith-bot/src/sweeps.ts
+git add apps/logosmith-bot/src/index.ts apps/logosmith-bot/src/assets.d.ts apps/logosmith-bot/src/handlers.test.ts apps/logosmith-bot/src/progress.ts apps/logosmith-bot/src/pipeline.ts apps/logosmith-bot/src/sweeps.ts
 git commit -m "feat(logosmith): Worker entry, webhook handlers, deliverable routes
 
 Stubs pending: progress.ts (task 13), pipeline.ts (tasks 18/21), sweeps.ts (task 22).
@@ -4938,8 +5075,16 @@ export function renderProgressPage(job: JobRow, concepts: ConceptRow[]): string 
 <p>Every concept below is checked by a vision model to confirm its lettering reads back as the brand name. Failing concepts are regenerated, never delivered.</p>
 ${body}
 <script>
+  // Each SSE connection delivers ONE snapshot frame then closes; the browser
+  // reconnects on the retry interval. Reload only when the snapshot CHANGES —
+  // reloading on every frame would loop the page forever, since the first
+  // frame arrives immediately after every (re)connect.
+  let last = null;
   const source = new EventSource(location.pathname.replace(/\\/$/, '') + '/events');
-  source.onmessage = () => location.reload();
+  source.onmessage = (event) => {
+    if (last !== null && event.data !== last) location.reload();
+    last = event.data;
+  };
 </script>
 </body>
 </html>`;
@@ -5639,9 +5784,10 @@ export function createGenerator(deps: {
     const bytes = await fetchBytes(url);
     const requestId = body.id ?? body.data?.[0]?.image_id;
 
-    // A vector-native return is the prize: it lets M2 skip Vectorizer.ai. The
-    // raster is still needed for the OCR and pHash gates, so a native SVG is
-    // carried alongside, not instead of, the PNG.
+    // A vector-native return is the prize: it lets M2 skip Vectorizer.ai. When
+    // the URL yields only an SVG, the PNG comes back EMPTY — the pipeline
+    // (Task 18) rasterizes the sanitized SVG at 1024px for the OCR/pHash gates
+    // and persists the SVG to R2 for stage 2's short-circuit.
     if (!isPng(bytes)) {
       const text = new TextDecoder().decode(bytes);
       if (text.includes('<svg')) {
@@ -5708,6 +5854,8 @@ export function createGenerator(deps: {
 - [ ] **Step 3: Verify the live request shapes**
 
 The request bodies above are written from each vendor's documented v3 API. Before Task 18 depends on them, make one live call per vendor with a real key and confirm the response field names (`created` / `data[].url` for Ideogram, `id` / `data[].url` for Recraft). If a field differs, fix the adapter and the test fixture together — do not leave the test asserting a shape the vendor does not return.
+
+Note Ideogram's `created` is a **timestamp**, not a request id. If the live response exposes a real request/generation id (body field or response header), record that as `vendorRequestId` instead — the license manifest's provenance claim is only as strong as this id.
 
 - [ ] **Step 4: Run it to verify it passes → Commit**
 
@@ -5818,8 +5966,8 @@ describe('OcrGate', () => {
 
   it('honours an explicit threshold', async () => {
     const gate = createOcrGate({ ai: aiReturning('{"text":"Harbor Vin","unsafe":false}') });
-    assert.equal((await gate.check(PNG, 'Harbor Vine', 0.99)).status === 'ok' &&
-      (await gate.check(PNG, 'Harbor Vine', 0.99)).verdict.pass, false);
+    const strict = await gate.check(PNG, 'Harbor Vine', 0.99);
+    assert.ok(strict.status === 'ok' && !strict.verdict.pass);
     const lenient = await gate.check(PNG, 'Harbor Vine', 0.5);
     assert.ok(lenient.status === 'ok' && lenient.verdict.pass);
   });
@@ -5981,6 +6129,8 @@ export function createOcrGate(deps: { ai: AiLike; now?: () => Date }): OcrGate {
 }
 ```
 
+> **Verify at the first live call:** the `{ prompt, image: [...png] }` input shape follows the Workers AI vision-model convention (llava-style). Llama 4 Scout is a chat model and may instead require the `messages` content-parts form. The `AiLike` seam confines the fix to this one call site — but confirm the schema against a real `env.AI.run` before Task 18 depends on it, and update the adapter and this comment together.
+
 Add to `apps/logosmith-bot/src/gates/index.ts`:
 
 ```typescript
@@ -6043,14 +6193,23 @@ describe('decideSlotAction', () => {
     assert.deepEqual(decideSlotAction(state(), 0), { action: 'generate' });
   });
 
-  it('regenerates a failed slot within the attempt cap', () => {
+  it('regenerates a failed slot while regens remain (attempts = 1 + regens used)', () => {
+    // attempts=1: initial generation done, 0 regens used → regen #1 allowed.
     assert.deepEqual(decideSlotAction(state({ status: 'failed', attempts: 1 }), 0), {
       action: 'regenerate',
     });
+    // attempts=MAX: regen #MAX still allowed (that's the last one).
+    assert.deepEqual(
+      decideSlotAction(state({ status: 'failed', attempts: MAX_REGENS_PER_SLOT }), 0),
+      { action: 'regenerate' },
+    );
   });
 
-  it('stops a slot that exhausted its attempts', () => {
-    const action = decideSlotAction(state({ status: 'failed', attempts: MAX_REGENS_PER_SLOT }), 0);
+  it('stops after the initial attempt plus MAX_REGENS_PER_SLOT regenerations', () => {
+    const action = decideSlotAction(
+      state({ status: 'failed', attempts: MAX_REGENS_PER_SLOT + 1 }),
+      0,
+    );
     assert.deepEqual(action, { action: 'stop', reason: 'attempts-exhausted' });
   });
 
@@ -6061,16 +6220,19 @@ describe('decideSlotAction', () => {
     });
   });
 
-  it('checks the spend cap before the attempt cap', () => {
-    // A resumed job at the cap must not spend another cent even on attempt 0.
-    const action = decideSlotAction(state({ attempts: 0 }), MAX_SPEND_USD + 1);
-    assert.equal(action.action, 'stop');
-    assert.ok(action.action === 'stop' && action.reason === 'spend-cap');
+  it('checks the spend cap before anything else', () => {
+    // A resumed job at the cap must not spend another cent, whatever the slot state.
+    assert.deepEqual(decideSlotAction(state({ status: 'passed' }), MAX_SPEND_USD + 1), {
+      action: 'stop',
+      reason: 'spend-cap',
+    });
   });
 
   it('never regenerates a slot that already passed', () => {
-    const action = decideSlotAction(state({ status: 'passed', attempts: 0 }), 0);
-    assert.deepEqual(action, { action: 'stop', reason: 'attempts-exhausted' });
+    assert.deepEqual(decideSlotAction(state({ status: 'passed', attempts: 1 }), 0), {
+      action: 'stop',
+      reason: 'already-passed',
+    });
   });
 });
 ```
@@ -6086,20 +6248,24 @@ import type { ConceptState } from './types.js';
 export type SlotAction =
   | { action: 'generate' }
   | { action: 'regenerate' }
-  | { action: 'stop'; reason: 'attempts-exhausted' | 'spend-cap' };
+  | { action: 'stop'; reason: 'attempts-exhausted' | 'spend-cap' | 'already-passed' };
 
 /**
- * The FR-5 cap policy. Spend is checked FIRST and against the accumulated
- * checkpoint total, so a job resumed by a queue retry decides against the
- * remaining budget rather than starting a fresh $2.50.
+ * The FR-5 cap policy. `attempts` counts COMPLETED generation attempts for the
+ * slot (0 = never generated), so regenerations used = attempts - 1, and the
+ * PRD's "<= 2 regenerations per slot" allows exactly 3 attempts. The
+ * orchestrator increments `attempts` after EVERY generation call, pass or fail.
+ *
+ * Spend is checked FIRST and against the accumulated checkpoint total, so a job
+ * resumed by a queue retry decides against the remaining budget rather than
+ * starting a fresh $2.50.
  */
 export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAction {
   if (spendUsd >= MAX_SPEND_USD) return { action: 'stop', reason: 'spend-cap' };
-  if (state.status === 'passed') return { action: 'stop', reason: 'attempts-exhausted' };
+  if (state.status === 'passed') return { action: 'stop', reason: 'already-passed' };
   if (state.attempts === 0) return { action: 'generate' };
-  if (state.attempts <= MAX_REGENS_PER_SLOT - 1) return { action: 'regenerate' };
-  if (state.attempts >= MAX_REGENS_PER_SLOT) return { action: 'stop', reason: 'attempts-exhausted' };
-  return { action: 'regenerate' };
+  if (state.attempts <= MAX_REGENS_PER_SLOT) return { action: 'regenerate' };
+  return { action: 'stop', reason: 'attempts-exhausted' };
 }
 ```
 
@@ -6108,11 +6274,12 @@ export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAct
 1. `jobs.get(jobKey)`; load the checkpoint, or seed one with three `pending` slots from `axisCompiler.compile(brief)`.
 2. Re-validate the brief (FR-1). Invalid ⇒ post to the thread and `markDelivered(jobKey, 'rejected')`.
 3. `moderation.screen(brandName + brief)`. `unavailable` ⇒ `jobs.park(jobKey, 'moderation_outage')`, increment attempts, thread notice after `MODERATION_ATTEMPTS_BEFORE_NOTICE`, return `{ outcome: 'parked' }`. `flagged` ⇒ `markDelivered(jobKey, 'rejected')` with a thread explanation.
-4. Loop until every slot is `passed` or `decideSlotAction` says stop:
-   - `generator.generate(axis, axis.prompt)` → on `retryable: false`, mark the slot failed permanently; on `retryable: true`, throw so the queue retries.
+4. Loop until every slot is `passed` or `decideSlotAction` says stop, incrementing the slot's `attempts` after **every** generation call, pass or fail:
+   - `generator.generate(axis, axis.prompt)` → on `retryable: false`, mark the slot failed permanently; on `retryable: true`, save the checkpoint and `jobs.park(jobKey, 'vendor_outage')` for cron re-enqueue — vendor outages must **not** burn queue retries (the Task 1 wrangler comment and the FR-2 pattern; the queue's 3 retries are reserved for infra errors thrown outside these handled paths).
    - Add `costUsd` to `checkpoint.spendUsd` **before** the gate runs — the money is spent whether or not the image passes.
-   - `ocrGate.check(png, brandName)` → `unavailable` ⇒ park; otherwise record the verdict.
-   - `perceptualHash` the rendered pixmap; `conceptStore.upsert(...)`; `jobs.saveCheckpoint(...)` after **every** slot so a retry never redoes paid work.
+   - **Recraft SVG-only returns:** when `concept.nativeSvg` is set and `png` is empty, `sanitizeSvg` the SVG, rasterize it with `renderSvgToPng(svg, 1024, config.sources)` to obtain the gate-able PNG, and PUT the sanitized SVG to R2 as `${deliverableToken}/concept-N.svg`, recording the key via `conceptStore.upsert({ nativeSvgKey })`. Without this, the empty PNG breaks every gate AND stage 2's Recraft-native short-circuit can never fire — every winner would pay Vectorizer.ai.
+   - `ocrGate.check(png, brandName)` → `unavailable` ⇒ park as `'ocr_outage'`; otherwise record the verdict.
+   - `perceptualHash` the decoded pixmap; `conceptStore.upsert(...)`; `jobs.saveCheckpoint(...)` after **every** slot so a retry never redoes paid work.
    - `checkDistinctness` across passing slots; a failing pair marks the *newer* slot failed for regeneration.
    - `recordGateAudit` for every verdict.
 5. Count passing slots: 3 ⇒ `delivered`; 2 (and distinct) ⇒ `partial`; <2 ⇒ `aborted`.
@@ -6125,7 +6292,7 @@ export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAct
 Extend `pipeline.test.ts` with a `runConceptStage` describe using in-memory D1 (`createMemoryD1` + `applyMigrations`) and fakes for the generator, OCR gate, moderation client, and `client.deliverMilestone`. Cover exactly these four cases — they are the §9 contractual outcomes:
 
 1. **All three pass first time** → `outcome: 'delivered'`, three `concepts` rows, `selection` row opened at `concepts_delivered`, `deliverMilestone` called once.
-2. **One slot fails twice then passes** → `outcome: 'delivered'`, that slot's `attemptsUsed` is 2, and `checkpoint.spendUsd` reflects three paid generations for that slot.
+2. **One slot fails twice then passes** → `outcome: 'delivered'`, that slot's recorded attempts are 3 (the initial generation plus both FR-5 regenerations), and `checkpoint.spendUsd` reflects three paid generations for that slot.
 3. **Spend cap reached with two passing** → `outcome: 'partial'`, `deliverMilestone` called, the shortfall itemized in the delivery note.
 4. **Moderation unavailable** → `outcome: 'parked'`, job row `status: 'parked'` with `park_reason: 'moderation_outage'`, and `deliverMilestone` NOT called.
 
@@ -6285,8 +6452,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 `runVectorStage` implements §6 steps 8–10:
 
-1. Load the winner from `selection.get(contractId)` and its concept row; fetch the concept PNG back from R2.
-2. `vectorizer.toVector(...)` → `retryable` ⇒ park with a thread note; `ok: false` non-retryable ⇒ abort leg.
+1. Load the winner from `selection.get(contractId)` and its concept row; read the winner's artifacts back via `config.deliverables.get` — the concept PNG (`concept-N.png` under the stage-1 token, via `concepts.r2_key`), and the sanitized native SVG (`concepts.native_svg_key`) when the winner came from Recraft's vector export.
+2. `vectorizer.toVector({ png, nativeSvg })` → a Recraft-native winner short-circuits with zero vendor spend (the §13 single-vendor mitigation); `retryable` ⇒ park with a thread note; `ok: false` non-retryable ⇒ abort leg.
 3. `fetchFontPairing(...)` (advisory; never fails the job).
 4. `buildPack({ svg, brandName, sources, fonts })` — which runs the true-vector gate first and throws if the SVG is not a true vector.
 5. If `gates.pass` is false, do **not** deliver: post the failing gate detail to the thread and take the abort leg.
@@ -6317,9 +6484,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Test: `apps/logosmith-bot/src/sweeps.test.ts`
 
 **Interfaces:**
-- Produces: `interface SweepServices`; `runFifteenMinuteSweep(services): Promise<void>`; `runDailySweep(services): Promise<void>`; `decideDefaultSelection(concepts: ConceptRow[]): number | null`.
+- Produces: `interface SweepServices`; `runFifteenMinuteSweep(services): Promise<void>`; `runDailySweep(services): Promise<void>`; `decideDefaultSelection(concepts: ConceptRow[]): number | null`; `resolveSelectionForContract(deps, contractId, opts?: { force?: boolean }): Promise<void>` — reads the thread once; a parsed reply selects as `'buyer'`; otherwise, past `SELECTION_TIMEOUT_HOURS` **or with `force`**, default-selects via `decideDefaultSelection`; then claims stage `vector` and enqueues. No-ops unless the selection row is at `concepts_delivered`.
 
-The 15-minute sweep runs, in order: `runGigPollSweep` (score + propose, free gigs through `freeProposer`); negotiation via `decideCounter` against the estimator floor with the D1 counter-once store; the **selection poll** (for each `listAwaitingSelection`, read the thread and either `selection.select(..., 'buyer')` or, past `SELECTION_TIMEOUT_HOURS`, `selection.select(..., 'default')` — then claim stage `vector` and enqueue); parked re-enqueue; reputation refresh into the D1 snapshot. The daily sweep re-enqueues stuck claims older than `STUCK_CLAIM_MINUTES`.
+The 15-minute sweep runs, in order: `runGigPollSweep` (score + propose, free gigs through `freeProposer`); negotiation via `decideCounter` against the estimator floor with the D1 counter-once store; the **selection poll** — for each `listAwaitingSelection(now)` row, `resolveSelectionForContract` (buyer replies select at any age; the default rule fires only past the timeout; the same helper is what the M1 `milestone.accepted` / `acceptance.auto_approved` webhook handlers call with `force: true`, PRD FR-9); parked re-enqueue; reputation refresh into the D1 snapshot. The daily sweep re-enqueues stuck claims older than `STUCK_CLAIM_MINUTES`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -6331,6 +6498,7 @@ Cover:
 4. A contract inside the timeout with no reply is left alone.
 5. Parked jobs are unparked and re-enqueued.
 6. Stuck claims older than the cutoff are re-enqueued; fresher ones are not.
+7. `resolveSelectionForContract` with `force: true` (the FR-9 M1-acceptance trigger) default-selects immediately when no reply exists — and no-ops when the selection row is at `winner_selected` or `pack_delivered`.
 
 - [ ] **Step 2: Write the module, run the tests → Commit**
 
@@ -6348,29 +6516,49 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `apps/logosmith-bot/src/pipeline.ts` (add `runSingleStage`)
 - Create: `apps/logosmith-bot/src/freeGigs.ts`
+- Create: `apps/logosmith-bot/src/pack/faviconPack.ts`
 - Test: `apps/logosmith-bot/src/freeGigs.test.ts`
+- Test: `apps/logosmith-bot/src/pack/faviconPack.test.ts`
 
 **Interfaces:**
-- Produces: `fetchSourceLogo(deps): Promise<SourceLogoResult>`; `runSingleStage(config, message): Promise<StageOutcome>`; `checkFreeGigQuota(quota, payerId): Promise<QuotaDecision>`.
+- Consumes: `@cf-wasm/photon` (raster decode + per-size resize — **its first and only import site**; PRD §7 names it as "the favicon gig's PNG path"); `FAVICON_ZIP_ENTRIES` + `checkZipCompleteness(zip, FAVICON_ZIP_ENTRIES)`; `assembleIco`, `checkIco`, `buildWebmanifest`, `buildHtmlSnippet`, `zipFiles`; `renderSvgToPng` for SVG sources; `QuotaStore`; `MIN_SOURCE_PX` from `./brief.js`.
+- Produces:
+  - `fetchSourceLogo(deps: { fetchImpl: FetchLike; url: string }): Promise<SourceLogoResult>` — `type SourceLogoResult = { ok: true; source: FaviconSource } | { ok: false; reason: string }`
+  - `type FaviconSource = { kind: 'svg'; svg: string } | { kind: 'raster'; bytes: Uint8Array; width: number; height: number }`
+  - `buildFaviconPack(input: { source: FaviconSource; siteName: string; sources: WasmSources }): Promise<FaviconPackResult>` — `{ zip, files, gates: { dimensions, ico, zip, pass } }`
+  - `runSingleStage(config, message): Promise<StageOutcome>`
+  - `checkFreeGigQuota(quota: QuotaStore, payerId: string): Promise<QuotaDecision>`
 
-`fetchSourceLogo` applies the §12 fetch-time guards the pure `checkLogoUrl` policy could not: 10 MB streamed cap, magic-byte sniff (PNG/JPEG/SVG only — content-type headers are not trusted), 15 s timeout via `AbortSignal`, and the ≥512 px minimum read from the decoded raster (or accepted outright for an SVG source). The favicon path then runs `buildPack` with **no vendor spend at all**; the taster runs one FLUX generation with ≤2 regenerations and attaches the OCR verdict as labelled, **non-blocking** evidence — a failed readback is delivered honestly with a note that the paid pack uses the lettering-specialist model path.
+> **The favicon pack is NOT the M2 pack.** US-2's deliverable is favicons + manifest + snippet only — no `logo.svg`, no mono mark, no colour masters, no `brand.json` — so it gets its own builder, gated with `checkZipCompleteness(zip, FAVICON_ZIP_ENTRIES)`, never the 15-entry paid contract. And its input is usually a *raster*: `buildPack` (vector in) cannot serve it. For an SVG source, every size renders from vector via resvg exactly as the paid pack does; for a PNG/JPEG source, each size is produced by a photon high-quality resize from the ≥512 px original — downscale-only, never upscale. `favicon.ico` is assembled from the resized 16/32/48 PNGs and parse-back gated as usual. `site.webmanifest` names the source URL's hostname — the favicon brief has no `brandName`.
+
+`fetchSourceLogo` applies the §12 fetch-time guards the pure `checkLogoUrl` policy could not: 10 MB streamed cap, magic-byte sniff (PNG/JPEG/SVG only — content-type headers are not trusted), 15 s timeout via `AbortSignal.timeout`, and the ≥`MIN_SOURCE_PX` minimum — read from the IHDR for PNG, from the photon-decoded image for JPEG, and waived for SVG sources (vectors have no native resolution). The taster runs one FLUX generation with ≤2 regenerations and attaches the OCR verdict as labelled, **non-blocking** evidence — a failed readback is delivered honestly with a note that the paid pack uses the lettering-specialist model path.
 
 - [ ] **Step 1: Write the failing test**
 
 Cover:
 
 1. Quota: a payer at `FREE_GIGS_PER_PAYER` is refused with an actionable message; a 4th attempt in the window is refused; usage older than `FREE_GIG_WINDOW_DAYS` does not count.
-2. `fetchSourceLogo` rejects a >10 MB body, a non-image magic-byte prefix, a source below 512 px, and a timeout — each with a distinct, actionable reason.
+2. `fetchSourceLogo` rejects a >10 MB body, a non-image magic-byte prefix, a raster below `MIN_SOURCE_PX`, and a timeout — each with a distinct, actionable reason.
 3. `fetchSourceLogo` accepts a valid PNG and a valid SVG.
-4. The favicon path produces a complete pack ZIP and records **zero** vendor spend.
-5. The taster delivers even when the OCR verdict fails, and the delivery note names the $25 gig.
-6. The warranty revision round (FR-18) re-runs generation → gates → pack under a fresh cap and does not consume the buyer's free-gig quota.
+4. `buildFaviconPack` from a 512 px raster source produces **every `FAVICON_ZIP_ENTRIES` entry and nothing more** — each PNG at its exact size (IHDR-read), the ICO parse-back passing, and NO `logo.svg` in the ZIP.
+5. `buildFaviconPack` from an SVG source renders each size from the vector (16 px and 512 px outputs differ in content, not just scale).
+6. The favicon path end-to-end records **zero** vendor spend (`checkpoint.spendUsd === 0`).
+7. The taster delivers even when the OCR verdict fails, and the delivery note names the $25 gig.
+8. The warranty revision round (FR-18) re-runs generation → gates → pack under a fresh FR-5-sized cap and does not consume the buyer's free-gig quota.
 
-- [ ] **Step 2: Write the modules, run the tests → Commit**
+- [ ] **Step 2: Write the modules, run the tests**
+
+- [ ] **Step 3: Re-measure the bundle**
+
+photon joins the bundle **here** — it was tree-shaken out of the Task 10 measurement while unimported. Repeat the Task 10 step-6 measurement (`wrangler deploy --dry-run --outdir` + `du`), record the new compressed size in the commit message, and apply the same escalation rule: if the three-WASM set now presses the Workers limit, stop and take the §16 container fallback for the pack stage.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add apps/logosmith-bot/src/freeGigs.ts apps/logosmith-bot/src/freeGigs.test.ts apps/logosmith-bot/src/pipeline.ts
-git commit -m "feat(logosmith): favicon gig, klein taster, per-payer quotas, revision round
+git add apps/logosmith-bot/src/freeGigs.ts apps/logosmith-bot/src/freeGigs.test.ts apps/logosmith-bot/src/pack/faviconPack.ts apps/logosmith-bot/src/pack/faviconPack.test.ts apps/logosmith-bot/src/pipeline.ts
+git commit -m "feat(logosmith): favicon pack builder, klein taster, quotas, revision round
+
+Bundle size with photon included: <record the du output here>.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -6457,7 +6645,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - [ ] **Step 2: Write the module and rewire the handlers**
 
-`assembleDisputeEvidence` reads the three D1 tables and assembles a payload; `createDisputeResponder.respond` submits it via `AgentMcpClient`, guarded by a `gate_audit` row (`gate: 'dispute'`) so a redelivery is a no-op. In `index.ts`, replace:
+`assembleDisputeEvidence` reads the three D1 tables and assembles a payload; `createDisputeResponder.respond` submits it via `AgentMcpClient`, claimed first by a unique-constraint `INSERT` into `dispute_responses` (`contract_id` PRIMARY KEY — in the Task 1 migration) so concurrent redeliveries collapse to exactly one MCP post; a read-then-write guard would race. In `index.ts`, replace:
 
 ```typescript
       'contract.status.changed': logOnly('contract.status.changed'),
@@ -6488,6 +6676,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Resolution.** Tasks 1–17 are specified to the step, with the full implementation and test code inline. Tasks 18–25 are specified to the *case list*: interfaces, the load-bearing algorithm (e.g. `decideSlotAction`), and an enumerated set of behaviours each test must cover — but not every line. They are integration-shaped, and their bodies depend on the exact store and gate signatures that Tasks 1–17 lock in. Write them as `node:test` describes in the same style, and **do not reduce the case list** — each enumerated case corresponds to a §9 contractual outcome or a §13 named risk.
 
 **Task 25 was added during plan self-review.** PRD §10.9 requires the dispute path to route through MCP with D1 evidence; the VoiceWright-shaped handler wiring in Task 12 leaves it as log-only, which would have shipped the requirement unimplemented.
+
+**A second review pass (against the live repo interfaces) fixed:** the favicon gig's own pack builder + `FAVICON_ZIP_ENTRIES` gate contract (it is not the M2 pack, and its input is usually a raster — photon's one job); the Recraft native-SVG path (rasterize for gates, persist to R2 + `concepts.native_svg_key`, or the stage-2 short-circuit can never fire); `PipelineConfig.sources` + `deliverables.get` + the bundled-wasm imports and `assets.d.ts`; $0 anchors in `pricingCalc` for the free gigs (and the `brief.ts`↔`config.ts` import direction that makes it cycle-free); vendor-outage parking instead of queue-retry burning; the FR-9 early selection trigger on M1 acceptance/auto-accept; `decideSlotAction` attempt semantics (3 attempts = 1 initial + 2 regens, spend checked first); and the progress page's reload-on-change guard.
 
 
 
