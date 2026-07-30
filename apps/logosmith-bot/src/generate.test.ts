@@ -36,7 +36,7 @@ describe('generate', () => {
           new Response(
             JSON.stringify({
               created: '2026-07-30T12:00:00Z',
-              data: [{ url: 'https://cdn/x.png' }],
+              data: [{ url: 'https://cdn/x.png', seed: 42 }],
             }),
             { status: 200, headers: { 'x-request-id': 'req-9' } },
           ),
@@ -52,6 +52,36 @@ describe('generate', () => {
     assert.equal(result.concept.vendorRequestId, 'req-9');
     assert.deepEqual([...result.concept.png.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
     assert.ok(result.costUsd > 0);
+    // Central stamping (generate.ts) and the vendor's own reproducibility field
+    // — both load-bearing for every downstream consumer of Concept.
+    assert.equal(result.concept.axisId, ideogramAxis.id);
+    assert.equal(result.concept.seed, 42);
+  });
+
+  it('leaves concept.seed undefined when Ideogram omits it, without breaking anything else', async () => {
+    const generator = createGenerator({
+      fetchImpl: fetchStub({
+        'ideogram.ai': async () =>
+          new Response(
+            JSON.stringify({
+              created: '2026-07-30T12:05:00Z',
+              data: [{ url: 'https://cdn/x.png' }],
+            }),
+            { status: 200, headers: { 'x-request-id': 'req-10' } },
+          ),
+        cdn: imageResponse,
+      }),
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const result = await generator.generate(ideogramAxis, 'a mark for Acme');
+    assert.ok(result.ok);
+    assert.equal(result.concept.seed, undefined);
+    // A missing seed must not take anything else down with it.
+    assert.equal(result.concept.vendor, 'ideogram');
+    assert.equal(result.concept.vendorRequestId, 'req-10');
+    assert.deepEqual([...result.concept.png.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   });
 
   // Recraft's response shape below is NOT verified against a live API — no key
@@ -84,6 +114,7 @@ describe('generate', () => {
     // Task 18 rasterizes the sanitized SVG at 1024px for the OCR/pHash gates —
     // it decides to do that by checking for exactly this empty-png signal.
     assert.equal(result.concept.png.length, 0);
+    assert.equal(result.concept.axisId, recraftAxis.id);
   });
 
   it('returns a plain PNG when Recraft returns a raster instead of SVG', async () => {
@@ -161,6 +192,7 @@ describe('generate', () => {
     assert.ok(result.ok);
     assert.ok(called);
     assert.equal(result.concept.vendor, 'flux');
+    assert.equal(result.concept.axisId, fluxAxis.id);
   });
 
   it('marks a 429 as retryable and a 400 as not', async () => {

@@ -82,6 +82,14 @@ export function createGenerator(deps: {
     };
   }
 
+  // NOT verified live, unlike Ideogram above — this shape is from Recraft's
+  // documentation only; no API key was obtainable this session (its Generate
+  // button is gated behind a prepaid API-units balance). Two things are
+  // explicitly unproven: whether `style: "vector_illustration"` actually
+  // returns SVG rather than a raster, and the exact response field names
+  // below. The native-SVG branch is kept anyway — unproven, not dead code —
+  // because if it does work it lets M2 skip Vectorizer.ai entirely
+  // (~$0.15/job against a $1 anchor).
   async function generateRecraft(prompt: string): Promise<GenerateResult> {
     const response = await deps.fetchImpl('https://external.api.recraft.ai/v1/images/generations', {
       method: 'POST',
