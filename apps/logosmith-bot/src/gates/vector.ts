@@ -72,8 +72,15 @@ const JAVASCRIPT_HREF_RE = /\shref\s*=\s*["']?\s*javascript:/i;
 //     same match regardless of which XML structure wraps it.
 // Neither regex judges the captured value itself — normalizeRef() and
 // isPureFragment() below do that. Extraction only finds the candidates.
+//
+// BOTH ARE SCANNED WITH A REWINDING `exec` LOOP, NEVER `matchAll` — see
+// `anyNonFragmentRef` below, where that is the whole point. The trailing `)`
+// on URL_FN_RE is likewise OPTIONAL on purpose: CSS's "consume a url token"
+// step returns the <url-token> at EOF, so `style="fill:url(https://evil…"`
+// with no `)` anywhere is a reference a renderer follows, and a required `)`
+// produced no match at all.
 const HREF_ATTR_RE = /\bhref\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/gi;
-const URL_FN_RE = /url\(([^)]*)\)/gi;
+const URL_FN_RE = /url\(([^)]*)\)?/gi;
 
 /**
  * Reproduces the WHATWG URL Standard's own first two input-preprocessing
@@ -107,15 +114,66 @@ function normalizeRef(raw: string): string {
 const isPureFragment = (value: string): boolean =>
   value.startsWith('#') && value.indexOf('#', 1) === -1;
 
-/** True if any href/xlink:href/url() value in the document is not a pure fragment. */
-function hasNonFragmentReference(svg: string): boolean {
-  for (const match of svg.matchAll(HREF_ATTR_RE)) {
-    if (!isPureFragment(normalizeRef(match[2]))) return true;
-  }
-  for (const match of svg.matchAll(URL_FN_RE)) {
-    if (!isPureFragment(normalizeRef(match[1]))) return true;
+/**
+ * Scan every occurrence of `pattern` INDEPENDENTLY and report whether any
+ * captured reference is not a pure fragment.
+ *
+ * A PLAIN `matchAll` IS UNSOUND HERE, AND THE FAILURE IS A SKIPPED CAPTURE
+ * RATHER THAN AN INACCURATE ONE. Both extraction regexes CONSUME what they
+ * match, and `matchAll` resumes after the whole match — so one greedy,
+ * unterminated reference swallows the document up to its next delimiter and
+ * every reference inside that span is NEVER EXAMINED AT ALL. The swallowing
+ * capture begins with `#`, reads as a pure fragment, and the gate passes.
+ *
+ * Measured, both shapes, on documents that are ordinary well-formed XML:
+ *
+ *   fill="url(#g" clip-path="url(https://evil.example.com/x)"        passed
+ *   fill="url(#g"/><rect fill="url(https://evil.example.com/x)"/>    passed
+ *   <desc>href="#g</desc><use href="https://evil.example.com/x.svg"/> passed
+ *
+ * The third one needs no malformed markup at all: `<desc>`/`<title>` are
+ * allow-listed, their TEXT may legally contain a raw quote, and one unmatched
+ * quote re-pairs every quote after it. `sanitizeSvg` does not strip them.
+ * `url(#g` at end-of-input is likewise a valid CSS <url-token>. So a renderer
+ * paints one fragment and FETCHES ONE EXTERNAL URL from the paid logo.svg —
+ * the impact Task 20's Critical 1 closed.
+ *
+ * NOTE FOR WHOEVER READS THE LEDGER: the Task 20 invariant ("the captured value
+ * is a prefix of the real value, so a `#` prefix means the real value is a
+ * fragment") is TRUE and is not what was broken. It reasons about the fidelity
+ * of a capture that WAS taken. `url(#g href='https://…')` still legitimately
+ * passes, because that whole value really is a same-document fragment.
+ *
+ * The fix is to rewind `lastIndex` to just past the match's own INTRODUCER
+ * (`url(` / `href`), so every occurrence gets its own scan and none can hide
+ * behind an earlier one.
+ *
+ * THIS STAYS LINEAR, and that matters because `freeGigs.ts` hands this gate a
+ * buyer-supplied SVG of up to 10 MB. The loop stops at the first impure
+ * capture, and two PURE captures cannot overlap: a pure capture contains
+ * exactly one `#`, at its own start, so a later reference beginning inside it
+ * could not also begin with `#` unless it began at the same offset. The pure
+ * captures therefore partition the document. Measured at 10 MB across three
+ * adversarial shapes: 107-302 ms.
+ */
+function anyNonFragmentRef(svg: string, pattern: RegExp, group: number, rewind: number): boolean {
+  pattern.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(svg)) !== null) {
+    pattern.lastIndex = match.index + rewind;
+    if (!isPureFragment(normalizeRef(match[group] ?? ''))) return true;
   }
   return false;
+}
+
+/** True if any href/xlink:href/url() value in the document is not a pure fragment. */
+function hasNonFragmentReference(svg: string): boolean {
+  // `\bhref` matches at the `h` of a bare `href` AND of `xlink:href` alike, so
+  // rewinding past those four characters lands after the introducer in both.
+  return (
+    anyNonFragmentRef(svg, HREF_ATTR_RE, 2, 'href'.length) ||
+    anyNonFragmentRef(svg, URL_FN_RE, 1, 'url('.length)
+  );
 }
 
 // viewBox's VALUE, not just its presence — "bogus" or "1 2 3" (three, not

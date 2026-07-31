@@ -447,6 +447,129 @@ describe('external-reference regression tests (critical — allow-list the FORM,
       `internal fragment refs must not be flagged; got: ${result.violations.join(', ')}`,
     );
   });
+
+  describe('CRITICAL — an unterminated url( HID the url() that followed it', () => {
+    // THE HOLE IS A SKIPPED CAPTURE, NOT AN INACCURATE ONE, and that
+    // distinction is why it survived a review round. The Task 20 ledger
+    // derived "the captured value is a prefix of the real value, so a `#`
+    // prefix means the real value is a fragment" and concluded no external
+    // reference could be smuggled through the paren gap. That invariant is
+    // TRUE — and it is about the fidelity of one capture, while the defect is
+    // that a second capture is never taken at all.
+    //
+    // `URL_FN_RE` was greedy to the next `)` and `matchAll` resumes after the
+    // WHOLE match, so `url(#g` swallowed the document up to the next paren and
+    // every `url()` inside that span went unexamined. The swallowing capture
+    // starts with `#`, reads as a pure fragment, and the gate passed.
+    //
+    // `url(#g` at end-of-input is a valid CSS <url-token>, so a renderer
+    // paints one fragment and FETCHES ONE EXTERNAL URL — the exact impact
+    // Task 20's Critical 1 closed, re-opened.
+    const EVIL = 'https://evil.example.com/x';
+
+    const probes: Array<[string, string]> = [
+      [
+        'a second url() in the SAME element, behind an unterminated first',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(#g" clip-path="url(${EVIL})"/></svg>`,
+      ],
+      [
+        'a url() in a LATER element, behind an unterminated first',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(#g"/><rect fill="url(${EVIL})"/></svg>`,
+      ],
+      [
+        'an unterminated url( with no closing paren anywhere in the document',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" style="fill:url(${EVIL}"/></svg>`,
+      ],
+    ];
+
+    for (const [name, probe] of probes) {
+      it(`rejects ${name}`, () => {
+        // The fixture is only a test of this defect if it CONTAINS the
+        // reference — assert that inline, so a future edit that rewrites the
+        // probe into something harmless fails loudly instead of passing
+        // vacuously.
+        assert.ok(probe.includes(EVIL), 'fixture must actually carry the external reference');
+        const result = checkTrueVector(probe);
+        assert.equal(result.pass, false);
+        assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+      });
+    }
+
+    it('CONTROL: the same external url() with no unterminated url( in front was always caught', () => {
+      // Proves the probes above differ from the control by exactly the
+      // swallowing prefix, and nothing else.
+      const control = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(${EVIL})"/></svg>`;
+      assert.equal(checkTrueVector(control).pass, false);
+    });
+
+    // FOUND WHILE CONFIRMING THAT href WAS *UN*AFFECTED — IT WAS NOT.
+    //
+    // `HREF_ATTR_RE` consumes too, and its `\1` backreference means one
+    // unmatched quote re-pairs every quote after it. This needs NO malformed
+    // markup: `<desc>` and `<title>` are allow-listed, and their TEXT may
+    // legally contain a raw `"`. `sanitizeSvg` strips neither.
+    it('rejects an external href hidden behind an unmatched quote in allow-listed text', () => {
+      const probes = [
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><desc>href="#g</desc>` +
+          `<use href="${EVIL}.svg"/></svg>`,
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><title>see href='#g</title>` +
+          `<use xlink:href='${EVIL}.svg'/></svg>`,
+      ];
+      for (const probe of probes) {
+        assert.ok(probe.includes(EVIL), 'fixture must carry the external reference');
+        const result = checkTrueVector(probe);
+        assert.equal(result.pass, false, probe);
+        assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+      }
+    });
+
+    it('still accepts a same-document fragment whose value merely contains "#"-free noise', () => {
+      // The Task 20 prefix invariant, still true and still load-bearing: this
+      // whole value starts with `#`, so it resolves same-document and must not
+      // be rejected.
+      const legit = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><use href="#g and more"/></svg>`;
+      assert.equal(checkTrueVector(legit).pass, true);
+    });
+
+    it('DISCLOSED OVER-REJECTION: an href value that itself embeds an external href= is refused', () => {
+      // `href="#g href='https://evil…'"` resolves as ONE same-document
+      // fragment, so a renderer would not fetch it, and the per-occurrence
+      // scan refuses it anyway — it has no XML parser and cannot tell a nested
+      // `href=` inside a value from a real second attribute.
+      //
+      // Kept deliberately: the fail-closed direction, at the cost of a value
+      // shape no optimizer or vector vendor emits. Pinned here so the
+      // trade-off is a recorded decision rather than a surprise.
+      const odd = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><use href="#g href='${EVIL}'"/></svg>`;
+      assert.equal(checkTrueVector(odd).pass, false);
+    });
+
+    it('stays linear on adversarial megabyte documents rather than rescanning per occurrence', () => {
+      // The per-occurrence rescan is only safe because two PURE captures
+      // cannot overlap: a pure capture holds exactly one `#`, at its own
+      // start, so a later reference beginning inside it could not also begin
+      // with one. The loop therefore either stops at the first impure capture
+      // or walks a partition of the document. `freeGigs.ts` hands this gate a
+      // buyer-supplied SVG of up to 10 MB, so this is a reachable input, and
+      // a quadratic scan there is a Worker CPU-limit denial of service.
+      const head = '<svg viewBox="0 0 1 1"><path d="M0 0"/>';
+      const cases: Array<[string, boolean]> = [
+        [`${head}<g style="${'url('.repeat(260_000)})"/></svg>`, false],
+        [`${head}<g style="${'url(#g)'.repeat(150_000)}"/></svg>`, true],
+        [`${head}<desc>${'href="'.repeat(180_000)}</desc></svg>`, false],
+        [`${head}${'<use href="#a"/>'.repeat(70_000)}</svg>`, true],
+      ];
+      const started = performance.now();
+      for (const [svg, expected] of cases) {
+        assert.ok(svg.length > 1_000_000, 'fixture must be big enough to expose quadratic cost');
+        assert.equal(checkTrueVector(svg).pass, expected);
+      }
+      assert.ok(
+        performance.now() - started < 5_000,
+        'the reference scan must not be quadratic in document length',
+      );
+    });
+  });
 });
 
 describe('viewBox value validation (critical — presence alone was not enough)', () => {
