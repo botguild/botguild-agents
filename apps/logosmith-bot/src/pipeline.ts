@@ -532,6 +532,32 @@ function buildM2Note(input: M2NoteInput): string {
   ].join('\n');
 }
 
+/**
+ * The abort note for a winner that never cleared the lettering gate. Quotes the
+ * concept's own recorded verdict, because that verdict is the reason the bot is
+ * refusing — the buyer is entitled to see the number the refusal rests on.
+ */
+function buildWinnerGateNote(brief: LogoBrief, winner: ConceptRow, progressUrl: string): string {
+  const measured =
+    winner.ocrScore === null
+      ? 'it has no recorded lettering-readback verdict at all'
+      : `the pinned vision model read "${winner.ocrTranscription ?? ''}" at a normalized ` +
+        `similarity of ${winner.ocrScore.toFixed(2)}, below the declared threshold of ` +
+        `${OCR_SIMILARITY_THRESHOLD}`;
+  return [
+    `LogoSmith cannot deliver Milestone 2 for "${brief.brandName}".`,
+    '',
+    `Concept ${winner.slot} did not pass the lettering-readback gate — ${measured} — so it was ` +
+      'never offered as a deliverable concept. Building the brand pack from it would put ' +
+      '"machine-verified" on a mark this bot itself rejected, so nothing has been delivered and ' +
+      'no work product is being claimed.',
+    '',
+    `Full per-concept evidence: ${progressUrl}`,
+    'Reply in this thread naming one of the concepts that did pass and the pack will be built ' +
+      'from that one instead.',
+  ].join('\n');
+}
+
 /** The §9 pack-gate abort note: nothing is delivered and nothing is claimed. */
 function buildPackFailureNote(
   brief: LogoBrief,
@@ -1030,7 +1056,21 @@ export async function runVectorStage(
   const token = job.deliverableToken;
   if (!token) throw new Error(`job ${jobKey} has no deliverable token`);
 
-  const progressUrl = `${config.publicBaseUrl}/p/${token}`;
+  // Stage 1's row is read up front because two different things need it: it is
+  // the brief of record (see `resolveBrief` below), and it owns the capability
+  // token the concept PNGs were written under.
+  const conceptsJobKey = await buildJobKey(contractId, 'concepts');
+  const stageOne = await jobs.get(conceptsJobKey);
+
+  // THE EVIDENCE PAGE IS STAGE 1'S, NOT THIS STAGE'S. `/p/:token` resolves the
+  // job row *by* that token and renders
+  // `<img src="/deliverables/<that same token>/concept-N.png">` (progress.ts) —
+  // so handing the buyer stage 2's token renders three broken images. The
+  // concept PNGs live under stage 1's token; the only objects ever written
+  // under stage 2's are the pack, the report and the licenses. Falls back to
+  // this stage's token only if stage 1's row has vanished, which also means
+  // there are no concept images left to show.
+  const progressUrl = `${config.publicBaseUrl}/p/${stageOne?.deliverableToken ?? token}`;
   const deliverableUrl = (file: string): string =>
     `${config.publicBaseUrl}/deliverables/${token}/${file}`;
 
@@ -1054,14 +1094,12 @@ export async function runVectorStage(
 
   const contract = await client.getContract(contractId);
 
-  // Stage 1's row is the brief of record: it holds the brief as last validated,
-  // INCLUDING any thread correction the 15-minute sweep applied before
-  // generation. Preferring it over the gig description means M2's brand name is
-  // the one the concepts were actually generated from, even if the gig text has
-  // since been edited. `resolveBrief` re-validates whatever it is handed
-  // through the same parser, so nothing bypasses the intake rules.
-  const conceptsJobKey = await buildJobKey(contractId, 'concepts');
-  const stageOne = await jobs.get(conceptsJobKey);
+  // Stage 1's row is also the brief of record: it holds the brief as last
+  // validated, INCLUDING any thread correction the 15-minute sweep applied
+  // before generation. Preferring it over the gig description means M2's brand
+  // name is the one the concepts were actually generated from, even if the gig
+  // text has since been edited. `resolveBrief` re-validates whatever it is
+  // handed through the same parser, so nothing bypasses the intake rules.
   const briefResult = await resolveBrief(
     config,
     { ...job, briefJson: job.briefJson ?? stageOne?.briefJson ?? null },
@@ -1086,6 +1124,38 @@ export async function runVectorStage(
     return { outcome: 'aborted' };
   }
   const brief = briefResult.brief;
+
+  // --- The winner must have passed its own gates ------------------------------
+  // The selection resolver only ever offers the buyer concepts that passed, so
+  // in the current graph this is unreachable. It is checked anyway, because
+  // THIS module is the one whose delivery note says "Machine-verified before
+  // delivery": a claim has to be true at the point it is made, not conditional
+  // on every present and future caller behaving. Without it, a slot whose
+  // lettering readback failed — one the buyer was never even shown — can be
+  // selected by slot number and shipped as a verified pack whose own
+  // report.json records `ocr.pass: false`.
+  if (!winner.ocrPass) {
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      slot: winnerSlot,
+      gate: 'winner-eligibility',
+      result: 'fail',
+      detail: {
+        ocrPass: winner.ocrPass,
+        ocrScore: winner.ocrScore,
+        ocrTranscription: winner.ocrTranscription,
+        attemptsUsed: winner.attemptsUsed,
+      },
+    });
+    await client.sendMessage(contractId, buildWinnerGateNote(brief, winner, progressUrl));
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error(
+      { winnerSlot, ocrScore: winner.ocrScore },
+      'selected winner never passed the lettering gate; nothing delivered',
+    );
+    return { outcome: 'aborted' };
+  }
 
   // "Has this stage run before?" — the same signal `decideOnConflict` reads.
   // Captured BEFORE the checkpoint below is written, and used for exactly one
@@ -1222,19 +1292,26 @@ export async function runVectorStage(
   // and nowhere else — the `concepts` table keeps the readback verdict but not
   // the safety flag — so the checkpoint is where §9's second moderation clause
   // is evidenced from.
-  const visionChecks: ReportImageModeration[] = (stageOne?.checkpoint?.slots ?? []).flatMap(
-    (slot) =>
-      slot.ocr
-        ? [
-            {
-              slot: slot.slot,
-              model: slot.ocr.model,
-              unsafe: slot.ocr.unsafe,
-              checkedAt: slot.ocr.checkedAt,
-            },
-          ]
-        : [],
-  );
+  //
+  // `null` — NOT an empty array — when stage 1's row is gone: in an evidence
+  // document "no images were screened" and "the screening record could not be
+  // found" are different facts, and collapsing them into `[]` would let a
+  // missing record read as a clean one.
+  const visionChecks: ReportImageModeration[] | null =
+    stageOne === null
+      ? null
+      : (stageOne.checkpoint?.slots ?? []).flatMap((slot) =>
+          slot.ocr
+            ? [
+                {
+                  slot: slot.slot,
+                  model: slot.ocr.model,
+                  unsafe: slot.ocr.unsafe,
+                  checkedAt: slot.ocr.checkedAt,
+                },
+              ]
+            : [],
+        );
 
   // FR-17: "the delivered JSON report ... is generated from these records".
   // The verbatim FR-2 screening verdict is copied out of the concepts stage's
@@ -1257,7 +1334,8 @@ export async function runVectorStage(
     },
     gates: pack.gates,
     spend: {
-      conceptStageUsd: stageOne?.spentUsd ?? 0,
+      // Same rule as `visionChecks`: unknown is null, never zero.
+      conceptStageUsd: stageOne === null ? null : stageOne.spentUsd,
       vectorStageUsd: checkpoint.spendUsd,
     },
     idempotencyKeys: { concepts: conceptsJobKey, vector: jobKey },

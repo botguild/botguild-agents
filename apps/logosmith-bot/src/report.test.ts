@@ -372,16 +372,18 @@ describe('buildValidationReport — moderation, caps, and idempotency keys', () 
 
   it('carries a per-image unsafe-content snapshot for every concept the gate saw', () => {
     const report = buildValidationReport(reportInput());
-    assert.equal(report.moderation.images.length, 2);
+    const images = report.moderation.images!;
+    assert.equal(images.length, 2);
     assert.deepEqual(
-      report.moderation.images.map((i) => i.slot),
+      images.map((i) => i.slot),
       [1, 2],
     );
-    for (const image of report.moderation.images) {
+    for (const image of images) {
       assert.equal(image.unsafe, false);
       assert.ok(image.model.length > 0);
       assert.ok(image.checkedAt.length > 0, 'the snapshot is dated — vision models drift');
     }
+    assert.deepEqual(report.evidenceGaps, [], 'nothing is missing on the normal path');
   });
 
   it('reports caps consumed against the declared cap constants', () => {
@@ -394,6 +396,32 @@ describe('buildValidationReport — moderation, caps, and idempotency keys', () 
     assert.equal(report.caps.vectorStageUsd, 0.2);
     assert.equal(report.caps.spentUsd, 0.38, 'both stages, summed without float dust');
     assert.equal(report.caps.generationAttempts, 6, '1 + 2 + 3 across the three slots');
+  });
+
+  // In an evidence document "0" and "unknown" must never be the same value: a
+  // reader has to be able to tell "the concept stage spent nothing" from "the
+  // concept stage's record could not be found".
+  it('reports an unreadable concept-stage record as null, and names the gap', () => {
+    const report = buildValidationReport(
+      reportInput({ spend: { conceptStageUsd: null, vectorStageUsd: 0.2 }, visionChecks: null }),
+    );
+    assert.equal(report.caps.conceptStageUsd, null);
+    assert.equal(report.caps.spentUsd, null, 'a partial sum must not be presented as a total');
+    assert.equal(report.caps.vectorStageUsd, 0.2, 'what IS known is still reported');
+    assert.equal(report.moderation.images, null);
+    assert.equal(report.evidenceGaps.length, 1);
+    assert.match(report.evidenceGaps[0]!, /could not be read/);
+    assert.match(report.evidenceGaps[0]!, /null \(unknown\) rather than as zero or empty/);
+  });
+
+  it('does not confuse a genuinely zero concept-stage spend with a missing one', () => {
+    const report = buildValidationReport(
+      reportInput({ spend: { conceptStageUsd: 0, vectorStageUsd: 0 }, visionChecks: [] }),
+    );
+    assert.equal(report.caps.conceptStageUsd, 0, 'zero is a measurement, not a gap');
+    assert.equal(report.caps.spentUsd, 0);
+    assert.deepEqual(report.moderation.images, []);
+    assert.deepEqual(report.evidenceGaps, []);
   });
 
   it('records both stage idempotency keys', () => {
@@ -476,6 +504,72 @@ describe('summarizeInputScreening', () => {
       auditRow({ id: 2, result: 'clear', detail: { vendor: 'openai' } }),
     ]);
     assert.deepEqual(screening.verdict, MODERATION_VERDICT);
+  });
+
+  // The predicate decides WHETHER a row is a verdict; the copy decides WHAT
+  // crosses into a customer-facing document. A spread would conflate the two —
+  // any extra key an audit row ever picked up would be published verbatim.
+  it('copies only the five verdict fields, never whatever else the row carried', () => {
+    const contaminated = {
+      ...MODERATION_VERDICT,
+      internalApiKey: 'sk-live-must-never-ship',
+      debugTrace: { upstreamHeaders: { authorization: 'Bearer secret' } },
+    };
+    const screening = summarizeInputScreening([
+      auditRow({ id: 1, result: 'clear', detail: contaminated }),
+    ]);
+
+    assert.deepEqual(screening.verdict, MODERATION_VERDICT);
+    const published = JSON.stringify(screening.verdict);
+    assert.doesNotMatch(published, /sk-live/);
+    assert.doesNotMatch(published, /internalApiKey/);
+    assert.doesNotMatch(published, /Bearer secret/);
+    assert.deepEqual(Object.keys(screening.verdict!).sort(), [
+      'checkedAt',
+      'flagged',
+      'model',
+      'response',
+      'vendor',
+    ]);
+  });
+
+  it('does not accept a verdict whose fields are only inherited', () => {
+    // `in` and a bare property read both walk the prototype chain — the same
+    // bypass Task 12 fixed on the deliverables route. Only own properties count.
+    const inheritedResponse = Object.create({ response: {} }) as Record<string, unknown>;
+    Object.assign(inheritedResponse, {
+      vendor: 'openai',
+      model: 'm',
+      flagged: false,
+      checkedAt: 'now',
+    });
+    assert.ok('response' in inheritedResponse, 'the fixture really does inherit `response`');
+    assert.equal(Object.hasOwn(inheritedResponse, 'response'), false);
+
+    const inheritedVendor = Object.create({ vendor: 'openai' }) as Record<string, unknown>;
+    Object.assign(inheritedVendor, { model: 'm', flagged: false, checkedAt: 'now', response: {} });
+
+    for (const detail of [inheritedResponse, inheritedVendor]) {
+      assert.equal(
+        summarizeInputScreening([auditRow({ id: 1, result: 'clear', detail })]).verdict,
+        null,
+      );
+    }
+  });
+
+  it('rejects an array however its indices are populated', () => {
+    const arrayish = Object.assign([], {
+      vendor: 'openai',
+      model: 'm',
+      flagged: false,
+      checkedAt: 'now',
+      response: {},
+    });
+    assert.equal(typeof arrayish, 'object', 'typeof [] is "object" — the guard has to be explicit');
+    assert.equal(
+      summarizeInputScreening([auditRow({ id: 1, result: 'clear', detail: arrayish })]).verdict,
+      null,
+    );
   });
 
   it('ignores audit rows belonging to other gates', () => {
@@ -564,6 +658,20 @@ describe('buildLicenseManifest', () => {
       manifest.entries.every((entry) => entry.verifiedOn === null),
       'and no entry claims a date it does not have',
     );
+  });
+
+  // `logo.svg` never has a request id — the raster-to-vector conversion issues
+  // none — so a note promising "a request id for every image" would be false of
+  // every manifest this bot emits.
+  it('describes the request id as conditional, because some entries have none', () => {
+    const manifest = buildLicenseManifest(rows);
+    // Precondition: an entry really does carry a null request id.
+    assert.ok(
+      manifest.entries.some((entry) => entry.vendorRequestId === null),
+      'the fixture must include an entry with no request id',
+    );
+    assert.doesNotMatch(manifest.note, /request id for every image/);
+    assert.match(manifest.note, /where the vendor issues one/);
   });
 
   it('fails an unrecorded vendor closed rather than defaulting it permissive', () => {

@@ -38,6 +38,7 @@ import {
   runVectorStage,
   type DeliverableStore,
   type PipelineConfig,
+  type StageOutcome,
 } from './pipeline.js';
 import { REQUIRED_ZIP_ENTRIES, unzipFiles } from './pack/zip.js';
 import type { ValidationReport, LicenseManifest } from './report.js';
@@ -1081,15 +1082,24 @@ interface VectorHarness extends Harness {
 }
 
 async function setupVector(
-  options: SetupOptions & { winner?: number; source?: SelectionSource } = {},
+  options: SetupOptions & {
+    winner?: number;
+    source?: SelectionSource;
+    /** The M1 outcome this fixture is built on. `partial` is the §9 2-of-3 set. */
+    expectStageOne?: StageOutcome['outcome'];
+  } = {},
 ): Promise<VectorHarness> {
   const h = await setup(options);
   const stageOne = await runConceptStage(h.config, message(h.jobKey));
   // Precondition, asserted inline: every stage-2 assertion below is about what
-  // happens to a fully delivered M1. If stage 1 ever stops delivering under
-  // these options, these tests must fail here rather than pass vacuously
-  // against an empty concept table.
-  assert.deepEqual(stageOne, { outcome: 'delivered' }, 'stage-2 fixtures start from a full M1');
+  // happens to an M1 that reached a specific outcome. If stage 1 ever stops
+  // reaching it under these options, these tests must fail here rather than
+  // pass vacuously against an empty concept table.
+  assert.deepEqual(
+    stageOne,
+    { outcome: options.expectStageOne ?? 'delivered' },
+    'the stage-2 fixture did not get the M1 outcome it is written against',
+  );
 
   const vectorJobKey = await buildJobKey(CONTRACT_ID, 'vector');
   await h.jobs.claim(vectorJobKey, CONTRACT_ID, 'vector');
@@ -1107,6 +1117,23 @@ async function setupVector(
 
 const readJson = <T>(h: VectorHarness, file: string): T =>
   JSON.parse(new TextDecoder().decode(h.r2.objects.get(`${h.vectorToken}/${file}`)!.bytes)) as T;
+
+/**
+ * Prove the M2 evidence link actually renders, rather than pinning its string.
+ *
+ * `/p/:token` looks the job up BY that token and emits
+ * `<img src="/deliverables/<the same token>/concept-N.png">` (progress.ts). The
+ * concept PNGs were written under STAGE 1's token, so a link carrying stage 2's
+ * token resolves the vector job row and renders three 404s — a broken evidence
+ * page attached to the delivery that is supposed to prove the work.
+ */
+function assertEvidenceLinkResolves(h: VectorHarness, url: string): void {
+  const token = url.split('/p/')[1]!;
+  assert.notEqual(token, h.vectorToken, 'the evidence page is stage 1s, not stage 2s');
+  assert.equal(token, h.token);
+  const rendered = [1, 2, 3].filter((slot) => h.r2.objects.has(`${token}/concept-${slot}.png`));
+  assert.deepEqual(rendered, [1, 2, 3], 'every concept image on the evidence page must exist');
+}
 
 describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai', () => {
   it('delivers the full pack, report, and licenses with zero vendor spend', async () => {
@@ -1168,8 +1195,10 @@ describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai
       `https://logosmith.example.com/deliverables/${h.vectorToken}/pack.zip`,
       `https://logosmith.example.com/deliverables/${h.vectorToken}/report.json`,
       `https://logosmith.example.com/deliverables/${h.vectorToken}/licenses.json`,
-      `https://logosmith.example.com/p/${h.vectorToken}`,
+      // STAGE 1's token, not this stage's — see below.
+      `https://logosmith.example.com/p/${h.token}`,
     ]);
+    assertEvidenceLinkResolves(h, m2.attachments[3]!);
     assert.match(m2.note, /Harbor & Vine/);
     assert.match(m2.note, /Trademark clearance is NOT performed/);
     // The platform posts only the opening ~500 characters as the thread
@@ -1212,8 +1241,9 @@ describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai
     assert.ok(report.dimensions.every((entry) => entry.pass));
     assert.deepEqual(report.ico.sizes, [16, 32, 48]);
     assert.ok(report.zip.manifest.includes('logo.svg'));
-    assert.equal(report.moderation.images.length, 3, 'one unsafe-flag snapshot per concept');
-    assert.ok(report.moderation.images.every((image) => image.unsafe === false));
+    assert.equal(report.moderation.images!.length, 3, 'one unsafe-flag snapshot per concept');
+    assert.ok(report.moderation.images!.every((image) => image.unsafe === false));
+    assert.deepEqual(report.evidenceGaps, [], 'every record was sourced');
     // End to end: stage 1 wrote this verdict to D1 gate_audit, listGateAudit
     // read it back out of the real column, and it survived into the delivered
     // JSON byte-for-byte — response body included. The buyer holding
@@ -1236,6 +1266,36 @@ describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai
     );
     assert.equal(licenses.entries[3]!.vendor, 'recraft', 'the conversion is credited to Recraft');
     assert.equal(licenses.entries[0]!.vendorRequestId, 'req-wordmark');
+  });
+
+  // The §9 2-of-3 shortfall is the LIKELIEST real M1 outcome, not an edge case:
+  // the buyer accepts a partial set, picks from it, and M2 must build normally
+  // from a contract whose concept table has a failed row in it.
+  it('delivers normally from a partial M1, with the shortfall slot in the evidence', async () => {
+    const h = await setupVector({
+      ocr: (fixture) => verdict(fixture !== 'checker'),
+      expectStageOne: 'partial',
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+
+    const report = readJson<ValidationReport>(h, 'report.json');
+    // All three concepts are on the record — the failed one included, with its
+    // failing verdict intact. A shortfall is evidence, not something to hide.
+    assert.equal(report.concepts.length, 3);
+    const failed = report.concepts.find((c) => c.slot === SLOT_OF['emblem'])!;
+    assert.equal(failed.ocr!.pass, false);
+    assert.equal(failed.attemptsUsed, MAX_REGENS_PER_SLOT + 1);
+    assert.equal(report.winner.slot, 1);
+    assert.equal(report.gatesPass, true, 'the pack itself is whole regardless');
+    assert.equal(report.caps.generationAttempts, 5, '1 + 1 + 3 across the three slots');
+
+    // Every generated concept still gets a licence entry: all three were paid
+    // for, whether or not they were offered.
+    const licenses = readJson<LicenseManifest>(h, 'licenses.json');
+    assert.equal(licenses.entries.length, 4, 'three concepts plus the conversion');
+    assertEvidenceLinkResolves(h, h.deliveries[1]!.attachments[3]!);
   });
 
   it('treats a redelivered vector message as a no-op', async () => {
@@ -1379,6 +1439,50 @@ describe('runVectorStage — vendor and gate failures never deliver', () => {
       results.map((row) => row.result),
       ['fail'],
       'the failing pack is on the audit record',
+    );
+  });
+
+  // The delivery note this module writes says "Machine-verified before
+  // delivery". That claim has to be true where it is made — not conditional on
+  // the selection resolver, present or future, only ever offering slots that
+  // passed. Without this guard a slot the buyer was never even shown can be
+  // selected by number and shipped as a verified pack whose own report.json
+  // records `ocr.pass: false`.
+  it('refuses to build a pack from a concept that never passed its own gates', async () => {
+    const h = await setupVector({
+      // The emblem slot's readback fails on every attempt, so it is one of the
+      // two §9 shortfall slots — generated, paid for, never offered.
+      ocr: (fixture) => verdict(fixture !== 'checker'),
+      expectStageOne: 'partial',
+      winner: SLOT_OF['emblem']!,
+    });
+    // Precondition: the selected slot really is a failing one that the buyer
+    // was never shown. Without this the abort below could be any other reason.
+    const loser = (await h.concepts.list(CONTRACT_ID)).find(
+      (row) => row.slot === SLOT_OF['emblem'],
+    )!;
+    assert.equal(loser.ocrPass, false);
+    assert.equal(loser.attemptsUsed, MAX_REGENS_PER_SLOT + 1, 'it burned every attempt');
+    assert.ok(h.r2.objects.has(loser.r2Key!), 'its bytes exist — only its verdict disqualifies it');
+    assert.doesNotMatch(h.deliveries[0]!.note, /Concept 3\n/, 'M1 never offered it');
+
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'aborted' });
+    assert.equal(h.deliveries.length, 1, 'M1 only — M2 is never delivered');
+    assert.equal(h.r2.objects.has(`${h.vectorToken}/pack.zip`), false);
+    assert.equal((await h.selection.get(CONTRACT_ID))?.state, 'winner_selected');
+    assert.equal((await h.jobs.get(h.vectorJobKey))?.outcome, 'aborted');
+    // The refusal quotes the verdict it rests on.
+    assert.match(h.messages[0]!, /did not pass the lettering-readback gate/);
+    assert.match(h.messages[0]!, new RegExp(String(OCR_SIMILARITY_THRESHOLD)));
+    assert.match(h.messages[0]!, /machine-verified/i);
+
+    const { results } = await h.db
+      .prepare("SELECT result FROM gate_audit WHERE gate = 'winner-eligibility' AND job_key = ?")
+      .bind(h.vectorJobKey)
+      .all<{ result: string }>();
+    assert.deepEqual(
+      results.map((row) => row.result),
+      ['fail'],
     );
   });
 

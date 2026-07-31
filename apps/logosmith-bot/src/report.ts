@@ -166,15 +166,27 @@ export interface ReportInputScreening {
 
 export interface ReportModeration {
   input: ReportInputScreening;
-  images: ReportImageModeration[];
+  /** `null` — not `[]` — when the concept stage's record could not be read. */
+  images: ReportImageModeration[] | null;
 }
 
 export interface ReportCaps {
+  /**
+   * The FR-5 cap on CONCEPT-STAGE image generation — the only spend it governs.
+   * It is deliberately NOT a combined ceiling: the winner's vectorization runs
+   * after the buyer has funded escrow and chosen a mark, and is uncapped by
+   * design (see `runVectorStage`). Reading `spentUsd` as "x of maxSpendUsd"
+   * would therefore be wrong; compare it against `conceptStageUsd` instead.
+   */
   maxSpendUsd: number;
   maxRegensPerSlot: number;
-  /** Concept generation + winner vectorization, rounded to the cent-fraction. */
-  spentUsd: number;
-  conceptStageUsd: number;
+  /**
+   * Concept generation + winner vectorization. `null` when `conceptStageUsd`
+   * is unknown — a partial sum presented as a total would understate spend.
+   */
+  spentUsd: number | null;
+  /** `null` — not `0` — when the concept stage's record could not be read. */
+  conceptStageUsd: number | null;
   vectorStageUsd: number;
   generationAttempts: number;
 }
@@ -202,6 +214,14 @@ export interface ValidationReport {
   caps: ReportCaps;
   idempotencyKeys: ReportIdempotencyKeys;
   gatesPass: boolean;
+  /**
+   * Evidence this report could not source, named in the document rather than
+   * papered over. In an evidence pack "0" and "unknown" must never be the same
+   * value: a dispute reader has to be able to tell "the concept stage spent
+   * nothing" from "the concept stage's record could not be found". Empty on the
+   * normal path.
+   */
+  evidenceGaps: string[];
 }
 
 export interface ReportInput {
@@ -209,16 +229,25 @@ export interface ReportInput {
   brandName: string;
   generatedAt: string;
   concepts: ConceptRow[];
-  /** Read off the stage-1 checkpoint, which is the only store of the flag. */
-  visionChecks: ReportImageModeration[];
+  /**
+   * Read off the stage-1 checkpoint, which is the only store of the flag.
+   * `null` when that record could not be read at all — see `evidenceGaps`.
+   */
+  visionChecks: ReportImageModeration[] | null;
   /** The concepts stage's FR-17 audit trail, for the FR-2 screening record. */
   moderationAudits: GateAuditRow[];
   winner: { slot: number; source: SelectionSource };
   vectorization: ReportVectorization;
   gates: PackGateReport;
-  spend: { conceptStageUsd: number; vectorStageUsd: number };
+  spend: { conceptStageUsd: number | null; vectorStageUsd: number };
   idempotencyKeys: ReportIdempotencyKeys;
 }
+
+/** The one sentence the report says when stage 1's record is unreadable. */
+const CONCEPT_STAGE_RECORD_GAP =
+  "The concept stage's job record could not be read, so its spend total and its per-image " +
+  'unsafe-content snapshots are reported as null (unknown) rather than as zero or empty. ' +
+  'Everything else in this report was sourced normally.';
 
 /** Keep derived dollar sums free of float dust (mirrors pipeline.ts's roundUsd). */
 const roundUsd = (value: number): number => Math.round(value * 1e6) / 1e6;
@@ -250,16 +279,26 @@ const AUDIT_TRAIL_NOTE =
  * allow-list: a row that does not carry every field of a `ModerationVerdict` is
  * not a verdict, whatever else it may be, and is skipped rather than
  * half-copied into the evidence pack.
+ *
+ * Every field is checked with `Object.hasOwn` and not with `in` or a bare
+ * property read, for the reason Task 12 already fixed once on the deliverables
+ * route and `buildLicenseManifest` follows below: both `in` and a bare read
+ * walk the prototype chain, so an object carrying an inherited `response` (or
+ * an inherited `vendor` string) would be admitted as a verdict it is not.
+ * Arrays are rejected outright — `typeof [] === 'object'`, and an array is
+ * never a verdict however its indices are populated.
  */
 function isModerationVerdict(value: unknown): value is ModerationVerdict {
-  if (typeof value !== 'object' || value === null) return false;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
+  const ownIs = (key: string, type: 'string' | 'boolean'): boolean =>
+    Object.hasOwn(candidate, key) && typeof candidate[key] === type;
   return (
-    typeof candidate.vendor === 'string' &&
-    typeof candidate.model === 'string' &&
-    typeof candidate.flagged === 'boolean' &&
-    typeof candidate.checkedAt === 'string' &&
-    'response' in candidate
+    ownIs('vendor', 'string') &&
+    ownIs('model', 'string') &&
+    ownIs('flagged', 'boolean') &&
+    ownIs('checkedAt', 'string') &&
+    Object.hasOwn(candidate, 'response')
   );
 }
 
@@ -286,7 +325,22 @@ export function summarizeInputScreening(rows: GateAuditRow[]): ReportInputScreen
     vendor: MODERATION_VENDOR,
     model: MODERATION_MODEL,
     outageAttempts: screenings.filter((row) => row.result === 'unavailable').length,
-    verdict: verdict ? { ...verdict } : null,
+    // An EXPLICIT PROJECTION, not `{...verdict}`. The predicate above decides
+    // *whether* a row is a verdict; a spread would then copy *every* own key it
+    // happens to carry, so an audit row that ever picked up an extra field —
+    // an internal request header, a credential, a debug blob — would be
+    // published verbatim into a customer-facing document. Naming the five
+    // fields is what makes "field by field" true of the copy and not just of
+    // the check.
+    verdict: verdict
+      ? {
+          vendor: verdict.vendor,
+          model: verdict.model,
+          flagged: verdict.flagged,
+          response: verdict.response,
+          checkedAt: verdict.checkedAt,
+        }
+      : null,
     auditTrail: AUDIT_TRAIL_NOTE,
   };
 }
@@ -350,6 +404,11 @@ const toReportIco = (ico: IcoGateResult): ReportIco => ({
 
 export function buildValidationReport(input: ReportInput): ValidationReport {
   const winnerRow = input.concepts.find((row) => row.slot === input.winner.slot);
+  const { conceptStageUsd, vectorStageUsd } = input.spend;
+  // The two nullable inputs travel together — both come from stage 1's job row
+  // — so one gap sentence covers them, and a `null` anywhere below is always
+  // explained by an entry here.
+  const conceptStageRecordMissing = conceptStageUsd === null || input.visionChecks === null;
   return {
     version: 1,
     generatedAt: input.generatedAt,
@@ -374,18 +433,19 @@ export function buildValidationReport(input: ReportInput): ValidationReport {
     zip: toReportZip(input.gates.zip),
     moderation: {
       input: summarizeInputScreening(input.moderationAudits),
-      images: input.visionChecks.map((check) => ({ ...check })),
+      images: input.visionChecks === null ? null : input.visionChecks.map((c) => ({ ...c })),
     },
     caps: {
       maxSpendUsd: MAX_SPEND_USD,
       maxRegensPerSlot: MAX_REGENS_PER_SLOT,
-      spentUsd: roundUsd(input.spend.conceptStageUsd + input.spend.vectorStageUsd),
-      conceptStageUsd: input.spend.conceptStageUsd,
-      vectorStageUsd: input.spend.vectorStageUsd,
+      spentUsd: conceptStageUsd === null ? null : roundUsd(conceptStageUsd + vectorStageUsd),
+      conceptStageUsd,
+      vectorStageUsd,
       generationAttempts: input.concepts.reduce((sum, row) => sum + row.attemptsUsed, 0),
     },
     idempotencyKeys: { ...input.idempotencyKeys },
     gatesPass: input.gates.pass,
+    evidenceGaps: conceptStageRecordMissing ? [CONCEPT_STAGE_RECORD_GAP] : [],
   };
 }
 
@@ -458,16 +518,22 @@ const UNRECORDED_VENDOR: VendorTerms = {
   verifiedOn: null,
 };
 
+// Both notes describe the request id as CONDITIONAL, because it is: a vendor
+// that issues no per-request identifier leaves it null, and the raster-to-vector
+// conversion that produces logo.svg has no request id at all. Claiming "a
+// request id for every image" would be false of every manifest this bot emits.
 const VERIFIED_NOTE =
-  'Every generated or converted image below names the vendor that produced it, the vendor-side ' +
-  'request id identifying that exact generation, the terms scope it was produced under, and the ' +
-  'date those terms were read.';
+  'Every generated or converted image below names the vendor that produced it, the terms scope ' +
+  'it was produced under, the date those terms were read, and — where the vendor issues one — ' +
+  'the request id identifying that exact generation. A null `vendorRequestId` means the vendor ' +
+  'returned no per-request identifier, not that provenance is missing.';
 
 const UNVERIFIED_NOTE =
   'INCOMPLETE: one or more entries below carry no terms-verification date. The vendor ' +
   'commercial/resale terms verification (PRD §14, Phase 0) has no in-repo decision record yet, ' +
-  'so this manifest names the vendor and the request id for every image but does NOT attest ' +
-  'that those resale terms were read. Every entry with `verifiedOn: null` is unattested.';
+  'so this manifest names the vendor for every image — and its request id where the vendor ' +
+  'issues one — but does NOT attest that those resale terms were read. Every entry with ' +
+  '`verifiedOn: null` is unattested.';
 
 /**
  * One entry per generated or converted image, with the terms scope resolved
