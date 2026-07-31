@@ -92,52 +92,82 @@ export function createThreadReader(deps: ThreadReaderDeps): ThreadReader {
 const SLOT_PATTERN =
   /\b(?:concept|option)\s*#?\s*(\d+)(?!\.\d)\b|#(\d+)(?!\.\d)\b|\b(?:go\s+with|make\s+it|let'?s\s+do)\s*#?\s*(\d+)(?!\.\d)\b(?=[\s.,!?]*$)/gi;
 
-// Negation/contrast cues that make an otherwise-matched slot unreliable —
-// "not concept 2", "anything but concept 1" — checked only in a short
-// lookbehind window (see tokensBefore), never across the whole message.
+// Negation/contrast cues. Checked ANYWHERE in the message (containsNegationCue
+// below), never in a window around a specific match — round 2 shipped a
+// scoped lookbehind and it was wrong: it let "concept 1 is nice, but concept
+// 2" confidently return 1 (the REJECTED concept), because "but" sat just
+// outside the window around the surviving "concept 2" mention, and it did
+// the same to "I'd rather have concept 2 than concept 1". Working out which
+// mention a cue grammatically modifies is genuinely NLP-complete; a regex
+// must not pretend otherwise. A cue anywhere plus any slot match is null,
+// full stop — see parseSelection's doc comment for the costs this accepts.
 const NEGATION_CUES = new Set(['not', 'but', 'except', 'rather', 'instead', 'avoid', 'no']);
-const NEGATION_WINDOW_TOKENS = 4;
 
-// Nouns that turn "#N" into a reference number ("invoice #2") rather than a
-// concept pick. Only the single nearest word before "#N" is checked, so
-// "we like #2 best" is untouched — "like" isn't on the list.
-const REFERENCE_NOUN_DENYLIST = new Set([
-  'invoice',
-  'order',
-  'room',
-  'ticket',
-  'item',
-  'ref',
-  'no',
-  'number',
-  'suite',
-  'apt',
-  'unit',
-  'table',
-  'seat',
+// '#N' is gated by an ALLOW-list, not a deny-list. Round 2 shipped a
+// deny-list of reference-number nouns (invoice, order, room, ...) and it
+// caught exactly those nouns and no others — "PO #2", "SKU #2", "lot #2"
+// all still returned confident wrong slots, because a deny-list only ever
+// covers nouns someone thought of. Accepting '#N' only when it opens the
+// message or follows one of these recognized selection words makes an
+// unrecognized preceding word null by construction, forever, with no list
+// to keep extending.
+const HASH_ALLOWLIST = new Set([
+  'like',
+  'prefer',
+  'pick',
+  'choose',
+  'want',
+  'take',
+  'love',
+  'best',
+  'is',
+  'go',
+  'with',
 ]);
 
 /**
- * The last `count` whitespace-delimited tokens of `text` before `index`,
+ * The nearest whitespace-delimited token of `text` before `index`,
  * lowercased with leading/trailing punctuation stripped (apostrophes kept,
- * so "don't" survives intact for the "n't" check). Nearest token last.
+ * so "don't" survives intact for the "n't" check). undefined when nothing
+ * precedes `index`.
  */
-function tokensBefore(text: string, index: number, count: number): string[] {
+function nearestTokenBefore(text: string, index: number): string | undefined {
   const before = text
     .slice(0, index)
     .split(/\s+/)
     .filter((token) => token.length > 0);
-  return before.slice(-count).map((token) => token.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase());
+  const nearest = before[before.length - 1];
+  return nearest === undefined
+    ? undefined
+    : nearest.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase();
+}
+
+/** True when a negation/contrast cue (see NEGATION_CUES) appears anywhere in `text`. */
+function containsNegationCue(text: string): boolean {
+  return text
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+    .map((token) => token.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase())
+    .some((token) => NEGATION_CUES.has(token) || token.includes("n't"));
 }
 
 /**
  * Parses free text into a 1-based concept slot (1-3), or null when the text
- * names none, an out-of-range slot, more than one distinct slot, or only an
- * unreliable mention (negated, a decimal, or a bare reference number).
+ * is not a string, names no slot, names an out-of-range or unrecognized
+ * slot, names more than one distinct slot, or contains a negation/contrast
+ * cue anywhere at all. Never throws, for any input — it is a public export,
+ * and a field typed `string` (e.g. `ThreadMessage.body`) can carry whatever
+ * an unsafe upstream cast actually put there, not what the type promises.
  *
  * Accepted forms — substring-matched anywhere in the message, so natural
  * phrasing like "I'll take concept 1 please" still parses:
- *   - "concept N", "option N", "#N".
+ *   - "concept N", "option N".
+ *   - "#N" — but only when it opens the message, or the single nearest word
+ *     before it is a recognized selection word (see HASH_ALLOWLIST). This is
+ *     deliberately an allow-list, not a deny-list: "invoice #2", "PO #2",
+ *     "lot #2", and every other reference-number phrasing nobody enumerated
+ *     are all denied by the same rule, forever, rather than by a list that
+ *     can only ever cover nouns someone thought of.
  *   - "go with N", "make it N", "let's do N" — but only when N is the last
  *     thing in the message, aside from trailing punctuation. These are
  *     free-form action phrases rather than dedicated selection syntax, so if
@@ -149,33 +179,38 @@ function tokensBefore(text: string, index: number, count: number): string[] {
  *     stray number inside an ordinary sentence ("give me 3 more") is not
  *     mistaken for a pick.
  *
- * Three ways a textual match is discarded before it ever reaches the
- * ambiguity count below — each is a narrow, local check, not a whole-message
- * scan, because an overly defensive null costs the buyer a 72-hour wait too:
- *
- *   - Negation/contrast: "not", "but", "except", "rather", "instead",
- *     "avoid", "no", or an "n't" contraction in the ~4 tokens immediately
- *     BEFORE a match makes that match unreliable — "not concept 2" and
- *     "anything but concept 1" must not confidently return the negated
- *     number. This is a lookBEHIND window on purpose: "concept 2, but can
- *     you make it blue?" must still resolve to 2, since "but" comes after
- *     the pick, not before it — a whole-message scan would break that case.
- *   - Reference numbers: see REFERENCE_NOUN_DENYLIST — "#N" alone also
- *     reads as "invoice #2" or "room #2, second floor"; the locked "we like
- *     #2 best" case is untouched because "like" isn't a denied noun.
- *   - Decimals: "concept 2.5" and "#2.5" must not silently truncate to 2.
+ * Two ways a match is discarded before it reaches the ambiguity count below:
+ *   - Decimals: "concept 2.5" and "#2.5" must not silently truncate to 2 —
+ *     a digit run immediately followed by '.' and another digit is not a
+ *     slot number.
+ *   - An unrecognized word (or nothing) before "#N" — see HASH_ALLOWLIST.
  *
  * Two distinct (surviving) slots named in one message is an unresolved
  * ambiguity, not a choice — "I like concept 1 and concept 2" must not
- * silently collapse to 1 (or 2). The same rule resolves "concept 2 is
- * terrible, go with 3" to null too, once "go with N" is a recognized form:
- * the sentence names two distinct slots, and ambiguity — not an attempt to
- * model what "is terrible" means — is what makes this null instead of a
- * confident (and wrong) 2. A wrong-but-confident answer is worse than null
- * here: null falls through to the FR-9 default-selection timeout, a safe
- * outcome; guessing does not.
+ * silently collapse to 1 (or 2). Recognizing "go with N" makes "concept 2 is
+ * terrible, go with 3" land here too: the sentence names two distinct
+ * slots, and ambiguity — not any attempt to parse "is terrible" — is what
+ * makes this null instead of a confident, wrong 2.
+ *
+ * Last: if the message contains a negation/contrast cue — "not", "but",
+ * "except", "rather", "instead", "avoid", "no", an "n't" contraction —
+ * ANYWHERE, the whole result is null, even if exactly one slot survived
+ * everything above. This is deliberately not scoped to a window around the
+ * match. A scoped lookbehind was tried first and rejected: it let "concept 1
+ * is nice, but concept 2" confidently return 1 — the concept the buyer had
+ * just rejected — because "but" sat outside the window around the surviving
+ * "concept 2" mention, and it did the same to "I'd rather have concept 2
+ * than concept 1". Working out which mention a cue grammatically modifies is
+ * genuinely NLP-complete; a regex must not pretend otherwise. The cost is
+ * real and accepted: "concept 2, but can you make it blue?", "no problem,
+ * concept 2", and "no rush — go with 2" all null out too, even though a
+ * human reads each as an unambiguous pick. That is the trade: a buyer who
+ * gets no response follows up within 72 hours (FR-9's default-selection
+ * timeout); a buyer who gets the wrong logo has already been failed, and a
+ * wrong-but-confident answer is worse than null by this module's own rule.
  */
-export function parseSelection(text: string): number | null {
+export function parseSelection(text: unknown): number | null {
+  if (typeof text !== 'string') return null;
   const trimmed = text.trim();
   if (!trimmed) return null;
 
@@ -184,14 +219,13 @@ export function parseSelection(text: string): number | null {
     const n = Number(match[1] ?? match[2] ?? match[3]);
     if (n < 1 || n > 3) continue;
 
-    const matchIndex = match.index ?? 0;
-    const cueWindow = tokensBefore(trimmed, matchIndex, NEGATION_WINDOW_TOKENS);
-    if (cueWindow.some((token) => NEGATION_CUES.has(token) || token.includes("n't"))) continue;
-
-    // Only the '#N' form (group 2) can be mistaken for a reference number.
     if (match[2] !== undefined) {
-      const nearest = tokensBefore(trimmed, matchIndex, 1)[0];
-      if (nearest !== undefined && REFERENCE_NOUN_DENYLIST.has(nearest)) continue;
+      const matchIndex = match.index ?? 0;
+      const opensMessage = matchIndex === 0;
+      if (!opensMessage) {
+        const nearest = nearestTokenBefore(trimmed, matchIndex);
+        if (nearest === undefined || !HASH_ALLOWLIST.has(nearest)) continue;
+      }
     }
 
     slots.add(n);
@@ -204,6 +238,9 @@ export function parseSelection(text: string): number | null {
     const n = Number(trimmed);
     if (n >= 1 && n <= 3) slots.add(n);
   }
+
+  if (slots.size === 0) return null;
+  if (containsNegationCue(trimmed)) return null;
 
   const [onlySlot] = slots;
   return slots.size === 1 && onlySlot !== undefined ? onlySlot : null;

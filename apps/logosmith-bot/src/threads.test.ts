@@ -43,11 +43,41 @@ describe('parseSelection', () => {
     assert.equal(parseSelection('anything but concept 1'), null);
   });
 
-  // The negation window looks only *backward* from a match — a whole-
-  // message scan for "but" would break this: the buyer clearly picked 2,
-  // and "but" only qualifies the follow-up request, not the pick itself.
-  it('does not let a contrast cue AFTER the pick invalidate it', () => {
-    assert.equal(parseSelection('concept 2, but can you make it blue?'), 2);
+  // Round 3: this now nulls out — an accepted cost, not a bug. The scoped
+  // lookbehind that used to protect this exact case (a cue only counted if
+  // it preceded the match within a window) is the same design that let
+  // "concept 1 is nice, but concept 2" confidently return 1, the concept
+  // the buyer had just rejected (next test below). A cue anywhere in the
+  // message now nulls the whole thing, with no attempt to work out which
+  // mention it modifies — a buyer who gets no response here simply follows
+  // up; shipping the wrong logo is the worse failure this trades away.
+  it('nulls a message with a cue anywhere, even one that only qualifies a harmless follow-up request', () => {
+    assert.equal(parseSelection('concept 2, but can you make it blue?'), null);
+  });
+
+  // Adversarial-review-found: both of these used to confidently return the
+  // concept the buyer explicitly DE-PRIORITIZED, because the cue sat just
+  // outside the scoped lookbehind window around the surviving mention. This
+  // is exactly the failure mode this module's own contract calls worse
+  // than null — the reason the window was deleted in favor of a
+  // whole-message check.
+  it('does not confidently return the de-prioritized concept in a negated or comparative sentence', () => {
+    assert.equal(parseSelection('concept 1 is nice, but concept 2'), null);
+    assert.equal(parseSelection("I'd rather have concept 2 than concept 1"), null);
+  });
+
+  // The scoped lookbehind was also non-monotonic — the tell that it was
+  // wrong in principle, not just missing a case: this longer, more hedged
+  // sentence already nulled correctly under it (via the multi-slot
+  // ambiguity rule, since both mentions still matched), while the shorter,
+  // more natural phrasing above did not. A whole-message cue check makes
+  // both null for the same reason, regardless of how much text separates
+  // the cue from a mention.
+  it('is not sensitive to how much text sits between the cue and a mention', () => {
+    assert.equal(
+      parseSelection('concept 1 is a nice color choice overall but I think I prefer concept 2'),
+      null,
+    );
   });
 
   it('recognizes go with N, make it N, and lets do N as selections', () => {
@@ -57,14 +87,12 @@ describe('parseSelection', () => {
     assert.equal(parseSelection('lets do 2'), 2);
   });
 
-  // Reviewer-found: "concept 2 is terrible, go with 3" was returning 2 — the
-  // buyer's actual pick (3) was silently discarded. Recognizing "go with N"
-  // means the sentence now names two distinct slots (2 and 3); the existing
-  // per-message ambiguity rule — not any attempt to parse "is terrible" as
-  // negative sentiment — is what turns this into null instead of a
-  // confident, wrong 2. That's the point: widen the match, let ambiguity do
-  // the work.
-  it('turns a contrast-and-correction sentence into an ambiguity, not a stale first match', () => {
+  // Named for exactly what it checks: recognizing "go with N" turns this
+  // one sentence into a two-slot ambiguity instead of a stale first match
+  // on "concept 2" — not a claim that contrast-and-correction sentences in
+  // general resolve this way (they don't all; see the negation-cue tests
+  // above, which cover sentences with no second recognized form to surface).
+  it('the go-with form surfaces a second slot in "concept 2 is terrible, go with 3", turning it into an ambiguity rather than a stale first match', () => {
     assert.equal(parseSelection('concept 2 is terrible, go with 3'), null);
   });
 
@@ -77,13 +105,39 @@ describe('parseSelection', () => {
     assert.equal(parseSelection('make it 2x bigger'), null);
   });
 
-  // '#N' is also how people write reference numbers. A small deny-list of
-  // nouns immediately before '#N' keeps those out without touching the
-  // locked 'we like #2 best' -> 2 case above ('like' isn't on the list).
-  it('does not read a reference number as a concept pick', () => {
+  // '#N' is gated by an ALLOW-list of recognized selection words (or
+  // starting the message), not a deny-list of reference nouns — a deny-list
+  // only ever covers nouns someone thought of. Named for what it actually
+  // checks: an unrecognized preceding word denies '#N', full stop, whether
+  // or not that word happens to look like a reference-number noun. These
+  // twelve are samples, not an enumerated category the code recognizes —
+  // three round-2 found (invoice/order/room) and nine adversarial review
+  // added (PO/SKU/lot/bay/gate/aisle/badge/case/batch).
+  it('denies "#N" whenever the preceding word is not a recognized selection word', () => {
     assert.equal(parseSelection('see invoice #2 for details'), null);
     assert.equal(parseSelection('order #2 shipped'), null);
     assert.equal(parseSelection('room #2, second floor'), null);
+    assert.equal(parseSelection('PO #2'), null);
+    assert.equal(parseSelection('SKU #2'), null);
+    assert.equal(parseSelection('lot #2'), null);
+    assert.equal(parseSelection('bay #2'), null);
+    assert.equal(parseSelection('gate #2'), null);
+    assert.equal(parseSelection('aisle #2'), null);
+    assert.equal(parseSelection('badge #2'), null);
+    assert.equal(parseSelection('case #2'), null);
+    assert.equal(parseSelection('batch #2'), null);
+    // 'no' sat in both round-2 lists (a negation cue AND a denied noun, for
+    // "item no. 2") — under the allow-list it needs no special case, since
+    // 'no' was never a recognized selection word either way.
+    assert.equal(parseSelection('No, #2 is my favorite'), null);
+  });
+
+  // The allow-list's positive side: '#N' is a pick when it opens the
+  // message, or a recognized selection word (not just 'like', from the
+  // locked test above) immediately precedes it.
+  it('accepts "#N" at the start of a message or after a recognized selection word', () => {
+    assert.equal(parseSelection('#2 please'), 2);
+    assert.equal(parseSelection('I prefer #1'), 1);
   });
 
   // A digit immediately followed by '.' and another digit is a decimal, not
@@ -93,6 +147,17 @@ describe('parseSelection', () => {
   it('does not truncate a decimal into a slot number', () => {
     assert.equal(parseSelection('concept 2.5'), null);
     assert.equal(parseSelection('#2.5'), null);
+  });
+
+  // parseSelection(undefined | null | 2 | {}) all used to throw on
+  // .trim() — a public export must not throw for any input, since a field
+  // typed `string` (ThreadMessage.body) can carry whatever an unsafe
+  // upstream cast actually put there.
+  it('returns null instead of throwing for non-string input', () => {
+    assert.equal(parseSelection(undefined), null);
+    assert.equal(parseSelection(null), null);
+    assert.equal(parseSelection(2), null);
+    assert.equal(parseSelection({}), null);
   });
 });
 
@@ -164,6 +229,23 @@ describe('findSelection', () => {
     assert.doesNotThrow(() => findSelection([nullBody, missingBody], 'bot-logosmith'));
     assert.equal(findSelection([nullBody, missingBody], 'bot-logosmith'), null);
     assert.equal(findSelection([nullBody, missingBody, buyer('concept 2')], 'bot-logosmith'), 2);
+  });
+
+  // The gap `?? ''` alone cannot close: it only substitutes for null and
+  // undefined, so a non-nullish, non-string body (a malformed payload where
+  // `content` came back as a number or object, say) would still have
+  // reached parseSelection's .trim() directly. Closed one layer down, by
+  // parseSelection's own typeof guard, not by findSelection's `?? ''`.
+  it('does not throw when body is a non-nullish, non-string value either', () => {
+    const weirdBody = {
+      id: 'm',
+      senderId: 'payer-1',
+      body: 2,
+      createdAt: '2026-07-30T00:00:00Z',
+    } as unknown as ThreadMessage;
+
+    assert.doesNotThrow(() => findSelection([weirdBody], 'bot-logosmith'));
+    assert.equal(findSelection([weirdBody], 'bot-logosmith'), null);
   });
 });
 
