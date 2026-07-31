@@ -1563,11 +1563,19 @@ describe('processJobMessage', () => {
     assert.equal(h.deliveries[1]!.milestoneId, 'm2');
   });
 
-  it('refuses the stage a later task owns rather than silently no-opping', async () => {
+  // The free `single` stage is routed here too (Task 23); its own behaviour is
+  // covered end-to-end in freeGigs.test.ts. What matters at THIS seam is that
+  // the switch is exhaustive: an unrecognized stage must raise rather than
+  // silently ack a queue message and drop a funded contract on the floor.
+  it('refuses an unknown stage rather than silently no-opping', async () => {
     const h = await setup();
     await assert.rejects(
-      processJobMessage(h.config, { contractId: CONTRACT_ID, jobKey: h.jobKey, stage: 'single' }),
-      /Task 23/,
+      processJobMessage(h.config, {
+        contractId: CONTRACT_ID,
+        jobKey: h.jobKey,
+        stage: 'not-a-stage' as unknown as JobMessage['stage'],
+      }),
+      /unknown job stage: not-a-stage/,
     );
   });
 });

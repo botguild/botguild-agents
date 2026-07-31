@@ -45,7 +45,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from 'pino';
 import type { AgentClient, Contract } from '@botguild/agent-core';
 import { createAxisCompiler, type AxisCompiler } from './axes.js';
-import { parseLogoBrief, type BriefResult } from './brief.js';
+import { parseFaviconBrief, parseLogoBrief, type BriefResult } from './brief.js';
 import {
   CONCEPT_COUNT,
   MAX_REGENS_PER_SLOT,
@@ -53,7 +53,9 @@ import {
   MIN_PHASH_HAMMING,
   MODERATION_ATTEMPTS_BEFORE_NOTICE,
   OCR_SIMILARITY_THRESHOLD,
+  SEED_PRICE_USD,
 } from './config.js';
+import { checkFreeGigQuota, fetchSourceLogo } from './freeGigs.js';
 import { createGenerator, type Generator } from './generate.js';
 import {
   checkDistinctness,
@@ -75,6 +77,7 @@ import {
 } from './jobs.js';
 import type { SelectionStore } from './jobs.js';
 import { createModerationClient, type ModerationClient } from './moderation.js';
+import { buildFaviconPack, type FaviconPackGates } from './pack/faviconPack.js';
 import { fetchFontPairing } from './pack/fonts.js';
 import { buildPack, type PackGateReport } from './pack/index.js';
 import { renderSvgToPixmap, renderSvgToPng } from './pack/render.js';
@@ -89,14 +92,17 @@ import { createVectorizer, type Vectorizer } from './vectorize.js';
 import type {
   AiLike,
   ConceptState,
+  FaviconBrief,
   FetchLike,
   JobCheckpoint,
   JobMessage,
   JobOutcome,
   JobStage,
   LogoBrief,
+  OcrVerdict,
   Pixmap,
   SelectionSource,
+  StyleAxis,
 } from './types.js';
 
 /** R2 seam for the deliverable bytes (put) and stage-2 artifact read-back (get). */
@@ -1422,6 +1428,690 @@ function licenseRows(
   ];
 }
 
+// --- The free funnel (stage `single`) ------------------------------------------
+//
+// One queue message, one delivery, no escrow. Two gigs share this stage because
+// they share every property that matters to the code around it: $0, a single
+// milestone, one deliverable, and a per-payer quota instead of a spend cap.
+//
+//   favicon (US-2) — the buyer's existing logo, refetched under the §12 guards
+//                    and repackaged. ZERO image-generation spend: the whole
+//                    path is in-Worker CPU.
+//   taster  (US-3) — one concept on FLUX.2 [klein] with <=2 regenerations, its
+//                    lettering readback attached as labelled, NON-BLOCKING
+//                    evidence. A failed readback is delivered honestly.
+//
+// WHY THE BUYER-FACING COPY NEVER MENTIONS ESCROW. There is none. Every
+// sentence here that would, on the paid path, ask the buyer to cancel and
+// release the escrow instead tells them the truth: nothing was charged, and
+// re-posting the gig is the entire remedy.
+
+/** FR-17 gate name marking the one free-gig allowance this job consumed. */
+const FREE_GIG_USAGE_GATE = 'free-gig-usage';
+
+/**
+ * WHEN A FREE GIG CONSUMES ITS ALLOWANCE — the whole abuse guard turns on this.
+ *
+ * The CHECK happens first, before the source fetch, before moderation, before
+ * any vendor call, so a payer over the cap costs us a `getContract` and nothing
+ * else. The RECORD happens at the point of no return, and NOT ONE STEP EARLIER:
+ *
+ *   favicon — once the buyer's logo has been fetched and accepted, immediately
+ *             before the six renders that are this gig's entire cost.
+ *   taster  — once the FIRST generation has actually come back, i.e. once the
+ *             image vendor has been paid.
+ *
+ * Everything that can go wrong before those points therefore costs the buyer
+ * nothing:
+ *
+ *   - an unparseable brief, an unreachable/oversized/too-small logo, or content
+ *     the moderation vendor flags → refused with an actionable message and NO
+ *     allowance consumed. Charging a payer an allowance for a job we declined
+ *     to start would be a trap.
+ *   - a moderation or image-vendor outage → parked with NO allowance consumed,
+ *     because it is our failure, not theirs. The cron unparks and resumes.
+ *
+ * Once past that point the row is durable BEFORE the work it authorizes — the
+ * same rule the paid spend ledger follows, and for the same reason: a crash
+ * between "we did the work" and "we wrote it down" is the farmable one.
+ *
+ * THE ONCE-PER-JOB MARKER IS THE AUDIT TRAIL, NOT THE CHECKPOINT. `gate_audit`
+ * is append-only, keyed by job key, survives queue retries, cron unparks and
+ * DLQ replays, and — unlike the checkpoint — is not also written by half a
+ * dozen other steps whose timing would silently move this decision. The record
+ * is written BEFORE its marker, so a crash between the two re-records on the
+ * retry: over-counting errs toward refusing a free job, never toward giving one
+ * away.
+ *
+ * KNOWN, BOUNDED, AND DELIBERATE: two free jobs for the SAME payer running
+ * concurrently both read the pre-insert count, so a payer can momentarily land
+ * one job past the cap. Closing it needs an atomic check-and-insert this store
+ * does not expose, and the overrun is one job costing at most $0.003 of klein
+ * generation — while the next check sees the higher count and refuses. The
+ * failure mode is bounded and self-correcting, which the alternative (recording
+ * at delivery time, when an attacker can pipeline every job past the gate
+ * before any of them records) is not.
+ */
+async function consumeFreeGigQuota(
+  config: PipelineConfig,
+  args: { jobKey: string; contractId: string; payerId: string; kind: 'favicon' | 'taster' },
+): Promise<void> {
+  const already = await config.jobs.listGateAudit(args.jobKey, FREE_GIG_USAGE_GATE);
+  if (already.length > 0) return;
+  await config.quota.record(args.payerId, args.kind, args.contractId);
+  await config.jobs.recordGateAudit({
+    jobKey: args.jobKey,
+    contractId: args.contractId,
+    gate: FREE_GIG_USAGE_GATE,
+    result: 'recorded',
+    detail: { payerId: args.payerId, kind: args.kind },
+  });
+}
+
+/** Buyer-facing one-liner per favicon-pack gate. Mirrors `gateLines` for the
+ *  paid pack, minus the true-vector row: the free pack ships no SVG, so
+ *  claiming a vector verdict it never ran would be the wrong kind of thorough. */
+function faviconGateLines(gates: FaviconPackGates): string[] {
+  const dimensionFails = gates.dimensions.filter((entry) => !entry.pass);
+  return [
+    `- Pixel dimensions: ${gates.dimensions.length - dimensionFails.length}/${gates.dimensions.length} ` +
+      `icons match their contracted size exactly` +
+      (dimensionFails.length === 0
+        ? '.'
+        : ` — mismatched: ${dimensionFails
+            .map(
+              (entry) =>
+                `${entry.file} is ${entry.actual.width}x${entry.actual.height}, expected ` +
+                `${entry.expected.width}x${entry.expected.height}`,
+            )
+            .join('; ')}.`),
+    `- favicon.ico parse-back: ${gates.ico.pass ? `PASS — lists ${gates.ico.sizes.join(', ')}` : `FAIL — ${gates.ico.reason ?? 'unreadable'}`}.`,
+    `- ZIP completeness: ${gates.zip.pass ? `PASS — ${gates.zip.present.length} entries` : `FAIL — ${gates.zip.reasons.join('; ')}`}.`,
+  ];
+}
+
+/** The US-2 delivery note. The download link sits in the opening lines for the
+ *  same reason the paid notes do: the platform posts only the first ~500
+ *  characters into the thread. */
+function buildFaviconNote(input: {
+  siteName: string;
+  sourceKind: 'svg' | 'raster';
+  packUrl: string;
+  gates: FaviconPackGates;
+}): string {
+  return [
+    `LogoSmith — your favicon package for ${input.siteName}.`,
+    '',
+    `DOWNLOAD: ${input.packUrl}`,
+    '',
+    'What is in the ZIP: favicon.ico (16/32/48), PNGs at 16, 32, 48, 180 (apple-touch-icon), ' +
+      '192 and 512 px, a valid site.webmanifest, and a drop-in HTML <head> snippet whose every ' +
+      'href resolves to a file in the ZIP.',
+    '',
+    input.sourceKind === 'svg'
+      ? 'Your logo is a vector, so every icon was rendered from it at its exact target size — ' +
+        'no icon is a resized copy of a bigger one.'
+      : 'Your logo is a raster, so every icon was produced by a high-quality downscale from ' +
+        'your original. Nothing was upscaled: the largest icon is never bigger than the ' +
+        'artwork you supplied.',
+    '',
+    'Machine-verified before delivery:',
+    ...faviconGateLines(input.gates),
+    '',
+    `This job was free and nothing has been charged. If you want the mark itself rather than ` +
+      `just its icons, the $${SEED_PRICE_USD} gig delivers three lettering-verified concepts and ` +
+      `a true-vector brand pack — logo.svg with zero embedded rasters, colour and mono masters, ` +
+      `extracted brand hex codes, and this same favicon set built from the vector.`,
+  ].join('\n');
+}
+
+/** The US-3 taster delivery note. The OCR verdict is EVIDENCE here, not a gate:
+ *  a failed readback ships with an honest explanation rather than being hidden
+ *  or silently retried away. */
+function buildTasterNote(input: {
+  brief: LogoBrief;
+  verdict: OcrVerdict;
+  attempts: number;
+  conceptUrl: string;
+  progressUrl: string;
+}): string {
+  const { brief, verdict } = input;
+  const lines = [
+    `LogoSmith — your free sample concept for "${brief.brandName}".`,
+    '',
+    `DOWNLOAD: ${input.conceptUrl}`,
+    '',
+    `Lettering readback: ${verdict.pass ? 'PASS' : 'FAIL'} (${verdict.score.toFixed(2)}, ` +
+      `threshold ${OCR_SIMILARITY_THRESHOLD}) — ${verdict.model} read "${verdict.transcription}".`,
+    '',
+  ];
+
+  if (verdict.pass) {
+    lines.push(
+      'That verdict is attached as evidence, not marketing: the image above was transcribed by ' +
+        'a vision model and the transcription matched your brand name above the stated threshold.',
+    );
+  } else {
+    lines.push(
+      'That is a FAIL and it is being delivered anyway, because a free sample that quietly hides ' +
+        'its failures is not evidence of anything. This concept was generated on the free tier’s ' +
+        `fast model across ${input.attempts} attempt${input.attempts === 1 ? '' : 's'}, and that ` +
+        'model is not the lettering specialist. The $' +
+        `${SEED_PRICE_USD} gig routes generation to the lettering-specialist model path and ` +
+        'DELIVERS NOTHING that fails this same readback check — three concepts, each verified, ' +
+        'or an honest non-delivery.',
+    );
+  }
+
+  lines.push('');
+  lines.push(
+    `Next step: the $${SEED_PRICE_USD} gig delivers three stylistically distinct concepts, each ` +
+      `one lettering-verified before you ever see it, then the winner as a true-vector brand ` +
+      `pack — logo.svg with zero embedded rasters, colour and mono masters, the full favicon ` +
+      `set with favicon.ico and webmanifest, and extracted brand hex codes.`,
+  );
+  lines.push('');
+  lines.push(`Evidence page: ${input.progressUrl}`);
+  lines.push(
+    'This sample was free and nothing has been charged. Trademark clearance is NOT performed ' +
+      'and NOT warranted.',
+  );
+  return lines.join('\n');
+}
+
+/**
+ * The taster's single style axis.
+ *
+ * Deliberately NOT compiled by Haiku. FR-3's axis compiler exists to make THREE
+ * concepts provably distinct from one another (FR-6 checks their ids), and one
+ * concept has nothing to be distinct from — so paying an LLM call on a $0 gig
+ * would buy a property this deliverable does not have. The paid gig's own
+ * first axis is the lettering-forward wordmark; the taster shows that one.
+ */
+const tasterAxis = (brief: LogoBrief): StyleAxis => ({
+  id: 'taster-wordmark',
+  label: 'lettering-forward wordmark',
+  vendor: 'flux',
+  prompt:
+    `A clean, professional lettering-forward logo wordmark reading exactly "${brief.brandName}", ` +
+    `for a ${brief.industry} business. Flat vector-style mark on a plain white background, ` +
+    `high contrast, generous letter spacing, no tagline, no border, no photographic elements. ` +
+    `The text must read exactly "${brief.brandName}" and nothing else.` +
+    (brief.brief ? ` Direction from the buyer: ${brief.brief}` : '') +
+    (brief.avoid?.length ? ` Avoid: ${brief.avoid.join(', ')}.` : ''),
+});
+
+/** US-2: repackage the buyer's existing logo. Zero image-generation spend. */
+async function runFaviconGig(
+  config: PipelineConfig,
+  args: {
+    job: JobRow;
+    message: JobMessage;
+    contract: Pick<Contract, 'gigId' | 'payerId' | 'milestones'>;
+    brief: FaviconBrief;
+    token: string;
+    log: Logger;
+  },
+): Promise<StageOutcome> {
+  const { jobs, client, deliverables } = config;
+  const { job, contract, brief, token, log } = args;
+  const { jobKey, contractId } = args.message;
+
+  await jobs.setInProgress(jobKey, {
+    kind: 'favicon',
+    gigId: contract.gigId,
+    payerId: contract.payerId,
+    briefJson: JSON.stringify(brief),
+  });
+
+  const fetched = await fetchSourceLogo({ fetchImpl: config.fetchImpl, url: brief.logoUrl });
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'source-logo',
+    result: fetched.ok ? fetched.source.kind : 'rejected',
+    detail: fetched.ok
+      ? fetched.source.kind === 'raster'
+        ? { kind: 'raster', width: fetched.source.width, height: fetched.source.height }
+        : { kind: 'svg', bytes: fetched.source.svg.length }
+      : { reason: fetched.reason },
+  });
+  if (!fetched.ok) {
+    // The buyer's input, not our failure — so no allowance is consumed and the
+    // remedy is entirely in their hands.
+    await client.sendMessage(
+      contractId,
+      `LogoSmith cannot build your favicon package: ${fetched.reason}. Nothing has been ` +
+        'generated and nothing has been charged. Post a corrected gig with a direct link to ' +
+        'the image file and LogoSmith will pick it up automatically — this free job has not ' +
+        'been counted against your free-job allowance.',
+    );
+    await jobs.markDelivered(jobKey, 'rejected');
+    log.info({ reason: fetched.reason }, 'source logo rejected; no allowance consumed');
+    return { outcome: 'aborted' };
+  }
+
+  // The point of no return for this gig: the source is accepted and the six
+  // renders below are its entire cost. Zero vendor spend by construction —
+  // nothing past this line calls a paid image API, so the ledger this job
+  // reports is the honest $0.00.
+  await consumeFreeGigQuota(config, {
+    jobKey,
+    contractId,
+    payerId: contract.payerId,
+    kind: 'favicon',
+  });
+  const checkpoint: JobCheckpoint = job.checkpoint ?? { slots: [], spendUsd: 0 };
+  await jobs.saveCheckpoint(jobKey, checkpoint);
+
+  // The favicon brief carries no brandName, so the webmanifest is named for the
+  // site the logo came from — the one piece of buyer identity the input has.
+  const siteName = new URL(brief.logoUrl).hostname;
+  const pack = await buildFaviconPack({
+    source: fetched.source,
+    siteName,
+    sources: config.sources,
+  });
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'favicon-pack',
+    result: pack.gates.pass ? 'pass' : 'fail',
+    detail: pack.gates,
+  });
+  if (!pack.gates.pass) {
+    await client.sendMessage(
+      contractId,
+      [
+        `LogoSmith could not deliver your favicon package for ${siteName}.`,
+        '',
+        'The assembled package did not clear its own delivery gates, so nothing has been ' +
+          'delivered. Shipping icons at the wrong size or a favicon.ico that will not parse ' +
+          'is exactly what these checks exist to prevent.',
+        '',
+        'Gate results:',
+        ...faviconGateLines(pack.gates),
+        '',
+        'Nothing has been charged — this was a free LogoSmith job, so there is no payment and ' +
+          'nothing for you to cancel. Reply here with a different logo file and it will be ' +
+          'rebuilt.',
+      ].join('\n'),
+    );
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error({ gates: pack.gates }, 'favicon pack gates failed; nothing delivered');
+    return { outcome: 'aborted' };
+  }
+
+  await deliverables.put(`${token}/pack.zip`, pack.zip, 'application/zip');
+  const milestoneId = milestoneIdForStage(contract, 'single');
+  if (!milestoneId) throw new Error(`contract ${contractId} exposes no milestone to deliver`);
+
+  const packUrl = `${config.publicBaseUrl}/deliverables/${token}/pack.zip`;
+  await client.deliverMilestone(contractId, milestoneId, {
+    note: buildFaviconNote({
+      siteName,
+      sourceKind: fetched.source.kind,
+      packUrl,
+      gates: pack.gates,
+    }),
+    attachments: [packUrl],
+  });
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'free-delivery',
+    result: 'delivered',
+    detail: { milestoneId, kind: 'favicon', spendUsd: checkpoint.spendUsd },
+  });
+  await jobs.markDelivered(jobKey, 'delivered');
+  log.info({ siteName, spendUsd: checkpoint.spendUsd }, 'favicon package delivered');
+  return { outcome: 'delivered' };
+}
+
+/** US-3: one klein concept with its readback attached as non-blocking evidence. */
+async function runTasterGig(
+  config: PipelineConfig,
+  args: {
+    job: JobRow;
+    message: JobMessage;
+    contract: Pick<Contract, 'gigId' | 'payerId' | 'milestones'>;
+    brief: LogoBrief;
+    token: string;
+    services: PipelineServices;
+    log: Logger;
+  },
+): Promise<StageOutcome> {
+  const { jobs, concepts, client, deliverables } = config;
+  const { job, contract, brief, token, services, log } = args;
+  const { jobKey, contractId } = args.message;
+
+  await jobs.setInProgress(jobKey, {
+    kind: 'taster',
+    gigId: contract.gigId,
+    payerId: contract.payerId,
+    briefJson: JSON.stringify(brief),
+  });
+
+  // FR-2 applies in full: "never generate from an unscreened brief" has no free
+  // tier. Fail-closed, and — like every outage below — before any allowance is
+  // consumed, so a vendor's bad day never costs the buyer a free job.
+  const screening = await services.moderation.screen(moderationText(brief));
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'moderation',
+    result: screening.status,
+    detail: screening.status === 'unavailable' ? { error: screening.error } : screening.verdict,
+  });
+  if (screening.status === 'unavailable') {
+    await jobs.park(jobKey, 'moderation_outage');
+    const attempts = await jobs.incrementModerationAttempts(jobKey);
+    log.warn({ error: screening.error, attempts }, 'moderation unavailable; free job parked');
+    if (attempts === MODERATION_ATTEMPTS_BEFORE_NOTICE) {
+      await client.sendMessage(
+        contractId,
+        'Status update: LogoSmith screens every brief through a content-safety vendor before ' +
+          'generating anything, and that vendor has been unavailable for ' +
+          `${attempts} attempts. The job is queued and retries automatically — no action is ` +
+          'needed from you, nothing has been generated, and this has not been counted against ' +
+          'your free-job allowance.',
+      );
+    }
+    return { outcome: 'parked' };
+  }
+  if (screening.status === 'flagged') {
+    await client.sendMessage(
+      contractId,
+      'LogoSmith cannot take this job: the brand name and brief were flagged by the ' +
+        'content-safety vendor that screens every brief before generation. Nothing has been ' +
+        'generated, nothing has been charged, and this has not been counted against your ' +
+        'free-job allowance. If you believe this is a misclassification, reply here with a ' +
+        'rephrased brief.',
+    );
+    await jobs.markDelivered(jobKey, 'rejected');
+    return { outcome: 'aborted' };
+  }
+
+  const checkpoint: JobCheckpoint = job.checkpoint ?? {
+    slots: [{ slot: 1, axis: tasterAxis(brief), status: 'pending', attempts: 0 }],
+    spendUsd: job.spentUsd,
+  };
+  await jobs.saveCheckpoint(jobKey, checkpoint);
+
+  const slot = checkpoint.slots[0]!;
+  const r2Key = `${token}/concept-1.png`;
+
+  // Same FR-5 cap arithmetic as the paid stage — 1 initial attempt plus at most
+  // MAX_REGENS_PER_SLOT regenerations (US-3/FR-14's "<=2 regenerations") —
+  // read from the PERSISTED checkpoint, so a parked-and-resumed taster cannot
+  // start its allowance over.
+  for (;;) {
+    const decision = decideSlotAction(slot, checkpoint.spendUsd);
+    if (decision.action === 'stop') break;
+
+    const result = await services.generator.generate(slot.axis, slot.axis.prompt);
+    if (!result.ok) {
+      await jobs.recordGateAudit({
+        jobKey,
+        contractId,
+        slot: 1,
+        gate: 'generation',
+        result: result.retryable ? 'unavailable' : 'error',
+        detail: { vendor: slot.axis.vendor, error: result.error },
+      });
+      if (result.retryable) {
+        slot.failReason = result.error;
+        await jobs.saveCheckpoint(jobKey, checkpoint);
+        await jobs.park(jobKey, 'vendor_outage');
+        log.warn({ error: result.error }, 'klein unavailable; free job parked');
+        return { outcome: 'parked' };
+      }
+      // The vendor refused this request, not this moment — the same prompt
+      // draws the same 4xx, so burn the remaining attempts rather than buy two
+      // more identical refusals.
+      slot.failReason = result.error;
+      slot.attempts = Math.max(slot.attempts + 1, MAX_REGENS_PER_SLOT + 1);
+      await jobs.saveCheckpoint(jobKey, checkpoint);
+      continue;
+    }
+
+    checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + result.costUsd);
+    slot.attempts += 1;
+    // Durable before the gate below can throw, exactly as the paid stage does.
+    await jobs.saveCheckpoint(jobKey, checkpoint);
+    // THE POINT OF NO RETURN for this gig: the image vendor has now been paid.
+    // Everything before it — the moderation screen, a klein 503 on the first
+    // attempt — parks or refuses without touching the buyer's allowance. A
+    // no-op after the first pass through here.
+    await consumeFreeGigQuota(config, {
+      jobKey,
+      contractId,
+      payerId: contract.payerId,
+      kind: 'taster',
+    });
+
+    const png = result.concept.png;
+    const ocr = await services.ocrGate.check(png, brief.brandName);
+    if (ocr.status === 'unavailable') {
+      // The gate could not see the image, so it refuses to verdict. Park; the
+      // resume regenerates, which costs a tenth of a cent — the paid stage's
+      // "PUT the bytes before the gate" rule exists because Ideogram's asset
+      // URLs expire and its images cost real money, and neither is true of a
+      // klein return that arrives inline.
+      await jobs.recordGateAudit({
+        jobKey,
+        contractId,
+        slot: 1,
+        gate: 'ocr',
+        result: 'unavailable',
+        detail: { error: ocr.error },
+      });
+      await jobs.park(jobKey, 'ocr_outage');
+      log.warn({ error: ocr.error }, 'lettering gate unavailable; free job parked');
+      return { outcome: 'parked' };
+    }
+
+    // NON-BLOCKING (US-3 AC1). The verdict decides which attempt is delivered
+    // and what the note says about it — never whether anything is delivered.
+    // Keeping the BEST-scoring attempt (rather than the last) is why the PUT is
+    // conditional: R2 always holds the candidate the note is written about, so
+    // a resumed job reads its own best attempt back rather than the newest one.
+    const previous = slot.ocr;
+    if (!previous || ocr.verdict.score > previous.score) {
+      await deliverables.put(r2Key, png, 'image/png');
+      slot.r2Key = r2Key;
+      slot.ocr = ocr.verdict;
+      slot.vendorRequestId = result.concept.vendorRequestId;
+    }
+    slot.status = slot.ocr!.pass ? 'passed' : 'failed';
+    slot.failReason = slot.ocr!.pass
+      ? undefined
+      : `readback similarity ${slot.ocr!.score.toFixed(2)} is below ${OCR_SIMILARITY_THRESHOLD} ` +
+        `(model read "${slot.ocr!.transcription}")`;
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      slot: 1,
+      gate: 'ocr',
+      result: ocr.verdict.pass ? 'pass' : 'fail',
+      detail: { ...ocr.verdict, blocking: false, attempt: slot.attempts },
+    });
+    await concepts.upsert({
+      contractId,
+      slot: 1,
+      axisId: slot.axis.id,
+      vendor: slot.axis.vendor,
+      vendorRequestId: slot.vendorRequestId,
+      r2Key: slot.r2Key,
+      attemptsUsed: slot.attempts,
+      ocrModel: slot.ocr!.model,
+      ocrTranscription: slot.ocr!.transcription,
+      ocrScore: slot.ocr!.score,
+      ocrPass: slot.ocr!.pass,
+    });
+    await jobs.saveCheckpoint(jobKey, checkpoint);
+  }
+
+  await jobs.saveCheckpoint(jobKey, checkpoint);
+
+  const verdict = slot.ocr;
+  if (!verdict || !slot.r2Key) {
+    // Every attempt failed to produce an image at all — a vendor refusal, not a
+    // failed readback. There is nothing to be honest ABOUT, so nothing ships.
+    await client.sendMessage(
+      contractId,
+      'LogoSmith could not produce your free sample concept: the image model refused every ' +
+        `attempt (${slot.failReason ?? 'no image was returned'}). Nothing has been delivered ` +
+        'and nothing has been charged — this was a free LogoSmith job, so there is no payment ' +
+        'and nothing for you to cancel. A shorter brand name generates far more reliably; ' +
+        'post the gig again and LogoSmith will bid on it automatically.',
+    );
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      gate: 'free-delivery',
+      result: 'aborted',
+      detail: { kind: 'taster', attempts: slot.attempts, spendUsd: checkpoint.spendUsd },
+    });
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error({ attempts: slot.attempts }, 'taster produced no image; nothing delivered');
+    return { outcome: 'aborted' };
+  }
+
+  const milestoneId = milestoneIdForStage(contract, 'single');
+  if (!milestoneId) throw new Error(`contract ${contractId} exposes no milestone to deliver`);
+
+  const conceptUrl = `${config.publicBaseUrl}/deliverables/${token}/concept-1.png`;
+  const progressUrl = `${config.publicBaseUrl}/p/${token}`;
+  await client.deliverMilestone(contractId, milestoneId, {
+    note: buildTasterNote({
+      brief,
+      verdict,
+      attempts: slot.attempts,
+      conceptUrl,
+      progressUrl,
+    }),
+    attachments: [conceptUrl, progressUrl],
+  });
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'free-delivery',
+    result: 'delivered',
+    detail: {
+      milestoneId,
+      kind: 'taster',
+      ocrPass: verdict.pass,
+      ocrScore: verdict.score,
+      attempts: slot.attempts,
+      spendUsd: checkpoint.spendUsd,
+    },
+  });
+  // DELIVERED even when the readback failed: US-3 promises an honest sample,
+  // and `aborted` would tell the platform we shipped nothing when we did.
+  await jobs.markDelivered(jobKey, 'delivered');
+  log.info({ ocrPass: verdict.pass, spendUsd: checkpoint.spendUsd }, 'free taster delivered');
+  return { outcome: 'delivered' };
+}
+
+/**
+ * PRD §6's free-funnel path: the US-2 favicon repackage and the US-3 taster,
+ * both $0, both capped per payer (FR-14).
+ *
+ * WHICH GIG THIS IS, IS READ OFF THE BRIEF — the same question `pricingCalc`
+ * asks to decide the $0 anchor, asked the same way. A description carrying a
+ * `logoUrl` is the favicon gig; one carrying a `brandName` + `industry` is the
+ * taster. Re-deriving it here rather than trusting a field on the message means
+ * a redelivered or replayed message cannot talk this stage into running the
+ * other gig's pipeline.
+ */
+export async function runSingleStage(
+  config: PipelineConfig,
+  message: JobMessage,
+): Promise<StageOutcome> {
+  const { jobs, client, logger } = config;
+  const { jobKey, contractId } = message;
+  const services = resolveServices(config);
+  const log = logger.child({ jobKey, contractId, stage: 'single' });
+
+  const job = await jobs.get(jobKey);
+  // As in both paid stages: the claim INSERT creates this row before the Queue
+  // send, so its absence is an infra fault rather than a pipeline decision.
+  if (!job) throw new Error(`no job row for ${jobKey}`);
+  if (job.status === 'delivered') {
+    log.info({ outcome: job.outcome }, 'stage already delivered; redelivery is a no-op');
+    return { outcome: toStageOutcome(job.outcome) };
+  }
+  const token = job.deliverableToken;
+  if (!token) throw new Error(`job ${jobKey} has no deliverable token`);
+
+  const contract = await client.getContract(contractId);
+  const gig = await client.getGig(contract.gigId);
+  const description = gig.description ?? '';
+
+  // FR-14 BEFORE ANYTHING ELSE. The payer id comes off the contract, never off
+  // the webhook payload — the count is only an abuse guard if the identity it
+  // counts against is the platform's, not the caller's.
+  const quota = await checkFreeGigQuota(config.quota, contract.payerId);
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'free-gig-quota',
+    result: quota.allowed ? 'allowed' : 'refused',
+    detail: { payerId: contract.payerId, used: quota.used },
+  });
+  if (!quota.allowed) {
+    await client.sendMessage(contractId, quota.message);
+    await jobs.markDelivered(jobKey, 'rejected');
+    log.warn({ used: quota.used }, 'free-gig quota exhausted; job refused before any work');
+    return { outcome: 'aborted' };
+  }
+
+  const faviconBrief = parseFaviconBrief(description);
+  if (faviconBrief.ok) {
+    return runFaviconGig(config, {
+      job,
+      message,
+      contract,
+      brief: faviconBrief.brief,
+      token,
+      log,
+    });
+  }
+
+  const logoBrief = parseLogoBrief(description);
+  if (logoBrief.ok) {
+    return runTasterGig(config, {
+      job,
+      message,
+      contract,
+      brief: logoBrief.brief,
+      token,
+      services,
+      log,
+    });
+  }
+
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'brief',
+    result: 'invalid',
+    detail: { favicon: faviconBrief.reason, logo: logoBrief.reason },
+  });
+  await client.sendMessage(
+    contractId,
+    'LogoSmith cannot start this free job: the brief in this gig did not validate. ' +
+      `A favicon job needs a fenced JSON block with an https \`logoUrl\` (${faviconBrief.reason}); ` +
+      `a free sample concept needs one with a Latin-script \`brandName\` and an \`industry\` ` +
+      `(${logoBrief.reason}). Nothing has been generated, nothing has been charged, and this ` +
+      'has not been counted against your free-job allowance — post a corrected gig and ' +
+      'LogoSmith will pick it up automatically.',
+  );
+  await jobs.markDelivered(jobKey, 'rejected');
+  return { outcome: 'aborted' };
+}
+
 /** Queue entry point — one stage per message (§7: pixmap work is memory-bound). */
 export async function processJobMessage(
   config: PipelineConfig,
@@ -1445,8 +2135,14 @@ export async function processJobMessage(
       );
       return;
     }
-    case 'single':
-      throw new Error('the free-gig single stage is not implemented yet (Task 23)');
+    case 'single': {
+      const result = await runSingleStage(config, message);
+      config.logger.info(
+        { ...message, ...result, durationMs: Date.now() - startedAt },
+        'free-gig stage finished',
+      );
+      return;
+    }
     default: {
       const unreachable: never = message.stage;
       throw new Error(`unknown job stage: ${String(unreachable)}`);
