@@ -2265,7 +2265,26 @@ export async function runSingleStage(
     });
   }
 
-  const logoBrief = parseLogoBrief(description);
+  // Prose is accepted here for the same reason it is on the paid path (Task 27):
+  // 0 of 78 live gigs carried a fenced block, and `maybePropose` already bids on
+  // a prose taster off this very extraction — so resolving it any less capably
+  // here would bid on a buyer's gig and then refuse it.
+  //
+  // REACHED ONLY FOR NON-FAVICON GIGS: `parseFaviconBrief` above returns early,
+  // so a favicon gig never pays for a brand-name extraction it has no use for.
+  // The favicon brief is deliberately NOT extended to prose — its `logoUrl` is
+  // fetched, and `checkLogoUrl`'s https/no-IP-literal/no-loopback policy (§12)
+  // is what stands between a buyer string and an SSRF. A URL guessed out of
+  // prose by a model is not a URL the buyer wrote.
+  //
+  // QUOTA SEQUENCING IS UNCHANGED AND LOAD-BEARING. This whole block sits
+  // upstream of `consumeFreeGigQuota`, which is called only inside
+  // `runFaviconGig` (after the source fetch) and `runTasterGig` (after the first
+  // image is paid for) — see its docstring, which names "an unparseable brief"
+  // as a thing that must cost the buyer nothing. This change moves WHICH briefs
+  // validate, never WHERE the rejection sits, so a refused brief still consumes
+  // no allowance.
+  const logoBrief = await resolveGigBrief(gig, services.briefExtractor);
   if (logoBrief.ok) {
     return runTasterGig(config, {
       job,
@@ -2287,12 +2306,20 @@ export async function runSingleStage(
   });
   await client.sendMessage(
     contractId,
+    // The two free jobs need DIFFERENT things, and only one of them changed.
+    // The sample concept takes plain prose now, so it must stop demanding JSON;
+    // the favicon pack genuinely still needs a fenced `logoUrl`, because that
+    // string is fetched and `checkLogoUrl` is what guards it. Saying so plainly
+    // beats one blurred sentence that is half-stale.
     'LogoSmith cannot start this free job: the brief in this gig did not validate. ' +
-      `A favicon job needs a fenced JSON block with an https \`logoUrl\` (${faviconBrief.reason}); ` +
-      `a free sample concept needs one with a Latin-script \`brandName\` and an \`industry\` ` +
-      `(${logoBrief.reason}). Nothing has been generated, nothing has been charged, and this ` +
-      'has not been counted against your free-job allowance — post a corrected gig and ' +
-      'LogoSmith will pick it up automatically.',
+      'There are two free jobs and they need different things. A favicon pack needs a fenced ' +
+      'JSON block carrying an https `logoUrl` that points at the logo you already have ' +
+      `(${faviconBrief.reason}). A free sample concept needs the brand name to set, written ` +
+      'exactly as it should appear on the logo, plus what the brand does — plain prose is ' +
+      'fine, for example "a logo for Harbor & Vine, a seaside inn", and the brand name must ' +
+      `be Latin script (${logoBrief.reason}). Nothing has been generated, nothing has been ` +
+      'charged, and this has not been counted against your free-job allowance — post a ' +
+      'corrected gig and LogoSmith will pick it up automatically.',
   );
   await jobs.markDelivered(jobKey, 'rejected');
   return { outcome: 'aborted' };

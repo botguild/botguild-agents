@@ -4,7 +4,7 @@ import type { AgentClient } from '@botguild/agent-core';
 import { createConsoleLogger } from '@botguild/agent-core-workers';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
 import type { D1Like } from '@botguild/agent-core-workers';
-import { MIN_SOURCE_PX } from './brief.js';
+import { MIN_SOURCE_PX, parseLogoBrief, type BriefResult } from './brief.js';
 import {
   FREE_GIGS_PER_PAYER,
   FREE_GIG_WINDOW_DAYS,
@@ -34,6 +34,7 @@ import {
   type QuotaStore,
 } from './jobs.js';
 import type { ModerationClient } from './moderation.js';
+import type { ProseGig } from './proseBrief.js';
 import { renderSvgToPng } from './pack/render.js';
 import { nodeWasmSources } from './pack/wasm.node.js';
 import { FAVICON_ZIP_ENTRIES, unzipFiles } from './pack/zip.js';
@@ -46,7 +47,7 @@ import {
   type PipelineServices,
 } from './pipeline.js';
 import { applyMigrations } from './testSupport.js';
-import type { FetchLike, JobMessage, StyleAxis } from './types.js';
+import type { FetchLike, JobMessage, LogoBrief, StyleAxis } from './types.js';
 
 const logger = createConsoleLogger({ service: 'logosmith-test', level: 'silent' });
 const sources = nodeWasmSources();
@@ -731,6 +732,8 @@ interface FreeHarness {
   fetches: string[];
   generated: number;
   message: JobMessage;
+  /** Every gig handed to the prose-brief extractor, in call order. */
+  extractorCalls: ProseGig[];
 }
 
 interface FreeOptions {
@@ -750,6 +753,8 @@ interface FreeOptions {
   db?: D1Like;
   /** Test seam for the unreachable-by-input pack-gate failure branch. */
   faviconPack?: PipelineServices['faviconPack'];
+  /** What the prose-brief extractor returns. Default: a refusal. */
+  extractedBrief?: BriefResult<LogoBrief>;
 }
 
 async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
@@ -791,6 +796,7 @@ async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
 
   const harness: Partial<FreeHarness> = { generated: 0 };
   const fetches: string[] = [];
+  const extractorCalls: ProseGig[] = [];
   const generator: Generator = {
     async generate() {
       harness.generated = (harness.generated ?? 0) + 1;
@@ -836,6 +842,19 @@ async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
       ocrGate,
       moderation: options.moderation ?? clearModeration,
       ...(options.faviconPack ? { faviconPack: options.faviconPack } : {}),
+      // ALWAYS wired. The real extractor builds an `@anthropic-ai/sdk` client,
+      // and that client issues its requests through the GLOBAL `fetch` — the
+      // network-refusing `fetchImpl` above never sees them. Left undefined,
+      // this harness made a LIVE HTTPS call to api.anthropic.com on every
+      // taster-brief resolution and passed off the 401 it got back as though it
+      // were a brief-validation failure. Verified by observing the Anthropic
+      // `request_id` in a test assertion diff.
+      briefExtractor: {
+        async extract(gig: ProseGig): Promise<BriefResult<LogoBrief>> {
+          extractorCalls.push(gig);
+          return options.extractedBrief ?? { ok: false, reason: 'this gig names no brand' };
+        },
+      },
     },
   };
 
@@ -850,6 +869,7 @@ async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
     deliveries,
     messages,
     fetches,
+    extractorCalls,
     message: { contractId, jobKey, stage: 'single' as const },
   });
   return harness as FreeHarness;
@@ -1016,12 +1036,81 @@ describe('runSingleStage — the US-2 favicon gig', () => {
   });
 
   it('rejects a gig whose brief validates as neither free shape', async () => {
+    // Neither free shape AND no brand the extractor can find (harness default):
+    // all three rungs have to miss for this to be a rejection.
     const h = await setupFree({ description: 'no fenced json here' });
     assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
     assert.equal((await h.jobs.get(h.jobKey))!.outcome, 'rejected');
     assert.equal(await usage(h), 0);
+    assert.equal(h.extractorCalls.length, 1, 'the prose fallback was tried before giving up');
     assert.match(h.messages[0]!, /logoUrl/);
-    assert.match(h.messages[0]!, /brandName/);
+    assert.match(h.messages[0]!, /brand name/);
+  });
+});
+
+describe('runSingleStage — the taster accepts prose briefs too (Task 27)', () => {
+  const PROSE = 'A free sample logo for Harbor & Vine, our new seaside inn, please.';
+  assert.equal(parseLogoBrief(PROSE).ok, false, 'precondition: the prose has no fenced brief');
+
+  const EXTRACTED: LogoBrief = { brandName: 'Harbor & Vine', industry: 'seaside inn' };
+
+  it('runs a prose taster gig instead of refusing the gig it just bid on', async () => {
+    const h = await setupFree({
+      description: PROSE,
+      extractedBrief: { ok: true, brief: EXTRACTED },
+    });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
+    assert.equal(h.extractorCalls.length, 1);
+    assert.equal(h.deliveries.length, 1);
+    assert.equal(await usage(h), 1, 'a delivered taster consumes exactly one allowance');
+  });
+
+  it('never pays for extraction on a favicon gig', async () => {
+    // The favicon brief is checked FIRST and returns early — a `logoUrl` is
+    // fetched, and `checkLogoUrl` is what guards it, so it is deliberately not
+    // extended to prose.
+    const h = await setupFree({});
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
+    assert.deepEqual(h.extractorCalls, [], 'a favicon gig has no brand name to extract');
+  });
+
+  it('never pays for extraction when the taster gig carries a fenced brief', async () => {
+    assert.equal(parseLogoBrief(TASTER_DESCRIPTION).ok, true, 'precondition: fenced resolves');
+    const h = await setupFree({ description: TASTER_DESCRIPTION });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
+    assert.deepEqual(h.extractorCalls, [], 'rung 2 resolved; rung 3 must never run');
+  });
+
+  it('consumes NO allowance when every rung misses', async () => {
+    // THE PROPERTY THIS PATH EXISTS TO PROTECT. The rejection sits upstream of
+    // `consumeFreeGigQuota` — which is reached only inside `runFaviconGig`
+    // (after the source fetch) and `runTasterGig` (after the first image is
+    // paid for). Adding a rung moved WHICH briefs validate, never WHERE the
+    // rejection sits, so a refused brief still costs the buyer nothing.
+    const h = await setupFree({ description: PROSE, extractedBrief: { ok: false, reason: 'x' } });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+    assert.equal(await usage(h), 0, 'no free gig was burned on a brief we never processed');
+    assert.equal((await h.jobs.get(h.jobKey))!.outcome, 'rejected');
+    assert.match(h.messages[0]!, /has not been counted against your free-job allowance/);
+  });
+
+  it('tells the buyer prose is fine, without demanding JSON for the sample concept', async () => {
+    const h = await setupFree({ description: PROSE });
+    await runSingleStage(h.config, h.message);
+
+    const note = h.messages[0]!;
+    assert.doesNotMatch(
+      note,
+      /a free sample concept needs one with a Latin-script/,
+      'the stale sentence that told the buyer a sample concept needs a fenced block',
+    );
+    assert.match(note, /plain prose is/i);
+    // The favicon half genuinely still needs a fenced block, and must keep
+    // saying so — only one of the two free shapes changed.
+    assert.match(note, /favicon pack needs a fenced\s+JSON block/);
   });
 });
 
@@ -1398,6 +1487,19 @@ describe('the warranty revision round (FR-18)', () => {
       publicBaseUrl: 'https://logosmith.example.com',
       logger,
       services: {
+        // Same idiom as the exploding quota store above, for the same reason.
+        // This harness's gig carries a fenced brief, so extraction must never
+        // run — but that is a property of a FIXTURE, and a fixture can change.
+        // Left undefined, the real extractor builds an `@anthropic-ai/sdk`
+        // client that reaches api.anthropic.com through the GLOBAL `fetch`,
+        // which the network-refusing `fetchImpl` above does not intercept. This
+        // makes "extraction never runs here" fail loudly instead of silently
+        // becoming a live HTTPS call.
+        briefExtractor: {
+          extract: () => {
+            throw new Error('no test may reach the network (prose brief extractor)');
+          },
+        },
         generator: {
           async generate(axis) {
             generated += 1;
