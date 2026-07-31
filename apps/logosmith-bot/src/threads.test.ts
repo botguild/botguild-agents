@@ -332,6 +332,31 @@ describe('findSelection', () => {
   it('takes the FIRST buyer selection, not the last', () => {
     const messages = [buyer('concept 1'), buyer('actually concept 3')];
     assert.equal(findSelection(messages, 'bot-logosmith'), 1);
+
+    // BOTH messages below must parse on their own, and that is the entire
+    // point of this second assertion — do not "simplify" it back to one
+    // case, and do not swap either string for a more natural-sounding one
+    // without checking parseSelection returns a number for it.
+    //
+    // The locked fixture above stopped discriminating between first-wins
+    // and last-wins the moment round 5 tightened parseSelection: 'actually
+    // concept 3' used to parse to 3, so ordering was observable; now it is
+    // null, so the assertion holds under BOTH orderings and the test's name
+    // became a claim nothing checked. A mutation to
+    // `for (const message of [...messages].reverse())` passed the whole
+    // suite. This pair discriminates — first-wins gives 1, last-wins gives
+    // 3 — and it keeps discriminating only while both strings still parse.
+    //
+    // The ordering guarantee itself is not cosmetic: SelectionStore.select
+    // is first-write-wins (its UPDATE is conditioned on state =
+    // 'concepts_delivered'), so a buyer who picks 1, waits for stage 2 to
+    // claim slot 1, then says 'concept 3' cannot re-point a job already in
+    // flight. findSelection answering 3 there would disagree with what the
+    // store can actually persist.
+    const bothParse = [buyer('concept 1'), buyer('concept 3')];
+    assert.equal(parseSelection('concept 1'), 1);
+    assert.equal(parseSelection('concept 3'), 3);
+    assert.equal(findSelection(bothParse, 'bot-logosmith'), 1);
   });
 
   it('returns null when no buyer message parses', () => {

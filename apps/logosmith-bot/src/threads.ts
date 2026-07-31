@@ -125,9 +125,7 @@ export function createThreadReader(deps: ThreadReaderDeps): ThreadReader {
 
 // Whitespace and decoration that may TRAIL a selection without being part of
 // it. Excludes every letter and digit, so no content word can ever hide in
-// here, and three deliberate omissions found by the round-5 adversarial pass:
-//   - '>', an email/chat quote marker. A buyer quoting the bot's own "reply
-//     with `concept 1|2|3`" back at it must not parse as a pick.
+// here, and two deliberate omissions found by the round-5 adversarial pass:
 //   - '(' ')' '[' ']', which turn emoticons into decoration: "concept 2 :("
 //     parsed as a confident 2 while the buyer was visibly unhappy about it.
 //     Sentiment is not something this parser can read, so a message carrying
@@ -136,10 +134,16 @@ export function createThreadReader(deps: ThreadReaderDeps): ThreadReader {
 //   - no emoji or symbols of any kind, so "concept 2 👎" is null.
 const SEP = String.raw`[\s.,;:!?'"\`\-–—…]`;
 
-// Decoration that may LEAD a selection: the same set MINUS the dash family.
-// A trailing dash is punctuation; a leading one is a minus sign or a negating
-// bullet, and "-2" must not read as slot 2. The cost is that "- concept 2"
-// (a bulleted single-line reply) is null too, which is the safe direction.
+// Decoration that may LEAD a selection: the same set MINUS the dash family,
+// and — like SEP — containing no '>'. Both omissions matter only here, since
+// this is the only class that can sit in FRONT of a slot reference:
+//   - a trailing dash is punctuation, but a leading one is a minus sign or a
+//     negating bullet, and "-2" must not read as slot 2. The cost is that
+//     "- concept 2" (a bulleted single-line reply) is null too.
+//   - '>' is the email/chat quote marker, so it only ever appears at the head
+//     of a quoted line. Keeping it out is what stops a buyer quoting the
+//     bot's own "reply with `concept 1|2|3`" back at it from parsing as a
+//     pick — "> concept 2" is null.
 const LEAD_SEP = String.raw`[\s.,;:!?'"\`…]`;
 
 // The only words allowed to sit beside a selection without being part of it:
