@@ -371,6 +371,7 @@ function buildApp(
   const selectionDeps = () => ({
     client,
     jobs,
+    concepts,
     selection,
     queue: env.JOBS,
     apiUrl: env.BOTGUILD_API_URL,
