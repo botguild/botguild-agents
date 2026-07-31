@@ -45,11 +45,17 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Logger } from 'pino';
 import type { AgentClient, Contract } from '@botguild/agent-core';
 import { createAxisCompiler, type AxisCompiler } from './axes.js';
-import { parseFaviconBrief, parseLogoBrief, type BriefResult } from './brief.js';
+import {
+  parseFaviconBrief,
+  parseLogoBrief,
+  resolveBrief as resolveGigBrief,
+  type BriefResult,
+} from './brief.js';
 import {
   CONCEPT_COUNT,
   FREE_GIGS_PER_PAYER,
   FREE_GIG_WINDOW_DAYS,
+  HAIKU_MODEL_ID,
   MAX_REGENS_PER_SLOT,
   MAX_SPEND_USD,
   MIN_PHASH_HAMMING,
@@ -89,6 +95,7 @@ import { fetchFontPairing } from './pack/fonts.js';
 import { buildPack, type PackGateReport } from './pack/index.js';
 import { renderSvgToPixmap, renderSvgToPng } from './pack/render.js';
 import type { WasmSources } from './pack/wasm.js';
+import { createProseBriefExtractor, type ProseBriefExtractor } from './proseBrief.js';
 import {
   buildLicenseManifest,
   buildValidationReport,
@@ -152,6 +159,16 @@ export interface PipelineServices {
    * be proven to block delivery, and this is the only way to prove it.
    */
   faviconPack: (input: FaviconPackInput) => Promise<FaviconPackResult>;
+  /**
+   * The prose-brief fallback (Task 27). Measured live: 0 of 78 open gigs carry
+   * a fenced JSON block, so without this the funded pipeline rejects the very
+   * gigs `maybePropose` just bid on — after the buyer's money is in escrow.
+   *
+   * Reached ONLY as the last resort in `resolveBrief` below: a stored
+   * `brief_json` still wins, and a gig that carried a fenced block never pays
+   * for it. Its output is validated by the same `parseLogoBrief` either way.
+   */
+  briefExtractor: ProseBriefExtractor;
 }
 
 export interface PipelineConfig {
@@ -310,6 +327,22 @@ function resolveServices(config: PipelineConfig): PipelineServices {
         vectorizerToken: config.secrets.vectorizerToken,
       }),
     faviconPack: overrides.faviconPack ?? buildFaviconPack,
+    // Constructed lazily for exactly the reason `axisCompiler` is: the common
+    // paths (a resumed job, a stored `brief_json`, a gig that carried a fenced
+    // block) never reach it, and the Anthropic client wants a real key at
+    // construction time. Spend is booked through the logger — a funded job does
+    // have a D1 row, but this call precedes the checkpoint that would hold it
+    // and is not image-generation spend, so it is not charged against
+    // MAX_SPEND_USD (whose docstring in config.ts states exactly what that cap
+    // governs). At ~$0.0005 it is ~0.05% of the $1 anchor.
+    briefExtractor: overrides.briefExtractor ?? {
+      extract: (gig) =>
+        createProseBriefExtractor({
+          anthropic: new Anthropic({ apiKey: config.secrets.anthropicApiKey }),
+          recordSpend: (costUsd) =>
+            config.logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'prose brief extraction spend'),
+        }).extract(gig),
+    },
   };
 }
 
@@ -318,16 +351,32 @@ function resolveServices(config: PipelineConfig): PipelineServices {
  *
  * A stored `brief_json` is the brief as last validated — including any
  * correction the 15-min thread sweep applied post-funding — so it wins over the
- * gig description. It is re-validated through the SAME parser by re-fencing it,
- * so a corrected brief cannot bypass the intake rules (Latin script, required
- * fields). A stored brief that no longer validates falls back to the gig
- * description rather than failing the job outright — which also covers the
- * pathological case of a brand name containing a ``` fence.
+ * gig description, AND over prose extraction. It is re-validated through the
+ * SAME parser by re-fencing it, so a corrected brief cannot bypass the intake
+ * rules (Latin script, required fields). A stored brief that no longer
+ * validates falls back to the gig rather than failing the job outright — which
+ * also covers the pathological case of a brand name containing a ``` fence.
+ *
+ * THE ORDER IS THE SECURITY PROPERTY, not a preference:
+ *
+ *   1. stored `brief_json`  — re-fenced through `parseLogoBrief`
+ *   2. fenced block in the gig description — `parseLogoBrief`
+ *   3. prose extraction (Task 27) — candidate validated by `parseLogoBrief`
+ *
+ * Every rung ends at the same parser, so no rung is a relaxation of the one
+ * above it; the earlier ones are preferred because they are cheaper and
+ * unambiguous, not because they are trusted more. Extraction being LAST is
+ * also what makes a thread correction stick: a corrected brief is stored, so
+ * it wins at (1) and the model is never consulted about a brief the buyer has
+ * already restated. Without step 3 the pipeline rejected — after funding — the
+ * ~all real gigs that carry no fenced block, including the ones `maybePropose`
+ * had just bid on off the strength of the very same extraction.
  */
 async function resolveBrief(
   config: PipelineConfig,
   job: JobRow,
   contract: Pick<Contract, 'gigId'>,
+  extractor: ProseBriefExtractor,
 ): Promise<BriefResult<LogoBrief>> {
   if (job.briefJson) {
     const stored = parseLogoBrief(`\`\`\`json\n${job.briefJson}\n\`\`\``);
@@ -338,7 +387,7 @@ async function resolveBrief(
     );
   }
   const gig = await config.client.getGig(contract.gigId);
-  return parseLogoBrief(gig.description ?? '');
+  return resolveGigBrief(gig, extractor);
 }
 
 /** Everything buyer-supplied and free-text goes to the moderation vendor (FR-2). */
@@ -639,7 +688,7 @@ export async function runConceptStage(
   const contract = await client.getContract(contractId);
 
   // --- Step 2: re-validate the brief (FR-1) ---------------------------------
-  const briefResult = await resolveBrief(config, job, contract);
+  const briefResult = await resolveBrief(config, job, contract, services.briefExtractor);
   if (!briefResult.ok) {
     await jobs.recordGateAudit({
       jobKey,
@@ -650,10 +699,16 @@ export async function runConceptStage(
     });
     await client.sendMessage(
       contractId,
+      // A fenced block is no longer REQUIRED — plain prose is read too (Task
+      // 27) — so this must not keep telling the buyer to write JSON. What has
+      // not changed is what a brief must CONTAIN, and that is what to ask for.
       `LogoSmith cannot start: the logo brief in this gig did not validate — ${briefResult.reason}. ` +
-        'The brief must be a fenced JSON block carrying at least a Latin-script `brandName` and ' +
-        'an `industry`. Post a corrected brief in this thread and the job will re-run; nothing ' +
-        'has been generated and no work is being claimed.',
+        'LogoSmith needs two things it could not find here: the brand name to set, written ' +
+        'exactly as it should appear on the logo, and what the brand does. Plain prose is fine ' +
+        '(for example: "a logo for Harbor & Vine, a seaside inn"); a fenced JSON block with ' +
+        '`brandName` and `industry` also works and is read first. The brand name must be Latin ' +
+        'script — other scripts are outside this version. Post that in this thread and the job ' +
+        'will re-run; nothing has been generated and no work is being claimed.',
     );
     await jobs.markDelivered(jobKey, 'rejected');
     return { outcome: 'aborted' };
@@ -1140,6 +1195,7 @@ export async function runVectorStage(
     config,
     { ...job, briefJson: job.briefJson ?? stageOne?.briefJson ?? null },
     contract,
+    services.briefExtractor,
   );
   if (!briefResult.ok) {
     await jobs.recordGateAudit({

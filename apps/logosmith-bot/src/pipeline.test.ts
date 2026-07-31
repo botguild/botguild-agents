@@ -27,6 +27,8 @@ import {
   type SelectionStore,
 } from './jobs.js';
 import type { ModerationClient } from './moderation.js';
+import { parseLogoBrief, type BriefResult } from './brief.js';
+import type { ProseGig } from './proseBrief.js';
 import { renderSvgToPng } from './pack/render.js';
 import { ensureResvgReady } from './pack/wasm.js';
 import { nodeWasmSources } from './pack/wasm.node.js';
@@ -265,6 +267,8 @@ interface Harness {
   /** Every URL the pipeline handed to `fetchImpl`, in call order. */
   fetches: string[];
   axisCompilations: () => number;
+  /** Every gig handed to the prose-brief extractor, in call order. */
+  extractorCalls: ProseGig[];
 }
 
 interface SetupOptions {
@@ -276,6 +280,8 @@ interface SetupOptions {
   description?: string;
   /** Omitted ⇒ the REAL vectorizer, wired to the network-refusing fetchImpl. */
   vectorizer?: Vectorizer;
+  /** What the prose-brief extractor returns. Default: a refusal. */
+  extractedBrief?: BriefResult<LogoBrief>;
 }
 
 /**
@@ -338,6 +344,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
   };
 
   let axisCompilations = 0;
+  const extractorCalls: ProseGig[] = [];
 
   const deliveries: Delivery[] = [];
   const messages: string[] = [];
@@ -411,6 +418,19 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
       // Recraft-native short-circuit that failed to fire is a hard failure
       // rather than a silently-mocked pass.
       ...(options.vectorizer ? { vectorizer: options.vectorizer } : {}),
+      // ALWAYS wired, unlike `vectorizer` directly above — and the asymmetry is
+      // load-bearing. The real extractor builds an `@anthropic-ai/sdk` client,
+      // which issues its requests through the GLOBAL `fetch` and is therefore
+      // NOT stopped by the network-refusing `fetchImpl` above. Left undefined,
+      // every brief-resolution test would make a live HTTPS call and then pass
+      // off whatever error came back — green for a reason that has nothing to
+      // do with what it claims to test.
+      briefExtractor: {
+        async extract(gig: ProseGig): Promise<BriefResult<LogoBrief>> {
+          extractorCalls.push(gig);
+          return options.extractedBrief ?? { ok: false, reason: 'this gig names no brand' };
+        },
+      },
     },
   };
 
@@ -428,6 +448,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
     generated,
     fetches,
     axisCompilations: () => axisCompilations,
+    extractorCalls,
   };
 }
 
@@ -701,11 +722,14 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
   });
 
   it('rejects an unparseable brief before spending anything', async () => {
+    // No fenced block AND the extractor finds no brand (the harness default) —
+    // both rungs of `resolveBrief` have to miss for this to be a rejection.
     const h = await setup({ description: 'no fenced json here' });
     const result = await runConceptStage(h.config, message(h.jobKey));
 
     assert.deepEqual(result, { outcome: 'aborted' });
     assert.equal((await h.jobs.get(h.jobKey))?.outcome, 'rejected');
+    assert.equal(h.extractorCalls.length, 1, 'the prose fallback was tried before giving up');
     assert.equal(h.generated.length, 0);
     assert.equal(h.deliveries.length, 0);
     assert.match(h.messages[0]!, /did not validate/);
@@ -723,6 +747,161 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
     assert.match(h.messages[0]!, /cannot cancel or refund a contract itself/);
     assert.match(h.messages[0]!, /please cancel this contract from your side/);
     assert.equal((await h.jobs.get(h.jobKey))?.outcome, 'aborted');
+  });
+});
+
+describe('runConceptStage — brief resolution inside the funded pipeline (Task 27)', () => {
+  // Measured live: 0 of 78 open gigs carried a fenced block. Before this, the
+  // pipeline rejected — AFTER funding — the very gigs `maybePropose` had just
+  // bid on off the strength of the same extraction.
+  const PROSE = 'We need a logo for Harbor & Vine, our new seaside inn. Warm, understated.';
+  assert.equal(parseLogoBrief(PROSE).ok, false, 'precondition: the prose carries no fenced brief');
+
+  const STORED: LogoBrief = { brandName: 'Corrected Name', industry: 'corrected industry' };
+  const EXTRACTED: LogoBrief = { brandName: 'Extracted Name', industry: 'extracted industry' };
+
+  /** A moderation double that records every text it screened. */
+  function recordingModeration(): { client: ModerationClient; screened: string[] } {
+    const screened: string[] = [];
+    return {
+      screened,
+      client: {
+        async screen(text: string) {
+          screened.push(text);
+          return { status: 'clear' as const, verdict: CLEAR_VERDICT };
+        },
+      },
+    };
+  }
+
+  it('runs a prose gig to delivery instead of rejecting it after funding', async () => {
+    const h = await setup({ description: PROSE, extractedBrief: { ok: true, brief: BRIEF } });
+    const result = await runConceptStage(h.config, message(h.jobKey));
+
+    assert.deepEqual(result, { outcome: 'delivered' });
+    assert.equal(h.extractorCalls.length, 1);
+    assert.equal(h.deliveries.length, 1);
+    assert.equal(
+      (await h.jobs.get(h.jobKey))?.briefJson,
+      JSON.stringify(BRIEF),
+      'the extracted brief becomes the stored brief of record',
+    );
+  });
+
+  it('hands the extractor the whole gig, not just its description', async () => {
+    const h = await setup({ description: PROSE, extractedBrief: { ok: true, brief: BRIEF } });
+    await runConceptStage(h.config, message(h.jobKey));
+
+    assert.equal(h.extractorCalls.length, 1);
+    assert.equal(h.extractorCalls[0]!.description, PROSE);
+  });
+
+  it('never pays for extraction when the gig carries a fenced brief', async () => {
+    // The harness default description IS a fenced block.
+    assert.equal(parseLogoBrief(GIG_DESCRIPTION).ok, true, 'precondition: fenced path resolves');
+    const h = await setup({});
+    await runConceptStage(h.config, message(h.jobKey));
+
+    assert.deepEqual(h.extractorCalls, [], 'rung 2 resolved; rung 3 must never run');
+  });
+
+  it('lets a stored brief_json beat a fresh extraction', async () => {
+    const moderation = recordingModeration();
+    const h = await setup({
+      description: PROSE,
+      moderation: moderation.client,
+      extractedBrief: { ok: true, brief: EXTRACTED },
+    });
+    // The thread sweep's correction, as it lands in D1.
+    await h.jobs.setInProgress(h.jobKey, {
+      kind: 'logo',
+      gigId: 'gig-1',
+      payerId: 'payer-1',
+      briefJson: JSON.stringify(STORED),
+    });
+
+    const result = await runConceptStage(h.config, message(h.jobKey));
+
+    assert.deepEqual(result, { outcome: 'delivered' });
+    assert.deepEqual(
+      h.extractorCalls,
+      [],
+      'the buyer already restated the brief; never ask a model about it',
+    );
+    assert.ok(
+      moderation.screened[0]!.includes(STORED.brandName),
+      'the stored correction is the brief that was actually used',
+    );
+    assert.ok(!moderation.screened[0]!.includes(EXTRACTED.brandName));
+  });
+
+  it('re-validates a stored brief_json through the same parser rather than trusting it', async () => {
+    // A stored brief that would NOT survive intake. It must not ride through on
+    // the strength of being stored — the re-fence puts it back through
+    // `parseLogoBrief`, it fails the v1 Latin-script rule, and resolution falls
+    // on to the gig. This is the property that stops a thread "correction" from
+    // being a bypass.
+    const smuggled: LogoBrief = { brandName: '海港与藤', industry: 'inn' };
+    assert.equal(
+      parseLogoBrief('```json\n' + JSON.stringify(smuggled) + '\n```').ok,
+      false,
+      'precondition: this brief cannot pass intake',
+    );
+
+    const moderation = recordingModeration();
+    const h = await setup({
+      description: PROSE,
+      moderation: moderation.client,
+      extractedBrief: { ok: true, brief: EXTRACTED },
+    });
+    await h.jobs.setInProgress(h.jobKey, {
+      kind: 'logo',
+      gigId: 'gig-1',
+      payerId: 'payer-1',
+      briefJson: JSON.stringify(smuggled),
+    });
+
+    const result = await runConceptStage(h.config, message(h.jobKey));
+
+    assert.deepEqual(result, { outcome: 'delivered' });
+    assert.equal(h.extractorCalls.length, 1, 'the invalid stored brief did not win');
+    assert.ok(
+      moderation.screened[0]!.includes(EXTRACTED.brandName),
+      'resolution fell through to the gig',
+    );
+    assert.ok(!moderation.screened[0]!.includes(smuggled.brandName), 'the smuggled name is gone');
+  });
+
+  it('re-screens the resolved brief through moderation whichever rung produced it', async () => {
+    const moderation = recordingModeration();
+    const h = await setup({
+      description: PROSE,
+      moderation: moderation.client,
+      extractedBrief: { ok: true, brief: EXTRACTED },
+    });
+    await runConceptStage(h.config, message(h.jobKey));
+
+    assert.equal(moderation.screened.length, 1, 'moderation ran');
+    assert.ok(
+      moderation.screened[0]!.includes(EXTRACTED.brandName),
+      'an extracted brand is buyer-supplied free text and is screened like any other',
+    );
+    assert.ok(moderation.screened[0]!.includes(EXTRACTED.industry));
+  });
+
+  it('tells the buyer what a brief needs without demanding JSON of them', async () => {
+    const h = await setup({ description: PROSE });
+    await runConceptStage(h.config, message(h.jobKey));
+
+    const note = h.messages[0]!;
+    assert.doesNotMatch(
+      note,
+      /brief must be a fenced JSON block/,
+      'prose is accepted now; do not ask the buyer for something we no longer require',
+    );
+    assert.match(note, /Plain prose is fine/);
+    assert.match(note, /brand name/i);
+    assert.match(note, /Latin/);
   });
 });
 
