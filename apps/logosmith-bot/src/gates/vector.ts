@@ -6,11 +6,20 @@
 //   zero <image>           — an SVG wrapping a raster is the exact fraud the
 //                            buyer fears; it fails, full stop
 //   zero raster hrefs      — data:image/... or .png/.jpg refs anywhere
+//   zero external refs     — url()/href/xlink:href to an outside origin, in
+//                            ANY form: a raw <use>/gradient href, CSS
+//                            `style="...url(https://...)"`, or one that only
+//                            existed as a <style> block before an optimizer
+//                            inlined it onto an allowed element and deleted
+//                            the tag. A same-document `#id` fragment is not
+//                            an external reference and is unaffected.
 //   no <text>              — outlined paths only, which also guarantees the
 //                            renderer never needs to load a font
 //   no <foreignObject>     — arbitrary HTML inside an SVG
 //   no <script>/on* attrs  — stripped defensively by sanitizeSvg first
-//   viewBox present        — without it the mark does not scale predictably
+//   viewBox present AND    — presence alone is not enough: "bogus" parses as
+//   parseable as 4 numbers   zero errors and ships a mark that silently
+//                            mis-scales, so the value itself is validated.
 //
 // Workers has no DOM, and a full XML parser is bundle weight the §13 size
 // budget cannot spare, so this is a conservative tag/attribute scan: anything
@@ -40,6 +49,33 @@ const SHAPE_TAGS = ['circle', 'ellipse', 'rect', 'line', 'polyline', 'polygon'];
 const RASTER_REF_RE = /(?:data:image\/|\.(?:png|jpe?g|gif|webp|bmp|avif)\b)/i;
 const EVENT_ATTR_RE = /\son[a-z]+\s*=/i;
 const JAVASCRIPT_HREF_RE = /\shref\s*=\s*["']?\s*javascript:/i;
+
+// Any reference to an external origin, in either form it can arrive:
+//   - `href="https://..."` / `href='//...'` — the `\b` before `href` matches
+//     equally well when it's actually `xlink:href`, because a word boundary
+//     sits between the `:` and the `h` exactly as it does before a bare
+//     `href`; no separate `xlink:` alternative is needed.
+//   - `url(https://...)` / `url(//...)` — the CSS functional form, reachable
+//     via any `style="..."` attribute on any allowed element, not only from
+//     inside a `<style>` block.
+// A same-document fragment (`href="#id"`, `url(#id)`) never matches: once the
+// optional `(?:https?:)?` scheme is consumed (or skipped), the mandatory
+// `\/\/` still has to follow, and `#id` does not start with `//`.
+const EXTERNAL_REF_RE = /\bhref\s*=\s*["']?\s*(?:https?:)?\/\/|url\(\s*["']?\s*(?:https?:)?\/\//i;
+
+// viewBox's VALUE, not just its presence — "bogus" or "1 2 3" (three, not
+// four, numbers) must not satisfy the gate. SVG allows either whitespace or
+// commas (or both) between the four numbers.
+const VIEWBOX_ATTR_RE = /\sviewBox\s*=\s*(["'])([^"']*)\1/; // case-sensitive, matches XML's own rule
+const VIEWBOX_NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)$/;
+
+function isValidViewBox(value: string): boolean {
+  const tokens = value
+    .trim()
+    .split(/[\s,]+/)
+    .filter((token) => token.length > 0);
+  return tokens.length === 4 && tokens.every((token) => VIEWBOX_NUMBER_RE.test(token));
+}
 
 // Allowlist of all recognized vector primitives and metadata elements
 const VECTOR_ALLOWLIST = new Set([
@@ -96,6 +132,7 @@ export function sanitizeSvg(svg: string): string {
 
 /** Assert the SVG contains only vector primitives (FR-10). */
 export function checkTrueVector(svg: string): VectorGateResult {
+  const viewBoxMatch = svg.match(VIEWBOX_ATTR_RE);
   const census: NodeCensus = {
     path: countTag(svg, 'path'),
     shape: SHAPE_TAGS.reduce((sum, tag) => sum + countTag(svg, tag), 0),
@@ -103,7 +140,7 @@ export function checkTrueVector(svg: string): VectorGateResult {
     text: countTag(svg, 'text') + countTag(svg, 'tspan'),
     foreignObject: countTag(svg, 'foreignObject'),
     script: countTag(svg, 'script'),
-    hasViewBox: /\sviewBox\s*=/.test(svg), // case-sensitive: XML attribute names are case-sensitive
+    hasViewBox: viewBoxMatch !== null && isValidViewBox(viewBoxMatch[2]),
   };
 
   const violations: string[] = [];
@@ -116,10 +153,17 @@ export function checkTrueVector(svg: string): VectorGateResult {
   if (EVENT_ATTR_RE.test(svg)) violations.push('contains an on* event attribute');
   if (JAVASCRIPT_HREF_RE.test(svg)) violations.push('contains a javascript: href');
   if (RASTER_REF_RE.test(svg)) violations.push('contains a raster reference (data: or image file)');
+  if (EXTERNAL_REF_RE.test(svg)) {
+    violations.push('contains an external reference (url()/href to an outside origin)');
+  }
 
   // Allowlist check: every opening tag must be in the vector allowlist.
-  // This catches namespace-prefixed dangerous elements and any unrecognized tags.
-  // Deliberately excludes <style> (can smuggle url(data:...)) and <a> (facilitates javascript: bypass).
+  // This catches namespace-prefixed dangerous elements and any unrecognized
+  // tags. Deliberately excludes <style> (CSS can smuggle url(...) — an
+  // optimizer inlining a <style> rule onto an allowed element's own
+  // `style="..."` attribute does NOT defeat this protection, because
+  // EXTERNAL_REF_RE above scans the whole document for that exact pattern,
+  // not just <style> blocks) and <a> (facilitates javascript: bypass).
   // Regex captures optional namespace prefix: <(prefix:)?localName
   const tagMatches = svg.matchAll(/<([\w.-]+(?::[\w.-]+)?)(?=[\s/>])/g);
   for (const match of tagMatches) {
@@ -133,7 +177,7 @@ export function checkTrueVector(svg: string): VectorGateResult {
     }
   }
 
-  if (!census.hasViewBox) violations.push('missing viewBox');
+  if (!census.hasViewBox) violations.push('missing or invalid viewBox');
   if (census.path + census.shape === 0) violations.push('contains no vector primitives at all');
 
   return { pass: violations.length === 0, violations, census };

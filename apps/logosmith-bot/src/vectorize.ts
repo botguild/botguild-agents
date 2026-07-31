@@ -65,8 +65,23 @@ const errorMessage = (err: unknown): string => (err instanceof Error ? err.messa
  *  - `removeScripts` is NOT in preset-default — svgo leaves `<script>`
  *    completely untouched (verified with a probe input). `sanitizeSvg` below
  *    is what actually removes it.
+ *  - `inlineStyles` IS in preset-default and is explicitly turned OFF here.
+ *    Left on, it rewrites `<style>.a{fill:url(https://evil/x.svg)}</style>`
+ *    into an inline `style="fill:url(https://evil/x.svg)"` on whatever
+ *    element used `class="a"` and DELETES the `<style>` tag — laundering the
+ *    exact thing `checkTrueVector`'s allowlist excludes `<style>` to catch,
+ *    by moving it onto an element the allowlist already permits. This is
+ *    defense in depth, not the actual fix: vendor markup can carry the
+ *    inline `style="...url(...)"` form directly, with no `<style>` tag ever
+ *    in the picture, so `checkTrueVector`'s own `EXTERNAL_REF_RE` check
+ *    (gates/vector.ts) is what closes this for real — this override just
+ *    keeps the `<style>` exclusion meaning what its comment says for the one
+ *    path that can still produce a `<style>` tag.
  */
-const SVGO_CONFIG: Config = { multipass: true, plugins: ['preset-default'] };
+const SVGO_CONFIG: Config = {
+  multipass: true,
+  plugins: [{ name: 'preset-default', params: { overrides: { inlineStyles: false } } }],
+};
 
 /**
  * Shared post-processing for both paths: SVGO, then `sanitizeSvg`, then
@@ -138,11 +153,30 @@ export function createVectorizer(deps: {
       );
       body.append('output.file_format', 'svg');
 
+      // Computed OUTSIDE the network try/catch on purpose: btoa() throws
+      // `InvalidCharacterError` for any character outside Latin1, and that is
+      // a structural defect in the credential value itself, not a transient
+      // network condition — the identical throw happens on every single
+      // retry. Folding it into the same catch as the fetch call below would
+      // misclassify it `retryable: true` and cost this exact token the same
+      // park-forever pathology the whole retryable/non-retryable split in
+      // this module exists to avoid (see the header comment).
+      let authHeader: string;
+      try {
+        authHeader = `Basic ${btoa(deps.vectorizerToken)}`;
+      } catch (err) {
+        return {
+          ok: false,
+          retryable: false,
+          error: `vectorizerToken is not a valid Basic-auth credential: ${errorMessage(err)}`,
+        };
+      }
+
       let response: Response;
       try {
         response = await deps.fetchImpl(VECTORIZER_URL, {
           method: 'POST',
-          headers: { Authorization: `Basic ${btoa(deps.vectorizerToken)}` },
+          headers: { Authorization: authHeader },
           body,
         });
       } catch (err) {

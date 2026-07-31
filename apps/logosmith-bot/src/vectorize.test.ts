@@ -227,4 +227,76 @@ describe('createVectorizer — Vectorizer.ai path', () => {
     const result = await vectorizer.toVector({ png: PNG });
     assert.ok(!result.ok && result.retryable);
   });
+
+  it('classifies a non-Latin1 vectorizerToken as non-retryable, not a network failure', async () => {
+    // btoa() throws for any character outside Latin1 (verified: an accented
+    // "é" does not throw, an emoji does) — that is a structural defect in the
+    // credential itself, not a transient condition, so by this module's own
+    // stated rationale it must not park-forever like a real outage would.
+    // fetchImpl throwing if reached proves the header is built (and fails)
+    // BEFORE any network call, not after a failed one.
+    const vectorizer = createVectorizer({
+      fetchImpl: async () => {
+        throw new Error('fetchImpl must not be called — the auth header could not be built');
+      },
+      vectorizerToken: 'bad-token-\u{1F600}',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(!result.ok);
+    assert.equal(result.retryable, false);
+  });
+});
+
+describe('createVectorizer — external references (critical, see gates/vector.ts)', () => {
+  // The exact reproduction from review: a <style> rule smuggling an external
+  // url() via a class selector.
+  const styleSmuggling =
+    '<svg viewBox="0 0 10 10"><style>.a{fill:url(https://evil.example.com/track.svg)}</style>' +
+    '<path class="a" d="M0 0 L1 1"/></svg>';
+  // The shape SVGO's inlineStyles plugin would have produced from the above
+  // had `inlineStyles: false` not been set — and, independently, a shape
+  // vendor markup could arrive in NATIVELY with no <style> tag ever
+  // involved. Proves EXTERNAL_REF_RE — not just the SVGO override — is what
+  // closes this end to end.
+  const alreadyLaundered =
+    '<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" ' +
+    'style="fill:url(https://evil.example.com/track.svg)"/></svg>';
+
+  it('rejects a native SVG carrying a <style> block that smuggles an external url()', async () => {
+    const vectorizer = createVectorizer({ fetchImpl: unreachableFetch, vectorizerToken: 't' });
+    const result = await vectorizer.toVector({ png: PNG, nativeSvg: styleSmuggling });
+    assert.ok(!result.ok);
+    assert.equal(result.retryable, false);
+    assert.match(result.error, /external reference|non-vector element/i);
+  });
+
+  it('rejects a native SVG whose external url() already lives inline, with no <style> tag at all', async () => {
+    const vectorizer = createVectorizer({ fetchImpl: unreachableFetch, vectorizerToken: 't' });
+    const result = await vectorizer.toVector({ png: PNG, nativeSvg: alreadyLaundered });
+    assert.ok(!result.ok);
+    assert.equal(result.retryable, false);
+    assert.match(result.error, /external reference/i);
+  });
+
+  it('rejects a vectorizer.ai response carrying the style-smuggling <style> block', async () => {
+    const vectorizer = createVectorizer({
+      fetchImpl: async () => new Response(styleSmuggling, { status: 200 }),
+      vectorizerToken: 't',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(!result.ok);
+    assert.equal(result.retryable, false);
+    assert.match(result.error, /external reference|non-vector element/i);
+  });
+
+  it('rejects a vectorizer.ai response whose external url() already lives inline', async () => {
+    const vectorizer = createVectorizer({
+      fetchImpl: async () => new Response(alreadyLaundered, { status: 200 }),
+      vectorizerToken: 't',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(!result.ok);
+    assert.equal(result.retryable, false);
+    assert.match(result.error, /external reference/i);
+  });
 });

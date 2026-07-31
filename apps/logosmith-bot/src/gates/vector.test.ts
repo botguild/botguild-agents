@@ -262,3 +262,99 @@ describe('namespace-prefix bypass regression tests (critical)', () => {
     );
   });
 });
+
+describe('external-reference regression tests (critical — SVGO inlineStyles laundering)', () => {
+  it('CRITICAL: rejects a <style> rule smuggling an external url(), before any optimizer runs', () => {
+    // The exact reproduction: a CSS rule referencing an outside origin,
+    // applied via a class selector rather than a direct attribute.
+    const probe =
+      '<svg viewBox="0 0 10 10"><style>.a{fill:url(https://evil.example.com/track.svg)}</style>' +
+      '<path class="a" d="M0 0 L1 1"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, '<style> is not in the allowlist, so the raw gate rejects it');
+  });
+
+  it('CRITICAL: rejects the LAUNDERED form — url() inlined onto an allowed element, <style> gone', () => {
+    // This is what SVGO's inlineStyles plugin (part of preset-default)
+    // produces from the probe above: the <style> tag is deleted, the rule
+    // becomes an inline `style=` attribute on the <path> it targeted. The
+    // <style> exclusion in the allowlist can no longer catch this — it never
+    // sees a <style> tag. This is what EXTERNAL_REF_RE exists to catch, and
+    // it must also catch vendor markup that arrives in this shape NATIVELY,
+    // with no <style> tag ever involved at any point.
+    const laundered =
+      '<svg viewBox="0 0 10 10"><path d="m0 0 1 1" ' +
+      'style="fill:url(https://evil.example.com/track.svg)"/></svg>';
+    const result = checkTrueVector(laundered);
+    assert.equal(result.pass, false, 'laundered inline style= must still be rejected');
+    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+  });
+
+  it('CRITICAL: rejects <use href="..."> pointing at an external document', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><defs><path id="p" d="M0 0 L1 1"/></defs>' +
+      '<use href="https://evil.example.com/other.svg#x"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+  });
+
+  it('CRITICAL: rejects an external xlink:href on a gradient', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><defs>' +
+      '<linearGradient id="g1" xlink:href="https://evil.example.com/other.svg#grad"/>' +
+      '</defs><path d="M0 0 L1 1" fill="url(#g1)"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+  });
+
+  it('rejects a protocol-relative external reference with no explicit scheme', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<path d="M0 0 L1 1" style="fill:url(//evil.example.com/x.svg)"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+  });
+
+  it('positive guard: same-document fragment references are NOT external and still pass', () => {
+    // url(#id), href="#id" — the ordinary, extremely common way an SVG
+    // references its OWN <defs>. Must not be swept up by the new check.
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="g1"><stop offset="0%"/></linearGradient>' +
+      '</defs><use href="#g1"/><path d="M0 0 L1 1" style="fill:url(#g1)"/></svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `internal fragment refs must not be flagged; got: ${result.violations.join(', ')}`,
+    );
+  });
+});
+
+describe('viewBox value validation (critical — presence alone was not enough)', () => {
+  it('CRITICAL: rejects viewBox="bogus" even though the attribute is present', () => {
+    const result = checkTrueVector('<svg viewBox="bogus"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+    assert.equal(result.census.hasViewBox, false);
+  });
+
+  it('rejects a viewBox with the wrong number of components', () => {
+    const result = checkTrueVector('<svg viewBox="0 0 10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+  });
+
+  it('accepts a comma-separated viewBox', () => {
+    const result = checkTrueVector('<svg viewBox="0,0,10,10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.census.hasViewBox, true);
+  });
+
+  it('accepts negative and decimal viewBox components', () => {
+    const result = checkTrueVector('<svg viewBox="-5 -5.5 10.25 10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.census.hasViewBox, true);
+  });
+});
