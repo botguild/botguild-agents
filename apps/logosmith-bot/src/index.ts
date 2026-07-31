@@ -73,6 +73,7 @@ import type { Hono } from 'hono';
 //    bundle) — reverified here by `wrangler deploy --dry-run` (see the task
 //    report for the resulting bundle numbers).
 import { botProfile, fallbackEstimate, pricingCalc, rateCard } from './config.js';
+import { createDisputeResponder, type DisputeResponder } from './disputes.js';
 import {
   buildJobKey,
   createConceptStore,
@@ -190,6 +191,63 @@ export interface MilestoneFundedDeps {
    *  in a recorder without a Workers `Queue` binding. */
   queue: JobQueueLike;
   logger: Logger;
+}
+
+export interface DisputeHandlerDeps {
+  disputes: DisputeResponder;
+  logger: Logger;
+}
+
+/**
+ * The two dispute-flow webhooks (§10.9), as a factory for the same reason
+ * `createMilestoneFundedHandler` is one: the ROUTING decision is the part that
+ * can silently be wrong. A handler that answered every status change would file
+ * a counter-statement on a completed contract; one that answered none would
+ * leave the platform's dispute unanswered, and neither is visible from inside
+ * `disputes.respond`.
+ *
+ * Both log first and act second, so the log-only behaviour every other status
+ * change had is unchanged. A payload without a contract id is logged and
+ * dropped rather than guessed at.
+ *
+ * A `respond` failure is allowed to THROW: the webhook app answers 500 and the
+ * platform redelivers, which is the only automatic retry a dispute response
+ * gets (`respond` releases its one-shot claim on failure precisely so that
+ * redelivery can succeed). Swallowing it here would convert one transient MCP
+ * error into a permanently unanswered dispute.
+ */
+export function createDisputeHandlers(deps: DisputeHandlerDeps): {
+  onContractStatusChanged: WebhookHandler;
+  onDisputeResponseSubmitted: WebhookHandler;
+} {
+  const { disputes, logger } = deps;
+  return {
+    onContractStatusChanged: async (event) => {
+      const { contractId, newStatus } = event.payload as {
+        contractId?: string;
+        newStatus?: string;
+      };
+      logger.info(
+        { eventType: 'contract.status.changed', payload: event.payload },
+        'lifecycle event received',
+      );
+      if (newStatus !== 'disputed' || !contractId) return;
+      await disputes.respond(contractId);
+    },
+
+    // Unconditional: this fires when a response is filed on the contract —
+    // including ours. The one-shot D1 claim is what makes answering our own
+    // event a no-op, so this handler does not have to guess whose it was.
+    onDisputeResponseSubmitted: async (event) => {
+      const { contractId } = event.payload as { contractId?: string };
+      logger.info(
+        { eventType: 'dispute.response_submitted', payload: event.payload },
+        'lifecycle event received',
+      );
+      if (!contractId) return;
+      await disputes.respond(contractId);
+    },
+  };
 }
 
 /**
@@ -372,7 +430,17 @@ function getServices(env: Env): Services {
     logger,
   };
 
-  const app = buildApp(env, { logger, client, secretStore, jobs, concepts, selection, botId });
+  const app = buildApp(env, {
+    logger,
+    client,
+    mcpClient,
+    secretStore,
+    jobs,
+    concepts,
+    selection,
+    publicBaseUrl,
+    botId,
+  });
   services = {
     logger,
     client,
@@ -396,14 +464,17 @@ function buildApp(
   deps: {
     logger: Logger;
     client: AgentClient;
+    mcpClient: AgentMcpClient;
     secretStore: D1WebhookSecretStore;
     jobs: JobStore;
     concepts: ConceptStore;
     selection: SelectionStore;
+    publicBaseUrl: string;
     botId: string;
   },
 ): Hono {
-  const { logger, client, secretStore, jobs, concepts, selection, botId } = deps;
+  const { logger, client, mcpClient, secretStore, jobs, concepts, selection, botId } = deps;
+  const { publicBaseUrl } = deps;
 
   const onMilestoneFunded = createMilestoneFundedHandler({
     client,
@@ -454,6 +525,22 @@ function buildApp(
       logger.info({ eventType, payload: event.payload }, 'lifecycle event received');
     };
 
+  // §10.9: a disputed contract is answered from the D1 records this bot wrote
+  // while the work ran — the readback verdict snapshots, the per-image vendor
+  // request ids, the winner and how it was chosen, and the gate audit trail.
+  const { onContractStatusChanged, onDisputeResponseSubmitted } = createDisputeHandlers({
+    disputes: createDisputeResponder({
+      db: env.DB,
+      jobs,
+      concepts,
+      selection,
+      mcp: mcpClient,
+      publicBaseUrl,
+      logger,
+    }),
+    logger,
+  });
+
   const ownership = { client, botId, logger };
   const app = createWorkersWebhookApp({
     // Resolved from D1 on every delivery by design: the platform issues the
@@ -470,8 +557,8 @@ function buildApp(
       'milestone.accepted': withOwnershipFilter(onMilestoneAccepted, ownership),
       'milestone.delivered': logOnly('milestone.delivered'),
       'acceptance.auto_approved': withOwnershipFilter(onAutoApproved, ownership),
-      'contract.status.changed': logOnly('contract.status.changed'),
-      'dispute.response_submitted': logOnly('dispute.response_submitted'),
+      'contract.status.changed': withOwnershipFilter(onContractStatusChanged, ownership),
+      'dispute.response_submitted': withOwnershipFilter(onDisputeResponseSubmitted, ownership),
     },
     healthExtra: async () => {
       const reputation = await loadReputationSnapshot(env.DB).catch(() => null);

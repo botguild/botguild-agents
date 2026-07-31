@@ -471,11 +471,24 @@ the way the original Fly.io-hosted bots in this monorepo do — it is a
 Cloudflare Worker, and Cloudflare's own Logs/`wrangler tail` are the
 mechanism here.
 
-## Known gap: disputes
+## Disputes
 
-`contract.status.changed` and `dispute.response_submitted` are currently
-wired as log-only handlers in `src/index.ts` — a dispute does not yet get an
-automated MCP response carrying the D1 gate-audit evidence. Everything that
-response would need (verdict snapshots, vendor request ids, the full
-gate-audit trail) already exists in D1; wiring it is tracked as a follow-up
-task, not something this document can make true by describing it.
+`contract.status.changed → disputed` and `dispute.response_submitted` route
+through `src/disputes.ts`, which assembles the counter-statement from this
+bot's own D1 records and files it with the platform's `respond_to_dispute`
+MCP tool: the stored lettering-readback verdicts and per-image vendor request
+ids from `concepts`, the winner and how it was chosen from `selection`, the
+per-stage claims and spend from `jobs`, and the full `gate_audit` trail
+merged across every stage key in insert order. Nothing is recomputed at
+dispute time — a verdict is quoted as the gate wrote it, not re-derived from
+today's thresholds — and anything that could not be sourced is named in the
+document's `evidenceGaps`, following the same rule `report.ts` follows for
+the delivered validation report: in an evidence document "0" and "unknown"
+are never the same value.
+
+The response fires **exactly once per contract**: it is claimed with a
+unique-constraint `INSERT` into `dispute_responses` before the MCP call, so
+concurrent webhook redeliveries collapse to one counter-statement (including
+the `dispute.response_submitted` event our own filing triggers). A failed
+post releases the claim and lets the handler throw, so the platform's
+redelivery is a real retry rather than permanent silence.
