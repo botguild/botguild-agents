@@ -16,8 +16,10 @@ import {
 } from './config.js';
 import {
   MAX_SOURCE_BYTES,
+  MAX_SOURCE_PIXELS,
   checkFreeGigQuota,
   fetchSourceLogo,
+  readJpegDimensions,
   type SourceLogoResult,
 } from './freeGigs.js';
 import type { GenerateResult, Generator } from './generate.js';
@@ -41,6 +43,7 @@ import {
   runSingleStage,
   type DeliverableStore,
   type PipelineConfig,
+  type PipelineServices,
 } from './pipeline.js';
 import { applyMigrations } from './testSupport.js';
 import type { FetchLike, JobMessage, StyleAxis } from './types.js';
@@ -100,6 +103,17 @@ async function quotaStore(now: () => Date = () => new Date()): Promise<{
   return { quota: createQuotaStore(db, now), db };
 }
 
+/** Seed N used allowances for a payer through the real atomic path. */
+async function seedUsage(quota: QuotaStore, payerId: string, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const granted = await quota.consume(payerId, 'favicon', `${payerId}-seed-${i}`, {
+      windowDays: FREE_GIG_WINDOW_DAYS,
+      maxPerPayer: FREE_GIGS_PER_PAYER,
+    });
+    assert.ok(granted, `seeding allowance ${i} for ${payerId} must succeed`);
+  }
+}
+
 describe('checkFreeGigQuota', () => {
   it('allows a payer with no history and counts down the remaining allowance', async () => {
     const { quota } = await quotaStore();
@@ -109,7 +123,7 @@ describe('checkFreeGigQuota', () => {
       remaining: FREE_GIGS_PER_PAYER,
     });
 
-    await quota.record('payer-1', 'favicon', 'contract-a');
+    await seedUsage(quota, 'payer-1', 1);
     assert.deepEqual(await checkFreeGigQuota(quota, 'payer-1'), {
       allowed: true,
       used: 1,
@@ -119,9 +133,7 @@ describe('checkFreeGigQuota', () => {
 
   it('refuses a payer at the cap with an actionable message, and again on the attempt after', async () => {
     const { quota } = await quotaStore();
-    for (let i = 0; i < FREE_GIGS_PER_PAYER; i++) {
-      await quota.record('payer-1', 'taster', `contract-${i}`);
-    }
+    await seedUsage(quota, 'payer-1', FREE_GIGS_PER_PAYER);
     // Precondition: the store really holds the cap, so a refusal below cannot
     // be an artefact of a store that recorded nothing.
     assert.equal(await quota.countRecent('payer-1', FREE_GIG_WINDOW_DAYS), FREE_GIGS_PER_PAYER);
@@ -146,9 +158,7 @@ describe('checkFreeGigQuota', () => {
   it('does not count usage older than the rolling window', async () => {
     const clock = { at: new Date('2026-01-01T00:00:00.000Z') };
     const { quota } = await quotaStore(() => clock.at);
-    for (let i = 0; i < FREE_GIGS_PER_PAYER; i++) {
-      await quota.record('payer-1', 'favicon', `contract-${i}`);
-    }
+    await seedUsage(quota, 'payer-1', FREE_GIGS_PER_PAYER);
     assert.equal((await checkFreeGigQuota(quota, 'payer-1')).allowed, false);
 
     // One second past the window: every row has aged out.
@@ -168,9 +178,7 @@ describe('checkFreeGigQuota', () => {
 
   it('counts each payer separately', async () => {
     const { quota } = await quotaStore();
-    for (let i = 0; i < FREE_GIGS_PER_PAYER; i++) {
-      await quota.record('payer-1', 'favicon', `contract-${i}`);
-    }
+    await seedUsage(quota, 'payer-1', FREE_GIGS_PER_PAYER);
     assert.equal((await checkFreeGigQuota(quota, 'payer-1')).allowed, false);
     assert.equal((await checkFreeGigQuota(quota, 'payer-2')).allowed, true);
   });
@@ -191,6 +199,152 @@ const reason = (result: SourceLogoResult): string => {
   assert.equal(result.ok, false, 'expected a refusal');
   return result.ok ? '' : result.reason;
 };
+
+/**
+ * A PNG whose IHDR declares `width x height` — the decompression-bomb fixture.
+ *
+ * Built by hand rather than rendered, precisely BECAUSE rendering an
+ * 8000x8000 image is the thing under test: a real one costs ~490 MiB to
+ * produce, which is the attack. A decoder's allocation comes from the IHDR, so
+ * these bytes are exactly as dangerous to a decode-first implementation as a
+ * complete file would be, and cost 40 bytes to carry.
+ */
+function pngDeclaring(width: number, height: number): Uint8Array {
+  const out = new Uint8Array(8 + 4 + 4 + 13 + 8);
+  out.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  const view = new DataView(out.buffer);
+  view.setUint32(8, 13); // IHDR payload length
+  out.set([0x49, 0x48, 0x44, 0x52], 12); // "IHDR"
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  out[24] = 8; // bit depth
+  out[25] = 6; // colour type: RGBA
+  return out;
+}
+
+/** A JPEG whose SOF0 frame header declares `width x height`, behind a JFIF
+ *  APP0 segment — so the fixture exercises the segment walk, not just an
+ *  SOF that happens to sit at a fixed offset. */
+function jpegDeclaring(width: number, height: number, marker = 0xc0): Uint8Array {
+  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+  const sof = [
+    0xff,
+    marker,
+    0x00,
+    0x11, // length 17
+    0x08, // 8-bit precision
+    (height >> 8) & 0xff,
+    height & 0xff,
+    (width >> 8) & 0xff,
+    width & 0xff,
+    0x03, // 3 components
+    ...[1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1],
+  ];
+  return new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xd9]);
+}
+
+describe('readJpegDimensions', () => {
+  it('walks the segment table to the frame header', () => {
+    assert.deepEqual(readJpegDimensions(jpegDeclaring(512, 256)), { width: 512, height: 256 });
+    assert.deepEqual(readJpegDimensions(jpegDeclaring(8000, 8000)), { width: 8000, height: 8000 });
+  });
+
+  it('reads a progressive frame header too, not only baseline', () => {
+    // 0xC2 is the marker a photo saved "for web" actually carries; a parser
+    // that only knew 0xC0 would silently return null for half of real JPEGs.
+    assert.deepEqual(readJpegDimensions(jpegDeclaring(640, 480, 0xc2)), {
+      width: 640,
+      height: 480,
+    });
+  });
+
+  it('reads a real encoder’s output', async () => {
+    // Cross-checks the hand-built fixtures above against a genuine JPEG whose
+    // dimensions are known independently (it is a re-encode of the 512 px PNG).
+    const photon = await import('@cf-wasm/photon');
+    const image = photon.PhotonImage.new_from_byteslice(fixtures['png512']!);
+    const jpeg = new Uint8Array(image.get_bytes_jpeg(85));
+    image.free();
+    assert.deepEqual(readJpegDimensions(jpeg), { width: 512, height: 512 });
+  });
+
+  it('returns null rather than guessing when the header cannot be walked', () => {
+    assert.equal(readJpegDimensions(new Uint8Array([0xff, 0xd8])), null, 'SOI with no frame');
+    assert.equal(readJpegDimensions(fixtures['png512']!), null, 'a PNG is not a JPEG');
+    assert.equal(readJpegDimensions(new Uint8Array(0)), null);
+    // A truncated segment must not be walked past the end of the buffer.
+    assert.equal(readJpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11])), null);
+    // 0xC4 (DHT) sits inside the 0xC0-0xCF range but is NOT a frame header —
+    // an allow-list rejects it; a "C0-CF except..." blocklist is what would let
+    // a future marker through as if it carried dimensions.
+    const dht = new Uint8Array([0xff, 0xd8, 0xff, 0xc4, 0x00, 0x11, ...new Array(15).fill(0)]);
+    assert.equal(readJpegDimensions(dht), null);
+  });
+});
+
+describe('fetchSourceLogo — decompression bombs are refused from the header', () => {
+  for (const [label, make] of [
+    ['PNG', pngDeclaring],
+    ['JPEG', jpegDeclaring],
+  ] as const) {
+    it(`refuses an 8000x8000 ${label} before anything decodes it`, async () => {
+      const bomb = make(8000, 8000);
+      // Preconditions: it is tiny on the wire and passes every OTHER guard —
+      // well under the 10 MB cap and far ABOVE the MIN_SOURCE_PX floor. Neither
+      // existing guard has anything to say about it, which is the point.
+      assert.ok(bomb.byteLength < 1024, `${label} bomb is ${bomb.byteLength} bytes on the wire`);
+      assert.ok(bomb.byteLength < MAX_SOURCE_BYTES);
+      assert.ok(8000 > MIN_SOURCE_PX);
+      assert.ok(8000 * 8000 > MAX_SOURCE_PIXELS);
+
+      const result = await fetchSourceLogo({ fetchImpl: respondWith(bomb), url: LOGO_URL });
+      const text = reason(result);
+      assert.match(text, /8000x8000px/);
+      assert.match(text, /megapixels/);
+      // The refusal must be the SIZE one. A decode-first implementation handed
+      // these header-only bytes would fail to decode and say so instead — so
+      // this also proves nothing decoded.
+      assert.equal(/could not be read/.test(text), false, text);
+    });
+  }
+
+  it('refuses a 16000x16000 source, which would decode to ~977 MiB', async () => {
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(pngDeclaring(16000, 16000)),
+      url: LOGO_URL,
+    });
+    assert.match(reason(result), /16000x16000px/);
+  });
+
+  it('accepts a source at the budget and refuses one just over it', async () => {
+    // The boundary itself, so the ceiling is a real threshold rather than a
+    // constant nothing is compared against. 2000x3000 = 6.0 Mpx exactly.
+    const atBudget = 2000 * 3000;
+    assert.equal(atBudget, MAX_SOURCE_PIXELS);
+    const ok = await fetchSourceLogo({
+      fetchImpl: respondWith(pngDeclaring(2000, 3000)),
+      url: LOGO_URL,
+    });
+    assert.equal(ok.ok, true, 'a source exactly at the budget must be admitted');
+
+    const over = await fetchSourceLogo({
+      fetchImpl: respondWith(pngDeclaring(2001, 3000)),
+      url: LOGO_URL,
+    });
+    assert.match(reason(over), /megapixels/);
+  });
+
+  it('admits every raster the paid pack itself produces', async () => {
+    // A ceiling that rejected our own largest artifact would be wrong by
+    // construction, so it is asserted rather than assumed.
+    assert.ok(2048 * 2048 <= MAX_SOURCE_PIXELS);
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(pngDeclaring(2048, 2048)),
+      url: LOGO_URL,
+    });
+    assert.equal(result.ok, true);
+  });
+});
 
 describe('fetchSourceLogo — §12 refusals', () => {
   it('refuses a body over the 10 MB cap', async () => {
@@ -442,20 +596,26 @@ interface FreeOptions {
   moderation?: ModerationClient;
   /** Free-gig rows to pre-seed for PAYER_ID before the stage runs. */
   priorFreeGigs?: number;
+  /** Distinct contract, so several harnesses can share one payer and one D1. */
+  contractId?: string;
+  /** Share a database across harnesses — required for the concurrency test,
+   *  where every attacker job must count against ONE quota table. */
+  db?: D1Like;
+  /** Test seam for the unreachable-by-input pack-gate failure branch. */
+  faviconPack?: PipelineServices['faviconPack'];
 }
 
 async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
-  const db = createMemoryD1();
-  await applyMigrations(db);
+  const contractId = options.contractId ?? CONTRACT_ID;
+  const db = options.db ?? createMemoryD1();
+  if (!options.db) await applyMigrations(db);
   const jobs = createJobStore(db);
   const quota = createQuotaStore(db);
-  const jobKey = await buildJobKey(CONTRACT_ID, 'single');
-  await jobs.claim(jobKey, CONTRACT_ID, 'single');
+  const jobKey = await buildJobKey(contractId, 'single');
+  await jobs.claim(jobKey, contractId, 'single');
   const token = (await jobs.get(jobKey))!.deliverableToken!;
 
-  for (let i = 0; i < (options.priorFreeGigs ?? 0); i++) {
-    await quota.record(PAYER_ID, 'favicon', `earlier-contract-${i}`);
-  }
+  await seedUsage(quota, PAYER_ID, options.priorFreeGigs ?? 0);
 
   const deliveries: Delivery[] = [];
   const messages: string[] = [];
@@ -524,7 +684,12 @@ async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
     },
     publicBaseUrl: 'https://logosmith.example.com',
     logger,
-    services: { generator, ocrGate, moderation: options.moderation ?? clearModeration },
+    services: {
+      generator,
+      ocrGate,
+      moderation: options.moderation ?? clearModeration,
+      ...(options.faviconPack ? { faviconPack: options.faviconPack } : {}),
+    },
   };
 
   Object.assign(harness, {
@@ -538,7 +703,7 @@ async function setupFree(options: FreeOptions = {}): Promise<FreeHarness> {
     deliveries,
     messages,
     fetches,
-    message: { contractId: CONTRACT_ID, jobKey, stage: 'single' as const },
+    message: { contractId, jobKey, stage: 'single' as const },
   });
   return harness as FreeHarness;
 }
@@ -626,8 +791,14 @@ describe('runSingleStage — the US-2 favicon gig', () => {
     // short-circuit. THIS one is about the case that short-circuit cannot
     // reach: an infra fault after the allowance was recorded but before the job
     // reached a terminal state, which is precisely what the queue retries.
+    //
+    // THE PAYER STARTS AT THE CAP MINUS ONE, deliberately. With any slack the
+    // retry sails through no matter what the quota does, and the test cannot
+    // observe the bug it exists for: the job's OWN usage row takes the payer to
+    // the cap, so a retry that re-asks "is this payer under the cap?" refuses a
+    // delivery we already paid for.
     let deliveries = 0;
-    const h = await setupFree();
+    const h = await setupFree({ priorFreeGigs: FREE_GIGS_PER_PAYER - 1 });
     const client = h.config.client as unknown as {
       deliverMilestone: (
         c: string,
@@ -643,11 +814,15 @@ describe('runSingleStage — the US-2 favicon gig', () => {
     };
 
     await assert.rejects(runSingleStage(h.config, h.message), /platform 502/);
-    assert.equal(await usage(h), 1, 'the work was done, so the allowance is spent');
+    assert.equal(
+      await usage(h),
+      FREE_GIGS_PER_PAYER,
+      'the work was done, so this job holds the last slot',
+    );
     assert.notEqual((await h.jobs.get(h.jobKey))!.status, 'delivered');
 
     assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
-    assert.equal(await usage(h), 1, 'the retry must not re-charge the allowance');
+    assert.equal(await usage(h), FREE_GIGS_PER_PAYER, 'the retry must not re-charge the allowance');
   });
 
   it('rejects a gig whose brief validates as neither free shape', async () => {
@@ -778,6 +953,123 @@ describe('runSingleStage — the US-3 taster', () => {
   });
 });
 
+describe('runSingleStage — the quota holds under concurrency (the farming attack)', () => {
+  it('delivers exactly the cap when many free gigs for one payer run at once', async () => {
+    // THE ATTACK. One payer funds N free gigs at once. Queue consumers scale to
+    // concurrent invocations and one funded $0 gig is one message, so
+    // `max_batch_size: 1` bounds nothing here. Under a read-then-write quota
+    // every job that entered during another's source fetch passed the check:
+    // measured 12 delivered against a cap of 3.
+    const concurrency = 12;
+    assert.ok(
+      concurrency > FREE_GIGS_PER_PAYER,
+      'the attack must exceed the cap to prove anything',
+    );
+
+    // ONE database and ONE payer: the whole point is that these jobs contend.
+    const db = createMemoryD1();
+    await applyMigrations(db);
+    const harnesses = await Promise.all(
+      Array.from({ length: concurrency }, (_, i) =>
+        setupFree({ db, contractId: `contract-concurrent-${i}` }),
+      ),
+    );
+    // Precondition: they really do share a quota table and a payer.
+    assert.equal(await harnesses[0]!.quota.countRecent(PAYER_ID, FREE_GIG_WINDOW_DAYS), 0);
+    assert.equal(new Set(harnesses.map((h) => h.jobKey)).size, concurrency, 'distinct jobs');
+
+    const outcomes = await Promise.all(harnesses.map((h) => runSingleStage(h.config, h.message)));
+
+    const delivered = outcomes.filter((o) => o.outcome === 'delivered').length;
+    const packsWritten = harnesses.filter((h) => h.r2.objects.has(`${h.token}/pack.zip`)).length;
+    const rows = await harnesses[0]!.quota.countRecent(PAYER_ID, FREE_GIG_WINDOW_DAYS);
+
+    assert.equal(
+      delivered,
+      FREE_GIGS_PER_PAYER,
+      `delivered ${delivered}, cap ${FREE_GIGS_PER_PAYER}`,
+    );
+    assert.equal(rows, FREE_GIGS_PER_PAYER, `quota rows ${rows}, cap ${FREE_GIGS_PER_PAYER}`);
+    assert.equal(packsWritten, FREE_GIGS_PER_PAYER, 'only capped jobs may produce a deliverable');
+    // Everyone else is refused, and told so.
+    assert.equal(
+      outcomes.filter((o) => o.outcome === 'aborted').length,
+      concurrency - FREE_GIGS_PER_PAYER,
+    );
+    for (const h of harnesses) {
+      const job = (await h.jobs.get(h.jobKey))!;
+      assert.ok(['delivered', 'rejected'].includes(job.outcome ?? ''), job.outcome ?? 'null');
+      if (job.outcome === 'rejected')
+        assert.ok(h.messages.length > 0, 'a refusal must be explained');
+    }
+  });
+
+  it('never lets a taster generation escape the cap either', async () => {
+    const concurrency = 8;
+    const db = createMemoryD1();
+    await applyMigrations(db);
+    const harnesses = await Promise.all(
+      Array.from({ length: concurrency }, (_, i) =>
+        setupFree({ db, contractId: `contract-taster-${i}`, description: TASTER_DESCRIPTION }),
+      ),
+    );
+    const outcomes = await Promise.all(harnesses.map((h) => runSingleStage(h.config, h.message)));
+    assert.equal(outcomes.filter((o) => o.outcome === 'delivered').length, FREE_GIGS_PER_PAYER);
+    assert.equal(
+      await harnesses[0]!.quota.countRecent(PAYER_ID, FREE_GIG_WINDOW_DAYS),
+      FREE_GIGS_PER_PAYER,
+    );
+    // A job refused at the point of no return has already paid for its image —
+    // that is unavoidable, since losing the race is only knowable by trying —
+    // but it must not DELIVER, and the overspend is bounded by one klein call
+    // each rather than by the attacker's patience.
+    const refused = harnesses.filter((h) => h.deliveries.length === 0);
+    assert.equal(refused.length, concurrency - FREE_GIGS_PER_PAYER);
+    for (const h of refused) assert.ok(h.generated <= 1, 'at most one generation per losing job');
+  });
+});
+
+describe('runSingleStage — a favicon pack that fails its own gates is not delivered', () => {
+  it('ships nothing and says why when the pack gates fail', async () => {
+    // No INPUT can reach this branch — every PNG is letterboxed to its exact
+    // contracted size, the ICO is built from those same PNGs, and the ZIP entry
+    // list is a constant — so it is defence in depth, and the injected builder
+    // is the only way to prove it actually blocks a delivery rather than just
+    // computing a report nobody acts on.
+    const h = await setupFree({
+      faviconPack: async () => ({
+        zip: new Uint8Array([1, 2, 3]),
+        files: {},
+        gates: {
+          dimensions: [
+            {
+              file: 'favicon-16.png',
+              pass: false,
+              actual: { width: 15, height: 16 },
+              expected: { width: 16, height: 16 },
+            },
+          ],
+          ico: { pass: false, sizes: [], reason: 'buffer did not parse as an ICO' },
+          zip: { pass: true, present: [], missing: [], reasons: [] },
+          pass: false,
+        },
+      }),
+    });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+    assert.equal(h.deliveries.length, 0, 'a failing pack must never be delivered');
+    assert.equal(h.r2.objects.has(`${h.token}/pack.zip`), false, 'and must never be stored');
+    assert.equal((await h.jobs.get(h.jobKey))!.outcome, 'aborted');
+
+    // The buyer is told which gate failed, in the gate's own measured terms.
+    const note = h.messages[0]!;
+    assert.match(note, /did not clear its own delivery gates/);
+    assert.match(note, /favicon-16\.png is 15x16, expected 16x16/);
+    assert.match(note, /did not parse as an ICO/);
+    assert.equal(/escrow/i.test(note), false, 'a $0 job has no escrow');
+  });
+});
+
 describe('processJobMessage — the free stage is routed, not refused', () => {
   it('routes a single message into the free-gig stage', async () => {
     const h = await setupFree();
@@ -830,9 +1122,15 @@ describe('the warranty revision round (FR-18)', () => {
   }> {
     const jobs = createJobStore(db);
     const realQuota = createQuotaStore(db);
+    // Every WRITE path explodes. The FR-18 requirement "does not consume the
+    // buyer's free-gig quota" is a claim about the paid pipeline, and the only
+    // way to prove a call never happens is to make it fail loudly if it does.
     const quota: QuotaStore = {
       countRecent: (payerId, days) => realQuota.countRecent(payerId, days),
-      record: () => {
+      holdsAllowance: () => {
+        throw new Error('the paid pipeline must never consult the free-gig quota');
+      },
+      consume: () => {
         throw new Error('the paid pipeline must never consume a free-gig allowance');
       },
     };

@@ -618,28 +618,105 @@ export function createSelectionStore(
 // --- Free-gig quota (FR-14) ----------------------------------------------------
 
 export interface QuotaStore {
+  /**
+   * How many free gigs this payer has used inside the window. ADVISORY ONLY —
+   * it is a read, so anything decided from it is stale the instant it returns.
+   * Use it to refuse an over-cap payer before doing work, and to word the
+   * refusal; never as the authority. `consume` is the authority.
+   */
   countRecent(payerId: string, windowDays: number): Promise<number>;
-  record(payerId: string, kind: 'favicon' | 'taster', contractId: string): Promise<void>;
+  /** Does this contract already hold an allowance? Answered from the usage row
+   *  itself, so it cannot disagree with what was actually consumed. */
+  holdsAllowance(contractId: string): Promise<boolean>;
+  /**
+   * Atomically claim one allowance for this contract. Returns true when the
+   * contract holds an allowance afterwards — whether this call took it or an
+   * earlier one already had.
+   */
+  consume(
+    payerId: string,
+    kind: 'favicon' | 'taster',
+    contractId: string,
+    limits: { windowDays: number; maxPerPayer: number },
+  ): Promise<boolean>;
 }
 
+/**
+ * The whole cap decision as ONE statement.
+ *
+ * A read-then-write (`countRecent`, then insert if under the cap) is not a cap.
+ * The window between the two is the entire latency of whatever runs in between
+ * — a 15 s source fetch, or a moderation screen plus an image generation — and
+ * EVERY concurrent job that enters inside that window passes the check. Queue
+ * consumers scale to concurrent invocations and one funded free gig is one
+ * message, so the overrun equals the attacker's concurrency, not one. Measured:
+ * 12 concurrent attempts against a cap of 3 delivered 12.
+ *
+ * SQLite (and therefore D1) evaluates a statement under a single write lock, so
+ * the `COUNT(*)` subquery and the `INSERT` it gates cannot interleave with
+ * another writer. The cap holds at any concurrency.
+ *
+ * `NOT EXISTS (... WHERE contract_id = ?)` makes it idempotent per contract: a
+ * queue retry, a cron unpark, or a DLQ replay of the same job re-runs this and
+ * takes nothing extra. That is also why `holdsAllowance` reads the SAME row
+ * rather than a separate marker — two writes would leave a window where a crash
+ * between them makes a job that already paid look like a job that never ran.
+ *
+ * `RETURNING id` + `first()` rather than a rows-changed count, because the two
+ * runtimes disagree on the shape: real D1 answers `{ meta: { changes } }` and
+ * `createMemoryD1` (node:sqlite) answers `{ changes }`, and `D1Like.run()` is
+ * typed `Promise<unknown>` precisely so nothing depends on either. `first()` is
+ * already on the interface and means the same thing everywhere.
+ */
+const CONSUME_ALLOWANCE_SQL = `INSERT INTO free_gig_usage (payer_id, kind, contract_id, created_at)
+   SELECT ?, ?, ?, ?
+   WHERE NOT EXISTS (SELECT 1 FROM free_gig_usage WHERE contract_id = ?)
+     AND (SELECT COUNT(*) FROM free_gig_usage WHERE payer_id = ? AND created_at >= ?) < ?
+   RETURNING id`;
+
 export function createQuotaStore(db: D1Like, now: () => Date = () => new Date()): QuotaStore {
+  const cutoffFor = (windowDays: number): string =>
+    new Date(now().getTime() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+
+  async function holdsAllowance(contractId: string): Promise<boolean> {
+    const row = await db
+      .prepare('SELECT 1 AS held FROM free_gig_usage WHERE contract_id = ? LIMIT 1')
+      .bind(contractId)
+      .first<{ held: number }>();
+    return row !== null;
+  }
+
   return {
+    holdsAllowance,
+
     async countRecent(payerId, windowDays) {
-      const cutoff = new Date(now().getTime() - windowDays * 24 * 60 * 60 * 1000).toISOString();
       const row = await db
         .prepare('SELECT COUNT(*) AS n FROM free_gig_usage WHERE payer_id = ? AND created_at >= ?')
-        .bind(payerId, cutoff)
+        .bind(payerId, cutoffFor(windowDays))
         .first<{ n: number }>();
       return row?.n ?? 0;
     },
 
-    async record(payerId, kind, contractId) {
-      await db
-        .prepare(
-          'INSERT INTO free_gig_usage (payer_id, kind, contract_id, created_at) VALUES (?, ?, ?, ?)',
+    async consume(payerId, kind, contractId, limits) {
+      const inserted = await db
+        .prepare(CONSUME_ALLOWANCE_SQL)
+        .bind(
+          payerId,
+          kind,
+          contractId,
+          now().toISOString(),
+          contractId,
+          payerId,
+          cutoffFor(limits.windowDays),
+          limits.maxPerPayer,
         )
-        .bind(payerId, kind, contractId, now().toISOString())
-        .run();
+        .first<{ id: number }>();
+      if (inserted !== null) return true;
+      // No row went in. Two stable reasons, and they are opposites: this
+      // contract already held its allowance (grant), or the payer is at the cap
+      // (refuse). Both are settled states by the time we ask, so this read
+      // cannot race the way the pre-insert check did.
+      return holdsAllowance(contractId);
     },
   };
 }

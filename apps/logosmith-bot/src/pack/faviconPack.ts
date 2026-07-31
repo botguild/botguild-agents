@@ -123,34 +123,13 @@ let photonModule: Promise<typeof import('@cf-wasm/photon')> | undefined;
 const loadPhoton = (): Promise<typeof import('@cf-wasm/photon')> =>
   (photonModule ??= import('@cf-wasm/photon'));
 
-/**
- * The true pixel dimensions of an encoded raster, by decoding it.
- *
- * Exists for JPEG, whose dimensions live behind a variable-length marker scan
- * rather than in a fixed header the way a PNG's IHDR does — decoding is both
- * shorter and harder to get subtly wrong than a hand-rolled SOF parser, and
- * this module already owns the decoder. Returns null for bytes photon cannot
- * decode, so a malformed upload is a rejection with a reason rather than a
- * wasm panic escaping to the queue.
- */
-export async function decodeRasterSize(
-  bytes: Uint8Array,
-): Promise<{ width: number; height: number } | null> {
-  const photon = await loadPhoton();
-  let image: InstanceType<(typeof photon)['PhotonImage']>;
-  try {
-    image = photon.PhotonImage.new_from_byteslice(bytes);
-  } catch {
-    return null;
-  }
-  try {
-    const width = image.get_width();
-    const height = image.get_height();
-    return width > 0 && height > 0 ? { width, height } : null;
-  } finally {
-    image.free();
-  }
-}
+// NOTE: this module deliberately exposes no "decode it to learn its size"
+// helper. It had one, and it made the JPEG path the worse of the two: a
+// decompression bomb was fully decoded — filling the isolate — before any
+// dimension existed to check it against. Dimensions are now read from the PNG
+// IHDR and the JPEG SOF header in freeGigs.ts, BEFORE anything reaches a
+// decoder, and `buildFaviconPack` is only ever handed a source already proven
+// to be within the pixel budget.
 
 /**
  * Centre `width`x`height` RGBA pixels on a transparent `size`x`size` canvas.

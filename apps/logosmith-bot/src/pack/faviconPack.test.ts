@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Resvg } from '@resvg/resvg-wasm';
 import { FAVICON_SIZES, ICO_SIZES } from '../config.js';
 import { parseIco, readPngDimensions } from '../gates/index.js';
-import { buildFaviconPack, decodeRasterSize, type FaviconSource } from './faviconPack.js';
+import { buildFaviconPack, type FaviconSource } from './faviconPack.js';
 import { renderSvgToPng } from './render.js';
 import { nodeWasmSources } from './wasm.node.js';
 import { FAVICON_ZIP_ENTRIES, REQUIRED_ZIP_ENTRIES, unzipFiles } from './zip.js';
@@ -88,32 +88,6 @@ async function decodeRgba(
     image.free();
   }
 }
-
-describe('decodeRasterSize', () => {
-  it('reads the true dimensions of a PNG', async () => {
-    assert.deepEqual(await decodeRasterSize(raster['square512']!), { width: 512, height: 512 });
-    assert.deepEqual(await decodeRasterSize(raster['wide512']!), { width: 512, height: 256 });
-  });
-
-  it('reads the true dimensions of a JPEG, which has no fixed-offset header', async () => {
-    // The fixture is produced by re-encoding the 512x512 PNG, so its expected
-    // size is known independently of the function under test. Asserted to be a
-    // real JPEG first, so this cannot silently become a second PNG test.
-    const photon = await import('@cf-wasm/photon');
-    const image = photon.PhotonImage.new_from_byteslice(raster['square512']!);
-    const jpeg = new Uint8Array(image.get_bytes_jpeg(90));
-    image.free();
-    assert.deepEqual([...jpeg.subarray(0, 3)], [0xff, 0xd8, 0xff], 'fixture must be a JPEG');
-    assert.equal(readPngDimensions(jpeg), null, 'a JPEG has no PNG IHDR to read');
-
-    assert.deepEqual(await decodeRasterSize(jpeg), { width: 512, height: 512 });
-  });
-
-  it('returns null rather than throwing for bytes that are not a decodable image', async () => {
-    assert.equal(await decodeRasterSize(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])), null);
-    assert.equal(await decodeRasterSize(new Uint8Array(0)), null);
-  });
-});
 
 describe('buildFaviconPack — the US-2 entry contract', () => {
   it('produces every FAVICON_ZIP_ENTRIES entry and nothing more', async () => {

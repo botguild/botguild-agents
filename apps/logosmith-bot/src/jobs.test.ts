@@ -325,11 +325,14 @@ describe('SelectionStore', () => {
 });
 
 describe('QuotaStore', () => {
+  /** Roomy limits: these tests are about counting, not about the cap. */
+  const ROOMY = { windowDays: 30, maxPerPayer: 100 };
+
   it("counts a payer's free gigs inside the rolling window", async () => {
     const quota = createQuotaStore(db, () => new Date('2026-07-30T00:00:00.000Z'));
-    await quota.record('p1', 'favicon', 'c1');
-    await quota.record('p1', 'taster', 'c2');
-    await quota.record('p2', 'favicon', 'c3');
+    assert.equal(await quota.consume('p1', 'favicon', 'c1', ROOMY), true);
+    assert.equal(await quota.consume('p1', 'taster', 'c2', ROOMY), true);
+    assert.equal(await quota.consume('p2', 'favicon', 'c3', ROOMY), true);
     assert.equal(await quota.countRecent('p1', 30), 2);
     assert.equal(await quota.countRecent('p2', 30), 1);
     assert.equal(await quota.countRecent('p3', 30), 0);
@@ -338,8 +341,54 @@ describe('QuotaStore', () => {
   it('excludes usage older than the window', async () => {
     let now = new Date('2026-06-01T00:00:00.000Z');
     const quota = createQuotaStore(db, () => now);
-    await quota.record('p1', 'favicon', 'c1');
+    await quota.consume('p1', 'favicon', 'c1', ROOMY);
     now = new Date('2026-07-30T00:00:00.000Z');
     assert.equal(await quota.countRecent('p1', 30), 0);
+  });
+
+  it('enforces the cap in the INSERT, so a stale count cannot buy a slot', async () => {
+    // The read-then-write this replaced was defeated by concurrency: every job
+    // that read the count before anyone wrote passed. Here the cap lives in the
+    // statement, so a caller holding an arbitrarily stale count still cannot
+    // get a row past it.
+    const quota = createQuotaStore(db);
+    const limits = { windowDays: 30, maxPerPayer: 3 };
+    const staleCount = await quota.countRecent('p1', 30);
+    assert.equal(staleCount, 0);
+
+    const granted: boolean[] = [];
+    for (let i = 0; i < 6; i++) {
+      granted.push(await quota.consume('p1', 'taster', `c-${i}`, limits));
+    }
+    assert.deepEqual(granted, [true, true, true, false, false, false]);
+    assert.equal(await quota.countRecent('p1', 30), 3);
+  });
+
+  it('is idempotent per contract, so a retry never takes a second slot', async () => {
+    const quota = createQuotaStore(db);
+    const limits = { windowDays: 30, maxPerPayer: 3 };
+    assert.equal(await quota.holdsAllowance('c1'), false);
+    assert.equal(await quota.consume('p1', 'favicon', 'c1', limits), true);
+    assert.equal(await quota.holdsAllowance('c1'), true);
+
+    // Same contract, three more times: still one row, still granted.
+    for (let i = 0; i < 3; i++) {
+      assert.equal(await quota.consume('p1', 'favicon', 'c1', limits), true);
+    }
+    assert.equal(await quota.countRecent('p1', 30), 1);
+  });
+
+  it('keeps granting a contract that already holds a slot even once the payer is at the cap', async () => {
+    // The C2 property, at the store level: an allowance belongs to the job that
+    // took it. Without this a parked-and-resumed job is refused by its own row.
+    const quota = createQuotaStore(db);
+    const limits = { windowDays: 30, maxPerPayer: 3 };
+    assert.equal(await quota.consume('p1', 'taster', 'mine', limits), true);
+    assert.equal(await quota.consume('p1', 'taster', 'other-1', limits), true);
+    assert.equal(await quota.consume('p1', 'taster', 'other-2', limits), true);
+    assert.equal(await quota.countRecent('p1', 30), limits.maxPerPayer);
+
+    assert.equal(await quota.consume('p1', 'taster', 'newcomer', limits), false);
+    assert.equal(await quota.consume('p1', 'taster', 'mine', limits), true);
   });
 });

@@ -48,6 +48,8 @@ import { createAxisCompiler, type AxisCompiler } from './axes.js';
 import { parseFaviconBrief, parseLogoBrief, type BriefResult } from './brief.js';
 import {
   CONCEPT_COUNT,
+  FREE_GIGS_PER_PAYER,
+  FREE_GIG_WINDOW_DAYS,
   MAX_REGENS_PER_SLOT,
   MAX_SPEND_USD,
   MIN_PHASH_HAMMING,
@@ -77,7 +79,12 @@ import {
 } from './jobs.js';
 import type { SelectionStore } from './jobs.js';
 import { createModerationClient, type ModerationClient } from './moderation.js';
-import { buildFaviconPack, type FaviconPackGates } from './pack/faviconPack.js';
+import {
+  buildFaviconPack,
+  type FaviconPackGates,
+  type FaviconPackInput,
+  type FaviconPackResult,
+} from './pack/faviconPack.js';
 import { fetchFontPairing } from './pack/fonts.js';
 import { buildPack, type PackGateReport } from './pack/index.js';
 import { renderSvgToPixmap, renderSvgToPng } from './pack/render.js';
@@ -136,6 +143,15 @@ export interface PipelineServices {
   moderation: ModerationClient;
   axisCompiler: AxisCompiler;
   vectorizer: Vectorizer;
+  /**
+   * The free favicon builder. A seam, unlike its four neighbours, because no
+   * INPUT can make its gates fail: every PNG is letterboxed to exactly its
+   * contracted size, the ICO is assembled from those same PNGs, and the ZIP
+   * entry list is a constant — so the "gates failed, ship nothing" branch is
+   * pure defence in depth and is unreachable from the outside. It still has to
+   * be proven to block delivery, and this is the only way to prove it.
+   */
+  faviconPack: (input: FaviconPackInput) => Promise<FaviconPackResult>;
 }
 
 export interface PipelineConfig {
@@ -293,6 +309,7 @@ function resolveServices(config: PipelineConfig): PipelineServices {
         fetchImpl: config.fetchImpl,
         vectorizerToken: config.secrets.vectorizerToken,
       }),
+    faviconPack: overrides.faviconPack ?? buildFaviconPack,
   };
 }
 
@@ -1446,66 +1463,104 @@ function licenseRows(
 // release the escrow instead tells them the truth: nothing was charged, and
 // re-posting the gig is the entire remedy.
 
-/** FR-17 gate name marking the one free-gig allowance this job consumed. */
+/** FR-17 gate name recording the free-gig allowance this job consumed. */
 const FREE_GIG_USAGE_GATE = 'free-gig-usage';
 
 /**
  * WHEN A FREE GIG CONSUMES ITS ALLOWANCE — the whole abuse guard turns on this.
  *
- * The CHECK happens first, before the source fetch, before moderation, before
- * any vendor call, so a payer over the cap costs us a `getContract` and nothing
- * else. The RECORD happens at the point of no return, and NOT ONE STEP EARLIER:
+ * There are two questions and they have different authorities.
+ *
+ * IS THIS PAYER OVER THE CAP? Asked first, before the source fetch, before
+ * moderation, before any vendor call, so a payer over the cap costs us a
+ * `getContract` and nothing else. It is an ADVISORY read (`countRecent`): it
+ * exists to refuse cheaply and to word the refusal, and it is never the thing
+ * that enforces the cap.
+ *
+ * MAY THIS JOB HAVE AN ALLOWANCE? Asked at the point of no return by
+ * `quota.consume`, which decides and records in ONE atomic statement. That is
+ * what actually enforces the cap, at any concurrency — a read-then-write here
+ * would let every job entering during the source fetch or the generation call
+ * pass a check that was already stale (measured: 12 concurrent jobs, cap 3, all
+ * 12 through).
+ *
+ * The point of no return is per gig, and NOT ONE STEP EARLIER:
  *
  *   favicon — once the buyer's logo has been fetched and accepted, immediately
  *             before the six renders that are this gig's entire cost.
  *   taster  — once the FIRST generation has actually come back, i.e. once the
  *             image vendor has been paid.
  *
- * Everything that can go wrong before those points therefore costs the buyer
- * nothing:
+ * So everything that can go wrong before those points costs the buyer nothing:
+ * an unparseable brief, an unreachable/oversized/too-large/too-small logo, or
+ * flagged content is refused with no allowance consumed; a moderation or
+ * image-vendor outage parks with no allowance consumed, because it is our
+ * failure, not theirs.
  *
- *   - an unparseable brief, an unreachable/oversized/too-small logo, or content
- *     the moderation vendor flags → refused with an actionable message and NO
- *     allowance consumed. Charging a payer an allowance for a job we declined
- *     to start would be a trap.
- *   - a moderation or image-vendor outage → parked with NO allowance consumed,
- *     because it is our failure, not theirs. The cron unparks and resumes.
+ * ONCE A JOB HOLDS AN ALLOWANCE IT KEEPS IT. `quota.consume` is idempotent per
+ * contract (its `NOT EXISTS` clause), and — this is the part a queue retry
+ * depends on — `runSingleStage` skips the advisory check entirely for a job
+ * that already holds one. Without that skip, a job whose image was generated
+ * and PAID FOR, then parked on an OCR outage, comes back to find its own row
+ * has pushed the payer to the cap and refuses itself: the buyer loses a
+ * delivery we already bought, and is told "nothing has been generated and
+ * nothing has been charged", which is false twice over.
  *
- * Once past that point the row is durable BEFORE the work it authorizes — the
- * same rule the paid spend ledger follows, and for the same reason: a crash
- * between "we did the work" and "we wrote it down" is the farmable one.
- *
- * THE ONCE-PER-JOB MARKER IS THE AUDIT TRAIL, NOT THE CHECKPOINT. `gate_audit`
- * is append-only, keyed by job key, survives queue retries, cron unparks and
- * DLQ replays, and — unlike the checkpoint — is not also written by half a
- * dozen other steps whose timing would silently move this decision. The record
- * is written BEFORE its marker, so a crash between the two re-records on the
- * retry: over-counting errs toward refusing a free job, never toward giving one
- * away.
- *
- * KNOWN, BOUNDED, AND DELIBERATE: two free jobs for the SAME payer running
- * concurrently both read the pre-insert count, so a payer can momentarily land
- * one job past the cap. Closing it needs an atomic check-and-insert this store
- * does not expose, and the overrun is one job costing at most $0.003 of klein
- * generation — while the next check sees the higher count and refuses. The
- * failure mode is bounded and self-correcting, which the alternative (recording
- * at delivery time, when an attacker can pipeline every job past the gate
- * before any of them records) is not.
+ * The FR-17 audit row is written after the fact as evidence, not as the marker
+ * — the usage row itself is the marker, so there is no window between two
+ * writes in which a paid job looks like one that never ran.
  */
 async function consumeFreeGigQuota(
   config: PipelineConfig,
   args: { jobKey: string; contractId: string; payerId: string; kind: 'favicon' | 'taster' },
-): Promise<void> {
-  const already = await config.jobs.listGateAudit(args.jobKey, FREE_GIG_USAGE_GATE);
-  if (already.length > 0) return;
-  await config.quota.record(args.payerId, args.kind, args.contractId);
+): Promise<boolean> {
+  const alreadyHeld = await config.quota.holdsAllowance(args.contractId);
+  const granted =
+    alreadyHeld ||
+    (await config.quota.consume(args.payerId, args.kind, args.contractId, {
+      windowDays: FREE_GIG_WINDOW_DAYS,
+      maxPerPayer: FREE_GIGS_PER_PAYER,
+    }));
+  if (granted && !alreadyHeld) {
+    await config.jobs.recordGateAudit({
+      jobKey: args.jobKey,
+      contractId: args.contractId,
+      gate: FREE_GIG_USAGE_GATE,
+      result: 'consumed',
+      detail: { payerId: args.payerId, kind: args.kind },
+    });
+  }
+  return granted;
+}
+
+/**
+ * The refusal a job gets when `quota.consume` declines it — i.e. when the payer
+ * reached the cap between the advisory check and the point of no return, which
+ * is exactly the concurrent-farming case. Rebuilt from a fresh count so the
+ * number quoted is the number that refused it.
+ */
+async function refuseAtPointOfNoReturn(
+  config: PipelineConfig,
+  args: { jobKey: string; contractId: string; payerId: string },
+): Promise<StageOutcome> {
+  const decision = await checkFreeGigQuota(config.quota, args.payerId);
   await config.jobs.recordGateAudit({
     jobKey: args.jobKey,
     contractId: args.contractId,
-    gate: FREE_GIG_USAGE_GATE,
-    result: 'recorded',
-    detail: { payerId: args.payerId, kind: args.kind },
+    gate: 'free-gig-quota',
+    result: 'refused-at-consume',
+    detail: { payerId: args.payerId, used: decision.used },
   });
+  await config.client.sendMessage(
+    args.contractId,
+    decision.allowed
+      ? 'LogoSmith cannot take this free job: another of your free jobs claimed the last ' +
+          'available slot while this one was starting. Nothing has been delivered. The ' +
+          'allowance frees up as your earlier free jobs age out of the rolling window.'
+      : decision.message,
+  );
+  await config.jobs.markDelivered(args.jobKey, 'rejected');
+  return { outcome: 'aborted' };
 }
 
 /** Buyer-facing one-liner per favicon-pack gate. Mirrors `gateLines` for the
@@ -1650,11 +1705,12 @@ async function runFaviconGig(
     contract: Pick<Contract, 'gigId' | 'payerId' | 'milestones'>;
     brief: FaviconBrief;
     token: string;
+    services: PipelineServices;
     log: Logger;
   },
 ): Promise<StageOutcome> {
   const { jobs, client, deliverables } = config;
-  const { job, contract, brief, token, log } = args;
+  const { job, contract, brief, token, services, log } = args;
   const { jobKey, contractId } = args.message;
 
   await jobs.setInProgress(jobKey, {
@@ -1695,19 +1751,22 @@ async function runFaviconGig(
   // renders below are its entire cost. Zero vendor spend by construction —
   // nothing past this line calls a paid image API, so the ledger this job
   // reports is the honest $0.00.
-  await consumeFreeGigQuota(config, {
+  const granted = await consumeFreeGigQuota(config, {
     jobKey,
     contractId,
     payerId: contract.payerId,
     kind: 'favicon',
   });
+  if (!granted) {
+    return refuseAtPointOfNoReturn(config, { jobKey, contractId, payerId: contract.payerId });
+  }
   const checkpoint: JobCheckpoint = job.checkpoint ?? { slots: [], spendUsd: 0 };
   await jobs.saveCheckpoint(jobKey, checkpoint);
 
   // The favicon brief carries no brandName, so the webmanifest is named for the
   // site the logo came from — the one piece of buyer identity the input has.
   const siteName = new URL(brief.logoUrl).hostname;
-  const pack = await buildFaviconPack({
+  const pack = await services.faviconPack({
     source: fetched.source,
     siteName,
     sources: config.sources,
@@ -1883,12 +1942,15 @@ async function runTasterGig(
     // Everything before it — the moderation screen, a klein 503 on the first
     // attempt — parks or refuses without touching the buyer's allowance. A
     // no-op after the first pass through here.
-    await consumeFreeGigQuota(config, {
+    const granted = await consumeFreeGigQuota(config, {
       jobKey,
       contractId,
       payerId: contract.payerId,
       kind: 'taster',
     });
+    if (!granted) {
+      return refuseAtPointOfNoReturn(config, { jobKey, contractId, payerId: contract.payerId });
+    }
 
     const png = result.concept.png;
     const ocr = await services.ocrGate.check(png, brief.brandName);
@@ -2049,22 +2111,33 @@ export async function runSingleStage(
   const gig = await client.getGig(contract.gigId);
   const description = gig.description ?? '';
 
-  // FR-14 BEFORE ANYTHING ELSE. The payer id comes off the contract, never off
-  // the webhook payload — the count is only an abuse guard if the identity it
-  // counts against is the platform's, not the caller's.
-  const quota = await checkFreeGigQuota(config.quota, contract.payerId);
-  await jobs.recordGateAudit({
-    jobKey,
-    contractId,
-    gate: 'free-gig-quota',
-    result: quota.allowed ? 'allowed' : 'refused',
-    detail: { payerId: contract.payerId, used: quota.used },
-  });
-  if (!quota.allowed) {
-    await client.sendMessage(contractId, quota.message);
-    await jobs.markDelivered(jobKey, 'rejected');
-    log.warn({ used: quota.used }, 'free-gig quota exhausted; job refused before any work');
-    return { outcome: 'aborted' };
+  // FR-14 BEFORE ANYTHING ELSE — but ONLY for a job that does not already hold
+  // an allowance. The payer id comes off the contract, never off the webhook
+  // payload: the count is only an abuse guard if the identity it counts against
+  // is the platform's, not the caller's.
+  //
+  // THE SKIP IS NOT AN OPTIMIZATION, IT IS THE FIX FOR A LOST DELIVERY. A job
+  // that generated (and paid for) an image, then parked on an OCR outage, comes
+  // back with its OWN usage row already counted against its payer. Re-asking
+  // "is this payer under the cap?" then answers no — for a payer whose last
+  // free slot is the one THIS job is holding — and the job destroys itself,
+  // telling the buyer "nothing has been generated and nothing has been charged"
+  // when both clauses are false. The allowance belongs to the job once taken.
+  if (!(await config.quota.holdsAllowance(contractId))) {
+    const quota = await checkFreeGigQuota(config.quota, contract.payerId);
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      gate: 'free-gig-quota',
+      result: quota.allowed ? 'allowed' : 'refused',
+      detail: { payerId: contract.payerId, used: quota.used },
+    });
+    if (!quota.allowed) {
+      await client.sendMessage(contractId, quota.message);
+      await jobs.markDelivered(jobKey, 'rejected');
+      log.warn({ used: quota.used }, 'free-gig quota exhausted; job refused before any work');
+      return { outcome: 'aborted' };
+    }
   }
 
   const faviconBrief = parseFaviconBrief(description);
@@ -2075,6 +2148,7 @@ export async function runSingleStage(
       contract,
       brief: faviconBrief.brief,
       token,
+      services,
       log,
     });
   }

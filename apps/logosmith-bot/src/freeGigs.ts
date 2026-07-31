@@ -18,13 +18,19 @@
 // CONTENT-TYPE HEADERS ARE NOT TRUSTED. The buyer's server declares the type;
 // the bytes decide it. The `Accept` header we send is a hint to the origin, not
 // a check on the response.
+//
+// NOTHING IS DECODED UNTIL ITS DECODED SIZE IS KNOWN AND BOUNDED. The 10 MB cap
+// bounds ENCODED bytes, which is not the quantity that fills the isolate: a
+// 243 KiB flat 8000x8000 PNG expands to ~490 MiB of RGBA, and a 972 KiB
+// 16000x16000 one to ~977 MiB, against a 128 MB ceiling. Both are refused here
+// from their headers, before a decoder is handed a single byte.
 // ---------------------------------------------------------------------------
 
 import { MIN_SOURCE_PX, checkLogoUrl } from './brief.js';
 import { FREE_GIGS_PER_PAYER, FREE_GIG_WINDOW_DAYS, SEED_PRICE_USD } from './config.js';
-import { readPngDimensions, sanitizeSvg } from './gates/index.js';
+import { readPngDimensions, sanitizeSvg, type Dimensions } from './gates/index.js';
 import type { QuotaStore } from './jobs.js';
-import { decodeRasterSize, type FaviconSource } from './pack/faviconPack.js';
+import type { FaviconSource } from './pack/faviconPack.js';
 import type { FetchLike } from './types.js';
 
 // --- Quota (FR-14) -----------------------------------------------------------
@@ -99,6 +105,79 @@ const startsWith = (bytes: Uint8Array, magic: number[]): boolean =>
  * then be handed to resvg as the buyer's logo.
  */
 const XML_PREFIXES = ['<?xml', '<!doctype', '<!--', '<svg'];
+
+/**
+ * The most pixels a source raster may decode to (§12's isolate budget).
+ *
+ * DERIVED, NOT PICKED. Decoding costs `w x h x 4` bytes of RGBA inside wasm,
+ * and `get_raw_pixels()` copies that out to JS, so peak is about `2 x 4 x P`
+ * for `P` pixels. Allowing 48 MiB for those buffers leaves ~80 MB of the 128 MB
+ * isolate ceiling for the two wasm modules, the encoded source (<= 10 MB), and
+ * the runtime — so `P <= 48 MiB / 8 = 6,291,456`, rounded down to 6,000,000.
+ *
+ * That admits every real logo comfortably: 2048x2048 (the largest raster this
+ * bot produces anywhere, in the paid pack) is 4.2 Mpx, and a 3000x2000 export
+ * is 6.0 Mpx. It refuses 8000x8000 (64 Mpx) and 16000x16000 (256 Mpx), which
+ * are decompression bombs rather than logos — a flat 8000x8000 PNG is 243 KiB
+ * on the wire and ~490 MiB decoded.
+ *
+ * THE HEADER IS AUTHORITATIVE FOR THIS CHECK, which is why it can run before
+ * any decode: a PNG's IHDR and a JPEG's SOF frame header *are* the dimensions
+ * the decoder allocates from. There is no way to declare 100x100 and decode to
+ * 8000x8000.
+ */
+export const MAX_SOURCE_PIXELS = 6_000_000;
+
+/**
+ * JPEG frame markers that carry dimensions — baseline, extended, progressive,
+ * lossless, and their arithmetic-coded variants. An ALLOW-LIST: the tempting
+ * form is "0xC0-0xCF except DHT/JPG/DAC", which is a blocklist of the three
+ * non-frame markers in that range and fails open the day a fourth appears.
+ */
+const SOF_MARKERS = new Set([
+  0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+]);
+
+/** Markers that stand alone — no length field follows them. */
+const STANDALONE_MARKERS = new Set([0x01, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8]);
+
+/**
+ * Read a JPEG's dimensions by walking its segment table to the frame header.
+ *
+ * Deliberately NOT "decode it and ask how big it is". That is what this
+ * function replaced, and it made the JPEG path the WORSE of the two: a JPEG
+ * bomb was fully decoded — and had already filled the isolate — before any
+ * dimension was known to check. Parsing the header allocates nothing.
+ *
+ * Returns null for anything it cannot walk cleanly, which the caller treats as
+ * a refusal: an unreadable header is not permission to decode and find out.
+ */
+export function readJpegDimensions(jpeg: Uint8Array): Dimensions | null {
+  if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return null;
+  const view = new DataView(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength);
+  let offset = 2;
+  while (offset + 1 < jpeg.length) {
+    if (jpeg[offset] !== 0xff) return null; // desynchronized: refuse
+    // Any number of 0xFF fill bytes may pad the gap before a marker.
+    let marker = jpeg[offset + 1]!;
+    offset += 2;
+    while (marker === 0xff && offset < jpeg.length) marker = jpeg[offset++]!;
+    if (marker === 0xd9) return null; // EOI before any frame header
+    if (STANDALONE_MARKERS.has(marker)) continue;
+    if (offset + 1 >= jpeg.length) return null;
+    const length = view.getUint16(offset, false); // includes its own 2 bytes
+    if (length < 2 || offset + length > jpeg.length) return null;
+    if (SOF_MARKERS.has(marker)) {
+      // SOFn payload: 1 byte sample precision, 2 bytes height, 2 bytes width.
+      if (length < 7) return null;
+      const height = view.getUint16(offset + 3, false);
+      const width = view.getUint16(offset + 5, false);
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    offset += length;
+  }
+  return null;
+}
 
 type SniffedKind = 'png' | 'jpeg' | 'svg' | null;
 
@@ -236,15 +315,30 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
     return { ok: true, source: { kind: 'svg', svg } };
   }
 
-  const size =
-    kind === 'png'
-      ? // The IHDR is the PNG's own declaration of its size and needs no decode.
-        readPngDimensions(bytes)
-      : await decodeRasterSize(bytes);
+  // HEADER ONLY. Neither branch decodes: the IHDR and the SOF frame header are
+  // what a decoder would allocate from, so they answer both the minimum and the
+  // maximum below without a decoder ever seeing these bytes.
+  const size = kind === 'png' ? readPngDimensions(bytes) : readJpegDimensions(bytes);
   if (size === null) {
     return {
       ok: false,
-      reason: `that URL returned a ${kind.toUpperCase()} whose image data could not be read`,
+      reason: `that URL returned a ${kind.toUpperCase()} whose image header could not be read`,
+    };
+  }
+
+  // The bomb guard, BEFORE the minimum — an 8000x8000 source passes the
+  // >= MIN_SOURCE_PX floor with room to spare, so the floor is no protection at
+  // all against the input that actually fills the isolate.
+  const pixels = size.width * size.height;
+  if (pixels > MAX_SOURCE_PIXELS) {
+    return {
+      ok: false,
+      reason:
+        `your logo is ${size.width}x${size.height}px (${(pixels / 1_000_000).toFixed(1)} ` +
+        `megapixels), and LogoSmith accepts up to ${MAX_SOURCE_PIXELS / 1_000_000} megapixels — ` +
+        'an image that large costs more memory to open than a favicon job is allowed. Re-export ' +
+        'it smaller (2048x2048 is far more than enough for every icon in the pack), or post an ' +
+        'SVG, which has no such limit',
     };
   }
 
