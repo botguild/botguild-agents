@@ -11,6 +11,47 @@ export interface LogoBrief {
   script?: string;
 }
 
+/**
+ * How to read every field of a `LogoBrief` as buyer-supplied free text.
+ *
+ * DECLARED AS A MAPPED TYPE OVER `keyof Required<LogoBrief>`, NOT AS A LIST OF
+ * FIELD NAMES, and that is the whole point: adding a field to `LogoBrief` and
+ * forgetting to classify it here is a COMPILE ERROR, not an unscreened input.
+ *
+ * WHY THAT MATTERS. `moderationText` (pipeline.ts) used to hand-enumerate four
+ * of the five free-text fields, and the one it missed — `palettePreference` —
+ * reached Ideogram's and Recraft's prompts under our API keys, and reached the
+ * axis compiler's user message (axes.ts `JSON.stringify`s the WHOLE brief),
+ * with no content check anywhere on the path. Meanwhile the refusal copy told
+ * the buyer LogoSmith "screens every brief". An enumeration that can drift from
+ * the type it enumerates is the recurring defect of this codebase; this is the
+ * shape that cannot.
+ *
+ * EVERY field is free text here, including `script`, which no prompt builder
+ * reads today: it is still buyer-authored, still `JSON.stringify`d into the
+ * axis compiler's message, and "no current caller interpolates it" is not a
+ * content guarantee.
+ */
+const LOGO_BRIEF_TEXT: {
+  [K in keyof Required<LogoBrief>]: (brief: LogoBrief) => readonly string[];
+} = {
+  brandName: (brief) => [brief.brandName],
+  industry: (brief) => [brief.industry],
+  brief: (brief) => (brief.brief === undefined ? [] : [brief.brief]),
+  palettePreference: (brief) => brief.palettePreference ?? [],
+  avoid: (brief) => brief.avoid ?? [],
+  script: (brief) => (brief.script === undefined ? [] : [brief.script]),
+};
+
+/**
+ * Every buyer-supplied string in a brief, in declaration order — the input to
+ * FR-2 moderation, and the honest answer to "what did the buyer actually
+ * write?". Derived from `LOGO_BRIEF_TEXT`, so it cannot fall behind the type.
+ */
+export function logoBriefFreeText(brief: LogoBrief): string[] {
+  return Object.values(LOGO_BRIEF_TEXT).flatMap((read) => [...read(brief)]);
+}
+
 /** The FREE favicon gig's brief: one existing logo to repackage. */
 export interface FaviconBrief {
   logoUrl: string;

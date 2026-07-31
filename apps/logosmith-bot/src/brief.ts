@@ -36,10 +36,57 @@ function extractFencedJson(description: string): BriefResult<Record<string, unkn
 const nonBlankString = (value: unknown): value is string =>
   typeof value === 'string' && value.trim().length > 0;
 
-const stringArray = (value: unknown): string[] | undefined =>
-  Array.isArray(value) && value.every((v) => typeof v === 'string')
-    ? (value as string[])
-    : undefined;
+/**
+ * Bounds on the two `string[]` fields a brief may carry (`palettePreference`,
+ * `avoid`).
+ *
+ * These are BUYER-CONTROLLED FREE TEXT that reaches the FR-2 moderation payload
+ * and, via `buildAxisPrompt`, the image vendors' prompts under our API keys.
+ * Unbounded, one gig can push an arbitrary payload through both. The numbers
+ * are deliberately far past anything real — a palette is a handful of colours,
+ * an avoid-list a handful of motifs — so they bound the abuse case without
+ * costing a legitimate brief anything.
+ */
+const MAX_BRIEF_LIST_ENTRIES = 20;
+const MAX_BRIEF_LIST_ENTRY_CHARS = 200;
+
+/**
+ * A bounded `string[]`, or a reason it was refused.
+ *
+ * REFUSED, NOT TRUNCATED. Silently dropping half a buyer's list would generate
+ * from a brief they did not write and then report it back as theirs; naming
+ * what is wrong is something they can act on.
+ *
+ * An absent/wrong-typed field is not an error — it is simply not carried, which
+ * is the pre-existing behaviour for every optional field here.
+ */
+function boundedStringArray(
+  value: unknown,
+  field: string,
+): { ok: true; value: string[] | undefined } | { ok: false; reason: string } {
+  if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) {
+    return { ok: true, value: undefined };
+  }
+  const entries = value as string[];
+  if (entries.length > MAX_BRIEF_LIST_ENTRIES) {
+    return {
+      ok: false,
+      reason:
+        `${field} lists ${entries.length} entries and LogoSmith accepts at most ` +
+        `${MAX_BRIEF_LIST_ENTRIES}`,
+    };
+  }
+  const overlong = entries.find((entry) => entry.length > MAX_BRIEF_LIST_ENTRY_CHARS);
+  if (overlong !== undefined) {
+    return {
+      ok: false,
+      reason:
+        `an entry in ${field} is ${overlong.length} characters and LogoSmith accepts at most ` +
+        `${MAX_BRIEF_LIST_ENTRY_CHARS} per entry`,
+    };
+  }
+  return { ok: true, value: entries };
+}
 
 /**
  * Latin-script check (v1 scope, PRD §13). Accepts Basic Latin plus Latin-1
@@ -69,16 +116,19 @@ export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
     return { ok: false, reason: 'brandName is not Latin script (out of v1 scope)' };
   }
 
+  const palette = boundedStringArray(raw['palettePreference'], 'palettePreference');
+  if (!palette.ok) return palette;
+  const avoid = boundedStringArray(raw['avoid'], 'avoid');
+  if (!avoid.ok) return avoid;
+
   return {
     ok: true,
     brief: {
       brandName,
       industry: raw['industry'].trim(),
       ...(nonBlankString(raw['brief']) ? { brief: raw['brief'].trim() } : {}),
-      ...(stringArray(raw['palettePreference'])
-        ? { palettePreference: stringArray(raw['palettePreference']) }
-        : {}),
-      ...(stringArray(raw['avoid']) ? { avoid: stringArray(raw['avoid']) } : {}),
+      ...(palette.value ? { palettePreference: palette.value } : {}),
+      ...(avoid.value ? { avoid: avoid.value } : {}),
       ...(nonBlankString(raw['script']) ? { script: raw['script'].trim() } : {}),
     },
   };

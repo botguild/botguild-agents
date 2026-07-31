@@ -670,6 +670,52 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
     assert.equal(job?.outcome, 'partial');
   });
 
+  it('screens EVERY free-text field of the brief, not an enumeration of some of them', async () => {
+    // `palettePreference` was the one `moderationText` forgot, and it is not a
+    // benign field: `buildAxisPrompt` interpolates it verbatim into the image
+    // prompt sent to Ideogram/Recraft under our API keys, and `axes.ts`
+    // JSON.stringify's the WHOLE brief into the axis compiler's user message —
+    // so it was both an unscreened vendor input and an unmoderated
+    // prompt-injection channel into the module that writes our image prompts.
+    // Meanwhile the refusal copy told the buyer every brief is screened.
+    const screened: string[] = [];
+    const h = await setup({
+      description:
+        '```json\n' +
+        JSON.stringify({
+          brandName: 'Harbor & Vine',
+          industry: 'boutique inn',
+          brief: 'FIELD-BRIEF',
+          palettePreference: ['FIELD-PALETTE-A', 'FIELD-PALETTE-B'],
+          avoid: ['FIELD-AVOID'],
+          script: 'FIELD-SCRIPT',
+        }) +
+        '\n```',
+      moderation: {
+        screen: async (text: string) => {
+          screened.push(text);
+          return { status: 'clear' as const, verdict: CLEAR_VERDICT };
+        },
+      },
+    });
+    await runConceptStage(h.config, message(h.jobKey));
+
+    assert.equal(screened.length, 1);
+    // Each sentinel named individually — deriving them from the brief would
+    // pass however few of them the screen actually saw.
+    for (const sentinel of [
+      'Harbor & Vine',
+      'boutique inn',
+      'FIELD-BRIEF',
+      'FIELD-PALETTE-A',
+      'FIELD-PALETTE-B',
+      'FIELD-AVOID',
+      'FIELD-SCRIPT',
+    ]) {
+      assert.ok(screened[0]!.includes(sentinel), `${sentinel} never reached the moderation vendor`);
+    }
+  });
+
   it('parks fail-closed when the moderation vendor is unavailable', async () => {
     const h = await setup({
       moderation: { screen: async () => ({ status: 'unavailable', error: 'vendor 503' }) },

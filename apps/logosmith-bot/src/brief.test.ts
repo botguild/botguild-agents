@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkLogoUrl, isLatinScript, parseFaviconBrief, parseLogoBrief } from './brief.js';
+import { logoBriefFreeText } from './types.js';
 
 const fence = (json: unknown): string =>
   `We need a mark for our new place.\n\n\`\`\`json\n${JSON.stringify(json, null, 2)}\n\`\`\`\n`;
@@ -27,6 +28,53 @@ describe('parseLogoBrief', () => {
     );
     assert.ok(result.ok);
     assert.deepEqual(result.brief.avoid, ['gradients', 'mascots']);
+  });
+
+  // The two `string[]` fields are buyer-controlled free text that reaches the
+  // moderation payload AND, via buildAxisPrompt, the image vendors' prompts
+  // under our API keys. Unbounded, one gig pushes an arbitrary payload through
+  // both.
+  it('refuses a palettePreference or avoid list with too many entries', () => {
+    for (const field of ['palettePreference', 'avoid'] as const) {
+      const result = parseLogoBrief(
+        fence({
+          brandName: 'Harbor & Vine',
+          industry: 'boutique inn',
+          [field]: Array.from({ length: 21 }, (_, i) => `#00000${i % 10}`),
+        }),
+      );
+      assert.ok(!result.ok, `${field} must be bounded`);
+      assert.match(result.reason, new RegExp(`${field} lists 21 entries`));
+    }
+  });
+
+  it('refuses a single over-long entry in either list', () => {
+    for (const field of ['palettePreference', 'avoid'] as const) {
+      const result = parseLogoBrief(
+        fence({
+          brandName: 'Harbor & Vine',
+          industry: 'boutique inn',
+          [field]: ['teal', 'x'.repeat(201)],
+        }),
+      );
+      assert.ok(!result.ok, `${field} entries must be bounded`);
+      assert.match(result.reason, new RegExp(`entry in ${field} is 201 characters`));
+    }
+  });
+
+  it('accepts lists that sit exactly on the bounds', () => {
+    // A false rejection is as bad as a false acceptance here: a real brief must
+    // never be refused for a limit it did not cross.
+    const result = parseLogoBrief(
+      fence({
+        brandName: 'Harbor & Vine',
+        industry: 'boutique inn',
+        palettePreference: Array.from({ length: 20 }, () => 'x'.repeat(200)),
+        avoid: Array.from({ length: 20 }, () => 'y'.repeat(200)),
+      }),
+    );
+    assert.ok(result.ok);
+    assert.equal(result.brief.palettePreference?.length, 20);
   });
 
   it('rejects a description with no fenced block', () => {
@@ -125,5 +173,51 @@ describe('checkLogoUrl', () => {
   it('rejects garbage that is not a URL at all', () => {
     const result = checkLogoUrl('not a url');
     assert.ok(!result.ok);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The FR-2 screening surface is DERIVED FROM `LogoBrief`, not re-listed.
+//
+// `moderationText` (pipeline.ts) used to name four fields by hand and missed
+// `palettePreference` — which reaches Ideogram's and Recraft's prompts under
+// our API keys, and the axis compiler's user message, unscreened, while the
+// refusal copy told the buyer every brief is screened.
+//
+// The compile-time half of the guarantee is in types.ts: `LOGO_BRIEF_TEXT` is a
+// mapped type over `keyof Required<LogoBrief>`, so a new field that is not
+// classified there does not build. This is the runtime half — that every field
+// which EXISTS today is actually read.
+// ---------------------------------------------------------------------------
+describe('logoBriefFreeText', () => {
+  it('reads every buyer-supplied field, each one named individually', () => {
+    const text = logoBriefFreeText({
+      brandName: 'SENTINEL-BRAND',
+      industry: 'SENTINEL-INDUSTRY',
+      brief: 'SENTINEL-BRIEF',
+      palettePreference: ['SENTINEL-PALETTE-1', 'SENTINEL-PALETTE-2'],
+      avoid: ['SENTINEL-AVOID'],
+      script: 'SENTINEL-SCRIPT',
+    });
+    // Named one by one on purpose: deriving the expectation from the same
+    // helper under test would pass however few fields it read.
+    for (const sentinel of [
+      'SENTINEL-BRAND',
+      'SENTINEL-INDUSTRY',
+      'SENTINEL-BRIEF',
+      'SENTINEL-PALETTE-1',
+      'SENTINEL-PALETTE-2',
+      'SENTINEL-AVOID',
+      'SENTINEL-SCRIPT',
+    ]) {
+      assert.ok(text.includes(sentinel), `${sentinel} was not screened`);
+    }
+  });
+
+  it('omits absent optional fields rather than emitting empty strings', () => {
+    assert.deepEqual(logoBriefFreeText({ brandName: 'Acme', industry: 'tools' }), [
+      'Acme',
+      'tools',
+    ]);
   });
 });

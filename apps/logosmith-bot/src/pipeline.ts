@@ -103,6 +103,7 @@ import {
   type ReportImageModeration,
 } from './report.js';
 import { createVectorizer, type Vectorizer } from './vectorize.js';
+import { logoBriefFreeText } from './types.js';
 import type {
   AiLike,
   ConceptState,
@@ -406,9 +407,19 @@ async function resolveBrief(
   return resolveGigBrief(gig, extractor);
 }
 
-/** Everything buyer-supplied and free-text goes to the moderation vendor (FR-2). */
+/**
+ * Everything buyer-supplied and free-text goes to the moderation vendor (FR-2)
+ * — and "everything" is DERIVED FROM `LogoBrief` ITSELF (`logoBriefFreeText` in
+ * types.ts), never re-listed here.
+ *
+ * This function used to name four fields by hand and missed
+ * `palettePreference`, which reaches the image vendors' prompts and the axis
+ * compiler's user message unscreened while the refusal copy claimed every brief
+ * is screened. A hand-written list of the fields of a type drifts from that
+ * type the first time someone adds one; the derivation cannot.
+ */
 function moderationText(brief: LogoBrief): string {
-  return [brief.brandName, brief.industry, brief.brief ?? '', ...(brief.avoid ?? [])]
+  return logoBriefFreeText(brief)
     .filter((part) => part.trim().length > 0)
     .join('\n');
 }
