@@ -478,8 +478,8 @@ through `src/disputes.ts`, which assembles the counter-statement from this
 bot's own D1 records and files it with the platform's `respond_to_dispute`
 MCP tool: the stored lettering-readback verdicts and per-image vendor request
 ids from `concepts`, each image's generation seed recovered from the
-`gate_audit` row that recorded its verdict (so a disputed concept can be
-regenerated), the winner and how it was chosen from `selection`, the
+`gate_audit` row that recorded that image's verdict (so a disputed concept
+can be regenerated), the winner and how it was chosen from `selection`, the
 per-stage claims and spend from `jobs`, and the full `gate_audit` trail
 merged across every stage key in insert order. Nothing is recomputed at
 dispute time — a verdict is quoted as the gate wrote it, not re-derived from
@@ -487,6 +487,18 @@ today's thresholds — and anything that could not be sourced is named in the
 document's `evidenceGaps`, following the same rule `report.ts` follows for
 the delivered validation report: in an evidence document "0" and "unknown"
 are never the same value.
+
+A slot is gated once per attempt, so several `gate_audit` rows can describe
+one concept and only one of them describes the image that was kept. The seed
+is therefore elected rather than looked up: every row that could be this
+image's votes, **including rows that record no seed at all**, and only an
+unanimous vote is reported. A null `seed` means no seed could be named from
+the record — the vendor may have issued none, the attempts may be
+indistinguishable, the slot may have been re-gated after a park, or that
+row's detail may no longer parse — so it asserts nothing either way rather
+than confirming the record is complete. Do not "improve" this into picking
+the newest row: naming a seed that regenerates a *discarded* attempt
+falsifies the document's own strongest claim on the payer's first check.
 
 The response fires **exactly once per contract**: it is claimed with a
 unique-constraint `INSERT` into `dispute_responses` before the MCP call, so

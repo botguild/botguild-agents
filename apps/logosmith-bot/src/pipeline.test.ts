@@ -532,6 +532,74 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
     );
   });
 
+  // REGRESSION (C1). A regenerated slot leaves one audit row per attempt, and
+  // Ideogram's seed is optional per response (generate.ts) — so a slot can hold
+  // attempt 3's bytes while attempt 1's row is the only one carrying a seed.
+  // Naming that seed would tell the payer to regenerate an image we DISCARDED,
+  // falsifying the document's own strongest claim on their first check. Every
+  // row that could be this image's must vote, including the silent ones.
+  it('names no seed when a regenerated slot leaves attempts that cannot be told apart', async () => {
+    const h = await setup({
+      // Ideogram answers with a seed on the wordmark's attempt 1 and omits it
+      // afterwards. The lockup slot passes first time and keeps its seed —
+      // the positive control, so a `seedForConcept` husk cannot pass this test.
+      generate: (axisId, attempt) =>
+        okConcept(
+          axisId,
+          MARKS[axisFixture(axisId)]!,
+          IMAGE_COST_USD.ideogram,
+          axisId === 'lockup'
+            ? 222222
+            : axisId === 'wordmark' && attempt === 1
+              ? 111111
+              : undefined,
+        ),
+      // The wordmark slot never reads back, so it regenerates to exhaustion and
+      // R2 ends up holding attempt 3's bytes.
+      ocr: (fixture) => verdict(fixture !== 'leftHalf'),
+    });
+    assert.equal(axisFixture('wordmark'), 'leftHalf', 'slot 1 is the exhausted slot');
+    const result = await runConceptStage(h.config, message(h.jobKey));
+    assert.deepEqual(result, { outcome: 'partial' }, 'two of three concepts delivered');
+
+    // The fixture really is the reported scenario: three attempts on slot 1,
+    // exactly one of which recorded a seed, and all three indistinguishable
+    // (same pinned model, same transcription, same score, same request id).
+    const slotOne = (await h.jobs.listGateAudit(h.jobKey, 'ocr')).filter((row) => row.slot === 1);
+    assert.equal(slotOne.length, MAX_REGENS_PER_SLOT + 1);
+    assert.deepEqual(
+      slotOne.map((row) => (row.detail as { seed?: number }).seed ?? null),
+      [111111, null, null],
+    );
+    assert.equal(
+      new Set(
+        slotOne.map((row) => {
+          const d = row.detail as Record<string, unknown>;
+          return JSON.stringify([d.model, d.transcription, d.score, d.pass, d.vendorRequestId]);
+        }),
+      ).size,
+      1,
+      'nothing recorded distinguishes the three attempts',
+    );
+    assert.equal((await h.concepts.list(CONTRACT_ID)).find((r) => r.slot === 1)?.attemptsUsed, 3);
+
+    const evidence = await assembleDisputeEvidence(
+      {
+        jobs: h.jobs,
+        concepts: h.concepts,
+        selection: h.selection,
+        publicBaseUrl: 'https://logosmith.example.com',
+      },
+      CONTRACT_ID,
+    );
+    const slot1 = evidence.concepts.find((concept) => concept.slot === 1);
+    assert.equal(slot1?.seed, null, 'a seed for a discarded attempt must never be named');
+    assert.equal(slot1?.ocr?.pass, false, 'the failed verdict is still reported in full');
+    // Positive control in the SAME test: the slot that was NOT regenerated
+    // still reports its seed, so a `seedForConcept` husk cannot pass this.
+    assert.equal(evidence.concepts.find((concept) => concept.slot === 2)?.seed, 222222);
+  });
+
   it('regenerates a failing slot twice, then delivers — attempts and spend both counted', async () => {
     const h = await setup({
       // The emblem slot's readback fails twice before it lands.

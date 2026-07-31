@@ -20,7 +20,10 @@
 //   3. NOTHING IS INVENTED TO FILL A HOLE. A stage that was never claimed, a
 //      contract with no concepts, a job that aborted before selection: all of
 //      those are legitimate recorded states and are reported as what they are.
-//      The response never guesses at what "probably" happened.
+//      The response never guesses at what "probably" happened — and where two
+//      records could each be the right one, it names neither (`seedForConcept`).
+//      A null in this document therefore never carries a CAUSE it cannot
+//      prove: the prose says what could not be established, not why.
 //
 //   4. THE ANSWER IS FILED EXACTLY ONCE. `respond` claims the contract with a
 //      unique-constraint INSERT into `dispute_responses` BEFORE it posts, so
@@ -94,11 +97,19 @@ export interface DisputeConcept {
    */
   r2Key: string | null;
   /**
-   * The vendor RNG seed this image was generated from, recovered from the gate
-   * audit row that recorded its verdict — the strongest answer to "this is not
-   * what I asked for", because the image can be regenerated from it. `null`
-   * means the vendor returned no seed (only Ideogram does), not that
-   * provenance is missing — the same reading as a null `vendorRequestId`.
+   * The vendor RNG seed the delivered image was generated from, recovered from
+   * the gate audit row that recorded that image's verdict — the strongest
+   * answer to "this is not what I asked for", because the image can be
+   * regenerated from it.
+   *
+   * `null` means NO SEED COULD BE NAMED FROM THE RECORD, and this document
+   * does not claim to know which of its causes applies: the vendor issued none
+   * (only some do), the recorded attempts for this slot cannot be told apart so
+   * naming one would be a guess, the slot was re-gated after a park (the seed
+   * is not carried across invocations), or the audit row's stored detail no
+   * longer parses. The last three ARE provenance being missing, so a null is
+   * never a claim that provenance is complete — only that this field asserts
+   * nothing.
    */
   seed: number | null;
   phash: string | null;
@@ -124,6 +135,19 @@ export interface DisputeAuditRow {
   slot: number | null;
   gate: string;
   result: string;
+  /**
+   * Published VERBATIM, deliberately diverging from `summarizeInputScreening`,
+   * which projects its verdict field by field so that an audit row carrying an
+   * internal header or a debug blob cannot leak into a customer-facing
+   * document. That projection is possible there because a verdict has one known
+   * shape; a trail row does not — the details are pack gate reports,
+   * distinctness pairs, spend counters, vendor errors — and a whitelist would
+   * silently drop whichever field a future gate adds, which in an evidence
+   * document is the more expensive failure. The rule that makes this safe is on
+   * the WRITE side, and it is FR-17's own: `gate_audit` is the customer-facing
+   * evidence trail, so nothing secret may be recorded into a gate detail. If
+   * that ever stops holding, this is the field that ships it.
+   */
   detail: unknown;
   createdAt: string;
 }
@@ -185,9 +209,13 @@ const EVIDENCE_NOTE =
   'degraded to null rather than dropped, so the row itself is always present. The licence ' +
   'section covers the generated concept images; the delivered licenses.json additionally covers ' +
   'the converted logo.svg, whose raster-to-vector conversion issues no per-request identifier. ' +
-  'A null `seed` or `vendorRequestId` on a concept means the vendor returned none — only some ' +
-  'image vendors issue either — not that provenance is missing. ' +
-  'Anything this response could not source is named in `evidenceGaps`.';
+  'A null `vendorRequestId` on a concept means the vendor returned no per-request identifier. A ' +
+  'null `seed` means no seed could be named from the record, and this document does not claim to ' +
+  'know why: the vendor may have issued none, the recorded attempts for that slot may be ' +
+  'indistinguishable so naming one would be a guess, the slot may have been re-gated after a ' +
+  'pause, or that row’s stored detail may no longer parse. Some of those are provenance genuinely ' +
+  'missing, so a null seed asserts nothing either way rather than confirming the record is ' +
+  'complete. Anything this response could not source is named in `evidenceGaps`.';
 
 /**
  * The gap sentences, as an allow-list of the things this module knows it can
@@ -214,6 +242,15 @@ const GAP = {
     'vendor’s verbatim screening verdict could not be quoted. `inputScreening` still ' +
     'reports the vendor and model this bot pins, and how many screening attempts failed on a ' +
     'vendor outage.',
+  // Damaged is not absent. Saying "no screening is on record" while the trail
+  // printed above shows a `moderation` row with result `clear` would have this
+  // document contradicting itself on the same page — and would understate what
+  // actually happened, since the screening did run and did clear.
+  unreadableScreening:
+    'A cleared pre-generation content screening IS on record for this contract — the ' +
+    '`moderation` row is in the trail above, with result `clear` — but its stored verdict could ' +
+    'not be read back: the recorded detail is absent, damaged, or not in the shape a verdict ' +
+    'takes. The screening ran and cleared; only the vendor’s verbatim body is unquotable here.',
   noAuditTrail:
     'The gate audit trail for this contract is empty, so no gate decision, cap counter or ' +
     'selection event could be sourced. The trail is append-only and written as each gate runs, ' +
@@ -258,40 +295,79 @@ const toJobRecord = (row: JobRow): DisputeJobRecord => ({
 /** The gate whose detail carries per-image generation provenance (pipeline.ts). */
 const OCR_GATE = 'ocr';
 
+/** The gate stage 1 records its FR-2 input screening under (pipeline.ts). */
+const MODERATION_GATE = 'moderation';
+
 /**
- * The seed the image a concept row HOLDS was generated from.
+ * The seed the image a concept row HOLDS was generated from — or `null`
+ * whenever the record cannot name one without guessing.
  *
- * The join is on the STORED VERDICT — model, transcription and score together
- * — not on "the newest `ocr` row for this slot". A slot can be gated several
- * times (each regeneration writes its own row with its own seed), and the free
- * taster keeps its BEST-scoring attempt rather than its last, so the newest row
- * is not always the one for the image that was kept. Reporting that row's seed
- * would name a seed the delivered image was not generated from — a fabricated
- * reproducibility claim, which is worse than none.
+ * WHY THIS IS AN ELECTION AND NOT A LOOKUP. A slot is gated once per attempt
+ * and every regeneration writes its own `ocr` row, so the trail holds several
+ * rows for one slot and only ONE of them describes the image that was kept.
+ * Taking the newest is wrong (the free taster keeps its BEST-scoring attempt,
+ * not its last). Taking any row that "looks like" the stored verdict is wrong
+ * too, and this is the trap worth naming: `ocrModel` is the pinned
+ * `SCOUT_MODEL_ID` constant, `ocrScore` is a pure function of the transcription
+ * and the brand name (gates/ocr.ts), and `ocrPass` is a function of that score
+ * — so matching those four is really matching the TRANSCRIPTION alone, and two
+ * attempts at the same brand name reading back identically is the normal case,
+ * not a contrivance.
  *
- * Fails closed twice over. The detail is `unknown` by construction, so the
- * shape is checked field by field with `Object.hasOwn` (the report.ts idiom: a
- * bare read or `in` would walk the prototype chain and admit an inherited
- * `seed`). And if two matching rows disagree on the seed, none is reported.
+ * `vendorRequestId` is the one recorded field that genuinely differs per
+ * attempt, so it is the actual discriminator. The other four are kept because
+ * they cost nothing and reject a row that was never this concept's at all;
+ * where the vendor issues no request id they contribute nothing, and the
+ * election below is what keeps that case honest rather than lucky.
+ *
+ * EVERY CANDIDATE VOTES — INCLUDING THE SILENT ONES. A matching row that
+ * records no seed votes `null` instead of being skipped. Skipping it is what
+ * let a vendor that returned a seed on attempt 1 and none on attempt 3 read as
+ * unanimous for attempt 1's seed, naming a seed for an image we discarded; it
+ * also quietly undid the resume path's deliberate silence (pipeline.ts records
+ * no seed when re-gating bytes from an earlier invocation, precisely so none
+ * can be borrowed). A row whose detail cannot be read votes `null` too, before
+ * any field of it is examined: a readable row can be ruled out as another
+ * attempt's, an unreadable one cannot.
+ *
+ * One distinct value wins; anything else — disagreement, a silent vote, an
+ * unreadable row — is `null`. A seed that might belong to a discarded attempt
+ * is worse than no seed at all, because the entire claim this field makes is
+ * that the delivered image can be regenerated from it.
  */
 function seedForConcept(row: ConceptRow, trail: GateAuditRow[]): number | null {
-  const seeds = new Set<number>();
+  const candidates = new Set<number | null>();
   for (const audit of trail) {
     if (audit.gate !== OCR_GATE || audit.slot !== row.slot) continue;
     const detail = audit.detail;
-    if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) continue;
-    const candidate = detail as Record<string, unknown>;
-    if (!Object.hasOwn(candidate, 'seed') || typeof candidate.seed !== 'number') continue;
+    if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) {
+      candidates.add(null);
+      continue;
+    }
+    // `Object.hasOwn` on every read, the report.ts idiom: a bare property read
+    // walks the prototype chain, so an inherited `seed` or `transcription`
+    // would otherwise be admitted as this row's own.
+    const own = (key: string): unknown =>
+      Object.hasOwn(detail as object, key) ? (detail as Record<string, unknown>)[key] : undefined;
     if (
-      candidate.model !== row.ocrModel ||
-      candidate.transcription !== row.ocrTranscription ||
-      candidate.score !== row.ocrScore
+      own('model') !== row.ocrModel ||
+      own('transcription') !== row.ocrTranscription ||
+      own('score') !== row.ocrScore ||
+      own('pass') !== row.ocrPass ||
+      (own('vendorRequestId') ?? null) !== row.vendorRequestId
     ) {
       continue;
     }
-    seeds.add(candidate.seed);
+    const seed = own('seed');
+    candidates.add(typeof seed === 'number' ? seed : null);
   }
-  return seeds.size === 1 ? [...seeds][0]! : null;
+  const votes = [...candidates];
+  // One distinct vote wins — and that vote can itself BE `null` (the single
+  // candidate recorded no seed), which is the whole point of typing the set
+  // `number | null`: an unopposed silence has to lose rather than win by
+  // default. No `typeof` guard here on purpose; it would be unreachable, and
+  // an unreachable guard reads as a check that is doing work.
+  return votes.length === 1 ? votes[0] : null;
 }
 
 /**
@@ -447,7 +523,13 @@ export async function assembleDisputeEvidence(
   if (concepts.length === 0) evidenceGaps.push(GAP.noConcepts);
   if (slotsWithoutVerdict.length > 0) evidenceGaps.push(missingVerdictGap(slotsWithoutVerdict));
   if (selectionRow === null) evidenceGaps.push(GAP.noSelection);
-  if (inputScreening.verdict === null) evidenceGaps.push(GAP.noScreening);
+  if (inputScreening.verdict === null) {
+    // `summarizeInputScreening` returns null for two different facts — no
+    // cleared screening was ever recorded, and one was recorded but its stored
+    // verdict is unreadable — so the trail is asked which one this is.
+    const cleared = raw.some((audit) => audit.gate === MODERATION_GATE && audit.result === 'clear');
+    evidenceGaps.push(cleared ? GAP.unreadableScreening : GAP.noScreening);
+  }
   if (merged.length === 0) evidenceGaps.push(GAP.noAuditTrail);
 
   return {

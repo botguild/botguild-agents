@@ -372,7 +372,38 @@ describe('assembleDisputeEvidence — the gate audit trail', () => {
     const { deps } = await seed({ withoutScreening: true });
     const evidence = await assembleDisputeEvidence(deps, CONTRACT);
     assert.equal(evidence.inputScreening.verdict, null);
-    assert.equal(gapMatching(evidence, /screening/).length, 1);
+    assert.equal(gapMatching(evidence, /No cleared pre-generation/).length, 1);
+    assert.equal(gapMatching(evidence, /could not be read back/).length, 0);
+  });
+
+  it('says a damaged screening verdict is damaged, not absent', async () => {
+    // The store degrades an unparseable `detail_json` to null rather than
+    // throwing, so a corrupt row reaches the document as `detail: null` with
+    // its `result: 'clear'` intact. Reporting that as "no screening is on
+    // record" would have this document contradicting the trail it prints.
+    const { deps, db } = await seed({ withoutScreening: true });
+    await db
+      .prepare(
+        'INSERT INTO gate_audit (job_key, contract_id, gate, result, detail_json, created_at)' +
+          ' VALUES (?, ?, ?, ?, ?, ?)',
+      )
+      .bind(
+        await buildJobKey(CONTRACT, 'concepts'),
+        CONTRACT,
+        'moderation',
+        'clear',
+        '{not json',
+        NOW.toISOString(),
+      )
+      .run();
+
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    const row = evidence.gateAudit.find((entry) => entry.gate === 'moderation');
+    assert.equal(row?.result, 'clear', 'the trail still shows a cleared screening');
+    assert.equal(row?.detail, null, 'whose stored body no longer parses');
+    assert.equal(evidence.inputScreening.verdict, null);
+    assert.equal(gapMatching(evidence, /could not be read back/).length, 1);
+    assert.equal(gapMatching(evidence, /No cleared pre-generation/).length, 0);
   });
 });
 
@@ -442,7 +473,20 @@ const ocrDetail = (over: Record<string, unknown> = {}): Record<string, unknown> 
   ...over,
 });
 
-/** One stored concept plus the audit rows that gated it, assembled. */
+/** The audit detail for the CONTROL concept (slot 3), which always reports its
+ *  seed. Every test below asserts it, so a `seedForConcept` that returned null
+ *  unconditionally — the shape these tests would decay into — fails all of
+ *  them rather than passing five. */
+const CONTROL_SEED = 313131;
+const controlDetail = (): Record<string, unknown> =>
+  ocrDetail({
+    transcription: CONCEPTS[2]!.ocrTranscription,
+    score: CONCEPTS[2]!.ocrScore,
+    vendorRequestId: CONCEPTS[2]!.vendorRequestId,
+    seed: CONTROL_SEED,
+  });
+
+/** Slot 1 under test plus an untouched slot-3 control, assembled. */
 async function withTrail(
   rows: Array<{ slot?: number; gate?: string; detail: unknown }>,
   stored: ConceptUpsert = CONCEPTS[0]!,
@@ -454,7 +498,9 @@ async function withTrail(
   const selection = createSelectionStore(db, () => NOW);
   const conceptsKey = await buildJobKey(CONTRACT, 'concepts');
   await concepts.upsert(stored);
-  for (const row of rows) {
+  await concepts.upsert(CONCEPTS[2]!);
+  const all = [...rows, { slot: 3, detail: controlDetail() }];
+  for (const row of all) {
     await jobs.recordGateAudit({
       jobKey: conceptsKey,
       contractId: CONTRACT,
@@ -470,54 +516,107 @@ async function withTrail(
   );
 }
 
+/** The seed under test, and the control that proves the reader still works. */
+function seeds(evidence: DisputeEvidence): { subject: number | null; control: number | null } {
+  const find = (slot: number): number | null =>
+    evidence.concepts.find((concept) => concept.slot === slot)?.seed ?? null;
+  return { subject: find(1), control: find(3) };
+}
+
 describe('assembleDisputeEvidence — the generation seed', () => {
   it('reports the seed recorded alongside the verdict the concept row stores', async () => {
     // Precondition: the audit detail really does describe the stored row.
     assert.equal(CONCEPTS[0]!.ocrScore, 0.97);
     assert.equal(CONCEPTS[0]!.ocrTranscription, 'Harbor & Vine');
-    const evidence = await withTrail([{ detail: ocrDetail({ seed: 424242 }) }]);
-    assert.equal(evidence.concepts[0]!.seed, 424242);
+    assert.deepEqual(seeds(await withTrail([{ detail: ocrDetail({ seed: 424242 }) }])), {
+      subject: 424242,
+      control: CONTROL_SEED,
+    });
   });
 
-  it('picks the seed of the attempt that was KEPT, not the newest one', async () => {
+  it('reports the seed of the attempt that was KEPT, not the newest one', async () => {
     // The free taster keeps its BEST-scoring attempt rather than its last, so
     // "the newest ocr row for this slot" would name a seed the delivered image
-    // was never generated from.
+    // was never generated from. Here the discarded attempt is the LATER row.
     const evidence = await withTrail([
       { detail: ocrDetail({ seed: 111111 }) },
-      { detail: ocrDetail({ seed: 999999, transcription: 'Harbcr & Vine', score: 0.42 }) },
+      {
+        detail: ocrDetail({
+          seed: 999999,
+          transcription: 'Harbcr & Vine',
+          score: 0.42,
+          pass: false,
+          vendorRequestId: 'ideogram-req-1-b',
+        }),
+      },
     ]);
-    assert.equal(evidence.concepts[0]!.seed, 111111);
+    assert.deepEqual(seeds(evidence), { subject: 111111, control: CONTROL_SEED });
+  });
+
+  it('tells two attempts apart by the vendor request id, the only field that differs', async () => {
+    // The rest of the join key is one degree of freedom: the model is a pinned
+    // constant and the score is a pure function of the transcription and the
+    // brand name, so two attempts reading back identically — the NORMAL case —
+    // are distinguished by nothing else.
+    const evidence = await withTrail([
+      { detail: ocrDetail({ seed: 999999, vendorRequestId: 'ideogram-req-1-b' }) },
+      { detail: ocrDetail({ seed: 424242 }) },
+    ]);
+    assert.deepEqual(seeds(evidence), { subject: 424242, control: CONTROL_SEED });
   });
 
   it('reports no seed when the vendor returned none', async () => {
     const evidence = await withTrail([{ detail: ocrDetail() }]);
-    assert.equal(evidence.concepts[0]!.seed, null);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
     assert.equal(evidence.concepts[0]!.ocr?.score, 0.97, 'the verdict is still reported');
   });
 
-  it('refuses to name a seed when two matching rows disagree', async () => {
+  it('refuses to name a seed when two indistinguishable rows disagree', async () => {
     const evidence = await withTrail([
       { detail: ocrDetail({ seed: 111111 }) },
       { detail: ocrDetail({ seed: 222222 }) },
     ]);
-    assert.equal(evidence.concepts[0]!.seed, null, 'a maybe-wrong seed is worse than none');
+    assert.deepEqual(
+      seeds(evidence),
+      { subject: null, control: CONTROL_SEED },
+      'a maybe-wrong seed is worse than none',
+    );
+  });
+
+  it('lets a silent row outvote a seeded one it cannot be told apart from', async () => {
+    // THE C1 SHAPE, unit-sized: attempt 1 recorded a seed, the attempt whose
+    // bytes were kept recorded none, and nothing distinguishes them. Skipping
+    // the silent row would read as unanimous for an image we discarded.
+    const evidence = await withTrail([
+      { detail: ocrDetail({ seed: 111111 }) },
+      { detail: ocrDetail() },
+    ]);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
+  });
+
+  it('lets an unreadable row outvote a seeded one', async () => {
+    // A readable row can be ruled out as another attempt's; an unreadable one
+    // cannot, so it votes rather than being skipped.
+    const evidence = await withTrail([
+      { detail: ocrDetail({ seed: 111111 }) },
+      { detail: undefined },
+    ]);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
   });
 
   it('ignores a seed that is not a number', async () => {
     const evidence = await withTrail([{ detail: ocrDetail({ seed: '424242' }) }]);
-    assert.equal(evidence.concepts[0]!.seed, null);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
   });
 
   it("never attaches another slot's seed", async () => {
     const evidence = await withTrail([{ slot: 2, detail: ocrDetail({ seed: 424242 }) }]);
-    assert.equal(evidence.concepts[0]!.slot, 1);
-    assert.equal(evidence.concepts[0]!.seed, null);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
   });
 
   it('ignores a seed on a row from a different gate', async () => {
     const evidence = await withTrail([{ gate: 'phash', detail: ocrDetail({ seed: 424242 }) }]);
-    assert.equal(evidence.concepts[0]!.seed, null);
+    assert.deepEqual(seeds(evidence), { subject: null, control: CONTROL_SEED });
   });
 });
 
