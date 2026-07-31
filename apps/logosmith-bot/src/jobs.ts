@@ -639,6 +639,23 @@ export interface QuotaStore {
     contractId: string,
     limits: { windowDays: number; maxPerPayer: number },
   ): Promise<boolean>;
+  /**
+   * Give the allowance back, because the job it was taken for ended in OUR
+   * failure and delivered nothing.
+   *
+   * "A free allowance must never be spent on our failure" is the rule the whole
+   * consume-late design exists to serve, and it holds right up to the last
+   * branch: a taster whose readback gate was down for its entire regeneration
+   * budget consumed an allowance, delivered nothing, and kept it forever.
+   *
+   * ONLY EVER CALLED ON A TERMINAL, EMPTY-HANDED OUTCOME. Releasing a job that
+   * is merely parked would let a retry re-consume against a cap that has since
+   * filled, and `holdsAllowance` is what protects an in-flight job from
+   * destroying itself (see `runSingleStage`). Deleting rather than flagging
+   * keeps `countRecent` and the `NOT EXISTS` clause in `consume` honest with
+   * one statement instead of three.
+   */
+  release(contractId: string): Promise<void>;
 }
 
 /**
@@ -717,6 +734,10 @@ export function createQuotaStore(db: D1Like, now: () => Date = () => new Date())
       // (refuse). Both are settled states by the time we ask, so this read
       // cannot race the way the pre-insert check did.
       return holdsAllowance(contractId);
+    },
+
+    async release(contractId) {
+      await db.prepare('DELETE FROM free_gig_usage WHERE contract_id = ?').bind(contractId).run();
     },
   };
 }

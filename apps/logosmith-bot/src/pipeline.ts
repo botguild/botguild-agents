@@ -1638,8 +1638,13 @@ function licenseRows(
 // release the escrow instead tells them the truth: nothing was charged, and
 // re-posting the gig is the entire remedy.
 
-/** FR-17 gate name recording the free-gig allowance this job consumed. */
-const FREE_GIG_USAGE_GATE = 'free-gig-usage';
+/**
+ * FR-17 gate name recording the free-gig allowance this job consumed — and, on
+ * a terminal empty-handed outcome, gave back (`result: 'released'`). Exported
+ * so a test reads the trail by the same constant that writes it rather than by
+ * a copied string.
+ */
+export const FREE_GIG_USAGE_GATE = 'free-gig-usage';
 
 /**
  * WHEN A FREE GIG CONSUMES ITS ALLOWANCE — the whole abuse guard turns on this.
@@ -1991,6 +1996,19 @@ async function runFaviconGig(
     detail: pack.gates,
   });
   if (!pack.gates.pass) {
+    // Same rule as the taster's empty-handed leg: nothing shipped, and the pack
+    // failing OUR gates is OUR failure, so the allowance goes back.
+    const heldAllowance = await config.quota.holdsAllowance(contractId);
+    if (heldAllowance) {
+      await config.quota.release(contractId);
+      await jobs.recordGateAudit({
+        jobKey,
+        contractId,
+        gate: FREE_GIG_USAGE_GATE,
+        result: 'released',
+        detail: { kind: 'favicon', reason: 'the assembled pack failed its own gates' },
+      });
+    }
     await client.sendMessage(
       contractId,
       [
@@ -2004,8 +2022,9 @@ async function runFaviconGig(
         ...faviconGateLines(pack.gates),
         '',
         'Nothing has been charged — this was a free LogoSmith job, so there is no payment and ' +
-          'nothing for you to cancel. Reply here with a different logo file and it will be ' +
-          'rebuilt.',
+          'nothing for you to cancel — and this has NOT been counted against your free-job ' +
+          'allowance, because the failure was on LogoSmith’s side. Post the gig again with a ' +
+          'different logo file and LogoSmith will pick it up automatically.',
       ].join('\n'),
     );
     await jobs.markDelivered(jobKey, 'aborted');
@@ -2245,25 +2264,68 @@ async function runTasterGig(
 
   const verdict = slot.ocr;
   if (!verdict || !slot.r2Key) {
-    // Every attempt failed to produce an image at all — a vendor refusal, not a
-    // failed readback. There is nothing to be honest ABOUT, so nothing ships.
+    // NOTHING SHIPS, SO THE ALLOWANCE GOES BACK. T23's own rule is that a free
+    // allowance must never be spent on OUR failure, and this is the branch it
+    // was not applied to: the whole consume-late design protects the buyer up
+    // to the point of no return and then kept the allowance whatever happened
+    // after it. Released before the buyer is told, so the message below cannot
+    // promise something the row does not yet reflect.
+    const heldAllowance = await config.quota.holdsAllowance(contractId);
+    if (heldAllowance) {
+      await config.quota.release(contractId);
+      await jobs.recordGateAudit({
+        jobKey,
+        contractId,
+        gate: FREE_GIG_USAGE_GATE,
+        result: 'released',
+        detail: { kind: 'taster', reason: 'nothing was delivered', attempts: slot.attempts },
+      });
+    }
+
+    // TWO DIFFERENT FAILURES REACH THIS LEG, AND THE OLD COPY DESCRIBED ONLY
+    // ONE OF THEM. An OCR-vendor outage that outlasts the FR-5 regeneration
+    // budget lands here having generated and PAID FOR every attempt, and was
+    // told "the image model refused every attempt (no image was returned)" —
+    // false twice over, on top of silently keeping the free allowance.
+    //
+    // THE LEDGER IS THE DISCRIMINATOR, NOT `slot.attempts`: the non-retryable
+    // branch above sets `attempts` to the cap to burn the budget, so a vendor
+    // refusal that produced nothing also reads as three "attempts". Spend is
+    // credited only when a vendor was actually paid, which is exactly the
+    // question the wording turns on.
+    const cause =
+      checkpoint.spendUsd > 0
+        ? 'LogoSmith did generate at least one sample image, but never got a readback verdict ' +
+          'confirming your brand name is legible in it — the check that does that was ' +
+          'unavailable, and LogoSmith does not ship a sample it has not read back.'
+        : 'The image model refused every attempt' +
+          `${slot.failReason ? ` (${slot.failReason})` : ''}, so there was never an image to ` +
+          'check.';
     await client.sendMessage(
       contractId,
-      'LogoSmith could not produce your free sample concept: the image model refused every ' +
-        `attempt (${slot.failReason ?? 'no image was returned'}). Nothing has been delivered ` +
-        'and nothing has been charged — this was a free LogoSmith job, so there is no payment ' +
-        'and nothing for you to cancel. A shorter brand name generates far more reliably; ' +
-        'post the gig again and LogoSmith will bid on it automatically.',
+      `LogoSmith could not deliver your free sample concept. ${cause} Nothing has been ` +
+        'delivered and nothing has been charged — this was a free LogoSmith job, so there is ' +
+        'no payment and nothing for you to cancel — and this has NOT been counted against your ' +
+        'free-job allowance, because the failure was on LogoSmith’s side rather than yours. ' +
+        'Post the gig again and LogoSmith will bid on it automatically.',
     );
     await jobs.recordGateAudit({
       jobKey,
       contractId,
       gate: 'free-delivery',
       result: 'aborted',
-      detail: { kind: 'taster', attempts: slot.attempts, spendUsd: checkpoint.spendUsd },
+      detail: {
+        kind: 'taster',
+        attempts: slot.attempts,
+        spendUsd: checkpoint.spendUsd,
+        allowanceReleased: heldAllowance,
+      },
     });
     await jobs.markDelivered(jobKey, 'aborted');
-    log.error({ attempts: slot.attempts }, 'taster produced no image; nothing delivered');
+    log.error(
+      { attempts: slot.attempts, allowanceReleased: heldAllowance },
+      'taster delivered nothing; allowance released',
+    );
     return { outcome: 'aborted' };
   }
 

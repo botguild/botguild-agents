@@ -39,6 +39,7 @@ import { renderSvgToPng } from './pack/render.js';
 import { nodeWasmSources } from './pack/wasm.node.js';
 import { FAVICON_ZIP_ENTRIES, unzipFiles } from './pack/zip.js';
 import {
+  FREE_GIG_USAGE_GATE,
   processJobMessage,
   runConceptStage,
   runSingleStage,
@@ -1229,6 +1230,65 @@ describe('runSingleStage — the US-3 taster', () => {
     assert.equal(h.deliveries.length, 0);
     assert.match(h.messages[0]!, /nothing for you to cancel/);
     assert.equal(/escrow/i.test(h.messages[0]!), false);
+    assert.equal(await usage(h), 0, 'nothing was generated, so nothing was consumed');
+  });
+
+  // T23'S OWN PRINCIPLE, APPLIED TO THE ONE BRANCH THAT DID NOT HONOUR IT:
+  // "a free allowance must never be spent on OUR failure." The consume-late
+  // design protects the buyer right up to the point of no return, and then
+  // kept the allowance whatever happened after it.
+  it('CRITICAL: releases the allowance when an OCR outage burns the whole budget', async () => {
+    // The vision gate is down for this taster's entire life. Each attempt
+    // generates (paid), parks, and is re-enqueued; after the FR-5 allowance is
+    // exhausted the loop exits with no verdict and no r2Key, so nothing ships.
+    const h = await setupFree({
+      description: TASTER_DESCRIPTION,
+      ocr: () => ({ status: 'unavailable' as const, error: 'ai binding 500' }),
+    });
+
+    let outcome = await runSingleStage(h.config, h.message);
+    let cycles = 0;
+    while (outcome.outcome === 'parked' && cycles < 10) {
+      await h.jobs.unpark(h.jobKey);
+      outcome = await runSingleStage(h.config, h.message);
+      cycles += 1;
+    }
+
+    // Fixture preconditions, inline — this must be the scenario it claims to
+    // be, not merely a run that ended aborted.
+    assert.deepEqual(outcome, { outcome: 'aborted' });
+    assert.equal(h.generated, 1 + MAX_REGENS_PER_SLOT, 'the images WERE generated and paid for');
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(job!.checkpoint!.slots[0]!.ocr, undefined, 'and never got a verdict');
+    assert.equal(job!.checkpoint!.slots[0]!.r2Key, undefined);
+    assert.equal(h.deliveries.length, 0);
+
+    // THE FIX: the allowance is given back, and the buyer is told so.
+    assert.equal(await usage(h), 0, 'our vendor’s outage must not cost the buyer a free job');
+    const trail = await h.jobs.listGateAudit(h.jobKey, FREE_GIG_USAGE_GATE);
+    assert.ok(trail.some((row) => row.result === 'released'));
+
+    // ...and the copy is true. It used to say "the image model refused every
+    // attempt (no image was returned)" and "nothing has been charged" — false
+    // on both counts here, with the allowance quietly kept on top.
+    const note = h.messages.at(-1)!;
+    assert.match(note, /did generate at least one sample image/);
+    assert.match(note, /NOT been counted against your free-job allowance/);
+    assert.doesNotMatch(note, /refused every attempt/);
+    assert.doesNotMatch(note, /no image was returned/);
+  });
+
+  it('still names a genuine vendor refusal as one, with no images claimed', async () => {
+    // CONTROL for the message above: the other branch of the same leg. Zero
+    // generations, so the wording must not claim any.
+    const h = await setupFree({
+      description: TASTER_DESCRIPTION,
+      generate: () => ({ ok: false, retryable: false, error: 'prompt rejected' }),
+    });
+    await runSingleStage(h.config, h.message);
+    const note = h.messages.at(-1)!;
+    assert.match(note, /refused every attempt/);
+    assert.doesNotMatch(note, /did generate at least one sample image/);
   });
 });
 
@@ -1325,6 +1385,7 @@ describe('runSingleStage — the quota holds under concurrency (the farming atta
       countRecent: async () => 0, // entry check: plenty of room
       holdsAllowance: (contractId) => real.holdsAllowance(contractId),
       consume: async () => false, // ...and the last slot went while we generated
+      release: (contractId) => real.release(contractId),
     };
 
     assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
@@ -1447,6 +1508,9 @@ describe('the warranty revision round (FR-18)', () => {
       },
       consume: () => {
         throw new Error('the paid pipeline must never consume a free-gig allowance');
+      },
+      release: () => {
+        throw new Error('the paid pipeline must never touch a free-gig allowance');
       },
     };
     const jobKey = await buildJobKey(contractKey, 'concepts');
