@@ -56,22 +56,52 @@ export interface ProseGig {
 export type ProseBriefExtractor = LogoBriefExtractorLike<ProseGig>;
 
 /**
- * Fold everything the buyer wrote into one payload.
+ * Bounds on the model input.
+ *
+ * THIS RUNS AT GIG-DISCOVERY TIME, upstream of every contract, quota and spend
+ * ledger — on gig text nobody has agreed to anything about yet. Unbounded, one
+ * posted gig sets our token bill: a 1,026,038-character description measured
+ * three paid Haiku calls and roughly $0.60 for a single gig that earned
+ * nothing. These caps are far past any real gig (the representative live gig
+ * measured 412 input tokens in total) and cost a genuine posting nothing.
+ */
+const MAX_TITLE_CHARS = 200;
+const MAX_DESCRIPTION_CHARS = 4_000;
+const MAX_LIST_ITEMS = 20;
+const MAX_LIST_ITEM_CHARS = 300;
+const MAX_TAGS_CHARS = 300;
+/** Belt and braces over the per-section caps, and the number that actually binds. */
+export const MAX_PROSE_EXTRACTION_CHARS = 6_000;
+
+const clamp = (text: string, max: number): string =>
+  text.length > max ? text.slice(0, max) : text;
+
+/**
+ * Fold everything the buyer wrote into one payload, bounded.
  *
  * This string is BOTH the model's input and the corpus the extracted brand
  * name is grounded against, and that coupling is deliberate: the model may
  * quote from exactly what it was shown, so the two can never be built from
  * different fields. Widening the prompt widens what counts as grounded — which
  * is correct, and is why it must stay one function.
+ *
+ * TRUNCATION IS SAFE IN THE ONLY DIRECTION THAT MATTERS, and it is safe FOR
+ * that same reason: the model is shown exactly this string, so it can only
+ * quote from this string, and grounding is checked against this string. A brand
+ * name that fell off the end cannot be extracted AND cannot be grounded — the
+ * gig is refused rather than mis-read. Never truncate one and not the other.
  */
 export function buildProseExtractionInput(gig: ProseGig): string {
   const sections: string[] = [
-    `TITLE: ${(gig.title ?? '').trim()}`,
-    `DESCRIPTION:\n${(gig.description ?? '').trim()}`,
+    `TITLE: ${clamp((gig.title ?? '').trim(), MAX_TITLE_CHARS)}`,
+    `DESCRIPTION:\n${clamp((gig.description ?? '').trim(), MAX_DESCRIPTION_CHARS)}`,
   ];
 
   const nonBlank = (values: string[]): string[] =>
-    values.map((value) => value.trim()).filter((value) => value.length > 0);
+    values
+      .map((value) => clamp(value.trim(), MAX_LIST_ITEM_CHARS))
+      .filter((value) => value.length > 0)
+      .slice(0, MAX_LIST_ITEMS);
 
   const criteria = nonBlank((gig.acceptanceCriteria ?? []).map(criterionText));
   if (criteria.length > 0) {
@@ -82,9 +112,9 @@ export function buildProseExtractionInput(gig: ProseGig): string {
     sections.push(`DELIVERABLES:\n${deliverables.map((text) => `- ${text}`).join('\n')}`);
   }
   const tags = nonBlank(gig.tags ?? []);
-  if (tags.length > 0) sections.push(`TAGS: ${tags.join(', ')}`);
+  if (tags.length > 0) sections.push(clamp(`TAGS: ${tags.join(', ')}`, MAX_TAGS_CHARS));
 
-  return sections.join('\n\n');
+  return clamp(sections.join('\n\n'), MAX_PROSE_EXTRACTION_CHARS);
 }
 
 // MEASURED 2026-07-31 via the (free) count_tokens endpoint: this system prompt
@@ -177,6 +207,15 @@ export function createProseBriefExtractor(deps: {
    * spend sink is an extractor whose cost goes unrecorded by default.
    */
   recordSpend: (costUsd: number) => void;
+  /**
+   * Where the vendor's actual error goes. Required for the same reason
+   * `recordSpend` is: the buyer-facing `reason` deliberately carries NOTHING
+   * from the vendor (a 401 body names our internal `request_id`, and that
+   * string is posted into the contract thread, persisted to `gate_audit` and
+   * re-published by disputes.ts), so without a sink here the diagnosis is
+   * simply lost. Operator-facing only — never a buyer or evidence sink.
+   */
+  logError: (err: unknown) => void;
 }): ProseBriefExtractor {
   return {
     async extract(gig: ProseGig): Promise<BriefResult<LogoBrief>> {
@@ -194,9 +233,24 @@ export function createProseBriefExtractor(deps: {
         });
       } catch (err) {
         deps.recordSpend(0);
+        deps.logError(err);
+        // AN OUTAGE, NOT A VERDICT ON THE BRIEF — and the two must not look
+        // alike, because they lead to opposite decisions. This used to collapse
+        // into a plain `{ok:false}` indistinguishable from "this gig names no
+        // brand", which terminally rejected a FUNDED contract and put it beyond
+        // the parked sweep's reach: our vendor's bad minute permanently killed
+        // a paid job.
+        //
+        // AND THE MESSAGE CARRIED THE VENDOR'S BODY. An Anthropic 401 includes
+        // our internal `request_id`; that string was posted verbatim into the
+        // buyer's thread, persisted to `gate_audit`, and re-published by
+        // disputes.ts — whose own docstring names the invariant it violates.
+        // The real error goes to `logError` and nowhere else.
         return {
           ok: false,
-          reason: `prose brief extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+          unavailable: true,
+          reason:
+            'the service LogoSmith uses to read a brief out of prose is temporarily unavailable',
         };
       }
       deps.recordSpend(extractionCostUsd(response.usage));

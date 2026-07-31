@@ -13,7 +13,35 @@
 
 import type { FaviconBrief, LogoBrief } from './types.js';
 
-export type BriefResult<T> = { ok: true; brief: T } | { ok: false; reason: string };
+export type BriefResult<T> =
+  | { ok: true; brief: T }
+  | {
+      ok: false;
+      /**
+       * Buyer-facing, and it goes into the contract thread AND the `gate_audit`
+       * evidence trail. NEVER put a third-party error body in here — see
+       * `unavailable` below, and disputes.ts's `DisputeAuditRow.detail`, whose
+       * docstring names the write-side rule this has to satisfy.
+       */
+      reason: string;
+      /**
+       * OUR failure, not the buyer's: the brief could not be READ, as opposed
+       * to being wrong. Set only when a vendor this bot depends on was
+       * unreachable or errored.
+       *
+       * THE CALLER MUST PARK RATHER THAN REJECT. Collapsing an outage into
+       * "no brief" terminally rejects a FUNDED contract — `markDelivered`
+       * puts it beyond the parked sweep's reach — so one bad minute at a
+       * vendor permanently kills a paid job. The moderation path two steps
+       * away already does this correctly: unavailable -> park -> cron retry ->
+       * six-hour give-up with a note.
+       *
+       * ABSENT MEANS "THE BRIEF IS WRONG", which is the terminal answer. A new
+       * failure mode that is really an outage must set this flag; if you are
+       * adding one and hesitating, it is an outage.
+       */
+      unavailable?: true;
+    };
 export type UrlCheck = { ok: true; url: URL } | { ok: false; reason: string };
 
 const FENCE_RE = /```(?:json)?\s*\n([\s\S]*?)\n?```/i;
@@ -202,6 +230,12 @@ export async function resolveBrief<G extends { description?: string | null }>(
 
   const extracted = await extractor.extract(gig);
   if (extracted.ok) return extracted;
+  // An OUTAGE PROPAGATES UNCHANGED and is not merged with the fenced-path
+  // reason. "This gig has no fenced block" is true but irrelevant when the
+  // reason we cannot read the prose is that a vendor is down — and blending
+  // the two produces a message that reads as the buyer's fault, attached to a
+  // decision (park, not reject) that is ours.
+  if (extracted.unavailable) return extracted;
   return {
     ok: false,
     reason: `${fenced.reason}; prose extraction also failed: ${extracted.reason}`,

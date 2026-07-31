@@ -52,6 +52,7 @@ import {
   type BriefResult,
 } from './brief.js';
 import {
+  BRIEF_OUTAGE_PARK_REASON,
   CONCEPT_COUNT,
   FREE_GIGS_PER_PAYER,
   FREE_GIG_WINDOW_DAYS,
@@ -358,6 +359,10 @@ function resolveServices(config: PipelineConfig): PipelineServices {
           anthropic: new Anthropic({ apiKey: config.secrets.anthropicApiKey }),
           recordSpend: (costUsd) =>
             config.logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'prose brief extraction spend'),
+          // Operator-side only: the buyer-facing reason must never carry a
+          // vendor error body (see `BriefResult.reason` in brief.ts).
+          logError: (err) =>
+            config.logger.warn({ err, model: HAIKU_MODEL_ID }, 'prose brief extraction failed'),
         }).extract(gig),
     },
   };
@@ -422,6 +427,56 @@ function moderationText(brief: LogoBrief): string {
   return logoBriefFreeText(brief)
     .filter((part) => part.trim().length > 0)
     .join('\n');
+}
+
+/**
+ * A brief we could not READ, as opposed to one that is wrong.
+ *
+ * PARK, DO NOT REJECT — the shape the FR-2 moderation path two steps away
+ * already uses: park, cron re-enqueue every fifteen minutes, six-hour give-up
+ * with a buyer note. A brief-extraction outage used to collapse into the
+ * "invalid brief" leg, which calls `markDelivered('rejected')` and so puts a
+ * FUNDED contract beyond the parked sweep's reach for good: one bad minute at
+ * a vendor permanently killed a paid job.
+ *
+ * NOTHING FROM THE VENDOR IS REPUBLISHED. `reason` is our own sentence (see
+ * `BriefResult.reason`); the vendor's body — which for an Anthropic 401
+ * includes our internal `request_id` — went to the extractor's `logError` sink
+ * and no further.
+ *
+ * The buyer is told once, at the Nth failed attempt, counted off the FR-17
+ * audit trail rather than a new column. Silence for six hours is the thing the
+ * moderation path already refuses to do.
+ */
+async function parkOnBriefOutage(
+  config: PipelineConfig,
+  args: { jobKey: string; contractId: string; reason: string; log: Logger },
+): Promise<StageOutcome> {
+  const { jobKey, contractId, reason } = args;
+  await config.jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'brief',
+    result: 'unavailable',
+    detail: { reason },
+  });
+  await config.jobs.park(jobKey, BRIEF_OUTAGE_PARK_REASON);
+  const attempts = (await config.jobs.listGateAudit(jobKey, 'brief')).filter(
+    (row) => row.result === 'unavailable',
+  ).length;
+  args.log.warn({ reason, attempts }, 'brief extraction unavailable; job parked');
+  // Exactly once — the count is monotonic, so `===` tells the buyer without
+  // re-telling them on every cron cycle after (the FR-2 idiom).
+  if (attempts === MODERATION_ATTEMPTS_BEFORE_NOTICE) {
+    await config.client.sendMessage(
+      contractId,
+      'Status update: LogoSmith reads the brand brief out of your gig text before generating ' +
+        `anything, and the service it uses to do that has been unavailable for ${attempts} ` +
+        'attempts. The job is queued and retries automatically — no action is needed from you, ' +
+        'and nothing has been generated or charged.',
+    );
+  }
+  return { outcome: 'parked' };
 }
 
 const toStageOutcome = (outcome: JobOutcome | null): StageOutcome['outcome'] =>
@@ -716,6 +771,9 @@ export async function runConceptStage(
 
   // --- Step 2: re-validate the brief (FR-1) ---------------------------------
   const briefResult = await resolveBrief(config, job, contract, services.briefExtractor);
+  if (!briefResult.ok && briefResult.unavailable) {
+    return parkOnBriefOutage(config, { jobKey, contractId, reason: briefResult.reason, log });
+  }
   if (!briefResult.ok) {
     await jobs.recordGateAudit({
       jobKey,
@@ -1236,6 +1294,9 @@ export async function runVectorStage(
     contract,
     services.briefExtractor,
   );
+  if (!briefResult.ok && briefResult.unavailable) {
+    return parkOnBriefOutage(config, { jobKey, contractId, reason: briefResult.reason, log });
+  }
   if (!briefResult.ok) {
     await jobs.recordGateAudit({
       jobKey,
@@ -2339,6 +2400,12 @@ export async function runSingleStage(
   // validate, never WHERE the rejection sits, so a refused brief still consumes
   // no allowance.
   const logoBrief = await resolveGigBrief(gig, services.briefExtractor);
+  // Our failure, not the buyer's: park for the cron rather than telling a free
+  // buyer their brief is bad and closing the job. No allowance is consumed —
+  // `consumeFreeGigQuota` sits inside the gig runners below, downstream of this.
+  if (!logoBrief.ok && logoBrief.unavailable) {
+    return parkOnBriefOutage(config, { jobKey, contractId, reason: logoBrief.reason, log });
+  }
   if (logoBrief.ok) {
     return runTasterGig(config, {
       job,

@@ -434,6 +434,10 @@ function getServices(env: Env): Services {
       anthropic: new Anthropic({ apiKey: env.ANTHROPIC_API_KEY }),
       recordSpend: (costUsd) =>
         logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'prose brief extraction spend'),
+      // The vendor's own error, operator-side only. The buyer-facing reason
+      // deliberately carries nothing from it.
+      logError: (err) =>
+        logger.warn({ err, model: HAIKU_MODEL_ID }, 'prose brief extraction failed'),
     }),
     queue: env.JOBS,
     apiUrl: env.BOTGUILD_API_URL,

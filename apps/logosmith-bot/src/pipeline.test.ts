@@ -6,6 +6,7 @@ import { createConsoleLogger } from '@botguild/agent-core-workers';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
 import type { D1Like } from '@botguild/agent-core-workers';
 import {
+  BRIEF_OUTAGE_PARK_REASON,
   IMAGE_COST_USD,
   MAX_REGENS_PER_SLOT,
   MAX_SPEND_USD,
@@ -832,6 +833,64 @@ describe('runConceptStage — brief resolution inside the funded pipeline (Task 
       JSON.stringify(BRIEF),
       'the extracted brief becomes the stored brief of record',
     );
+  });
+
+  it('PARKS on a brief-extraction outage instead of terminally rejecting a funded contract', async () => {
+    // `markDelivered('rejected')` removes a job from the parked sweep's reach
+    // for good, so collapsing an outage into "no brief" meant our vendor's bad
+    // minute permanently killed a paid job. The moderation path two steps away
+    // already parks; this now uses the same shape.
+    const h = await setup({
+      description: PROSE,
+      extractedBrief: {
+        ok: false,
+        unavailable: true,
+        reason:
+          'the service LogoSmith uses to read a brief out of prose is temporarily unavailable',
+      },
+    });
+
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'parked' });
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(job?.status, 'parked');
+    assert.equal(job?.parkReason, BRIEF_OUTAGE_PARK_REASON);
+    assert.notEqual(job?.outcome, 'rejected');
+    assert.equal(h.generated.length, 0, 'nothing generated on an unread brief');
+    assert.equal(h.messages.length, 0, 'the buyer is not pinged on the first outage');
+
+    // ...and the cron can actually reach it again, which is the whole point.
+    await h.jobs.unpark(h.jobKey);
+    assert.equal((await h.jobs.get(h.jobKey))?.status, 'claimed');
+  });
+
+  it('tells the buyer once, and never republishes the vendor error', async () => {
+    const h = await setup({
+      description: PROSE,
+      extractedBrief: {
+        ok: false,
+        unavailable: true,
+        reason:
+          'the service LogoSmith uses to read a brief out of prose is temporarily unavailable',
+      },
+    });
+    for (let i = 0; i < MODERATION_ATTEMPTS_BEFORE_NOTICE + 2; i++) {
+      await runConceptStage(h.config, message(h.jobKey));
+      await h.jobs.unpark(h.jobKey);
+    }
+    assert.equal(h.messages.length, 1, 'exactly one notice, not one per cron cycle');
+    assert.match(h.messages[0]!, /retries automatically/);
+    assert.match(h.messages[0]!, /nothing has been generated or charged/);
+  });
+
+  it('still REJECTS a brief that is simply wrong — the two must not look alike', async () => {
+    // The distinction is the decision: an outage parks and retries, an
+    // unusable brief tells the buyer to fix their gig and closes the job.
+    const h = await setup({
+      description: PROSE,
+      extractedBrief: { ok: false, reason: 'this gig does not clearly name a brand' },
+    });
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'aborted' });
+    assert.equal((await h.jobs.get(h.jobKey))?.outcome, 'rejected');
   });
 
   it('hands the extractor the whole gig, not just its description', async () => {

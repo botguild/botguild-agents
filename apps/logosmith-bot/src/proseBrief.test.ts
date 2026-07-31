@@ -5,6 +5,7 @@ import {
   buildProseExtractionInput,
   createProseBriefExtractor,
   extractionCostUsd,
+  MAX_PROSE_EXTRACTION_CHARS,
   type ProseBriefExtractor,
   type ProseGig,
 } from './proseBrief.js';
@@ -68,13 +69,20 @@ function fakeAnthropic(
   };
 }
 
-function extractorOver(anthropic: unknown): { extractor: ProseBriefExtractor; spend: number[] } {
+function extractorOver(anthropic: unknown): {
+  extractor: ProseBriefExtractor;
+  spend: number[];
+  /** Where the vendor's real error goes — deliberately NOT into `reason`. */
+  logged: unknown[];
+} {
   const spend: number[] = [];
+  const logged: unknown[] = [];
   const extractor = createProseBriefExtractor({
     anthropic: anthropic as never,
     recordSpend: (usd) => spend.push(usd),
+    logError: (err) => logged.push(err),
   });
-  return { extractor, spend };
+  return { extractor, spend, logged };
 }
 
 describe('buildProseExtractionInput', () => {
@@ -107,6 +115,37 @@ describe('buildProseExtractionInput', () => {
     assert.ok(!input.includes('DELIVERABLES'));
     assert.ok(!input.includes('TAGS'));
     assert.ok(input.includes('Just a title'));
+  });
+
+  // THIS RUNS AT GIG-DISCOVERY TIME, upstream of every contract, quota and
+  // spend ledger — on text nobody has agreed to anything about yet. Unbounded,
+  // one posted gig sets our token bill: a 1,026,038-character description
+  // measured three paid Haiku calls, ~$0.60, for one gig with zero revenue.
+  it('caps a hostile gig, however large every field is', () => {
+    const input = buildProseExtractionInput({
+      title: 'T'.repeat(50_000),
+      description: 'D'.repeat(1_026_038),
+      acceptanceCriteria: Array.from({ length: 500 }, () => ({
+        kind: 'text' as const,
+        text: 'C'.repeat(5_000),
+      })),
+      deliverables: Array.from({ length: 500 }, () => 'V'.repeat(5_000)),
+      tags: Array.from({ length: 500 }, () => 'G'.repeat(5_000)),
+    });
+    assert.ok(
+      input.length <= MAX_PROSE_EXTRACTION_CHARS,
+      `input was ${input.length} characters, cap is ${MAX_PROSE_EXTRACTION_CHARS}`,
+    );
+  });
+
+  it('leaves a real gig untouched — the cap must cost a genuine posting nothing', () => {
+    // A false truncation is not free here: this string is ALSO the corpus the
+    // extracted brand name is grounded against, so anything cut off can never
+    // be extracted.
+    const input = buildProseExtractionInput(PROSE_GIG);
+    assert.ok(input.length < MAX_PROSE_EXTRACTION_CHARS);
+    assert.ok(input.includes('Harbor & Vine'));
+    assert.ok(input.includes('nautical kitsch'), 'full description, not a truncation');
   });
 });
 
@@ -297,19 +336,48 @@ describe('createProseBriefExtractor', () => {
   });
 
   describe('model failures never fabricate a brief', () => {
-    it('returns {ok:false} when the call throws', async () => {
-      const { extractor, spend } = extractorOver({
+    // THIS TEST USED TO ASSERT THE OPPOSITE — that the vendor's message
+    // appears in `reason`. That reason string is posted verbatim into the
+    // buyer's contract thread, persisted to `gate_audit`, and re-published by
+    // disputes.ts, so an Anthropic 401 (which names our internal `request_id`)
+    // went straight into a buyer-facing and evidence sink.
+    it('classifies a vendor throw as UNAVAILABLE and republishes nothing from it', async () => {
+      const vendorError = new Error(
+        '401 {"type":"error","error":{"type":"authentication_error",' +
+          '"message":"invalid x-api-key"},"request_id":"req_011CSecretInternalId"}',
+      );
+      const { extractor, spend, logged } = extractorOver({
         messages: {
           create: async () => {
-            throw new Error('overloaded_error');
+            throw vendorError;
           },
         },
       });
       const result = await extractor.extract(PROSE_GIG);
 
       assert.equal(result.ok, false);
-      assert.match(result.ok ? '' : result.reason, /overloaded_error/);
+      assert.ok(!result.ok);
+      // OUR failure, so the caller parks instead of terminally rejecting a
+      // funded contract.
+      assert.equal(result.unavailable, true);
+      // Nothing of the vendor's, checked by the pieces that actually matter
+      // rather than by a whole-string comparison.
+      for (const leak of ['401', 'request_id', 'req_011CSecretInternalId', 'x-api-key']) {
+        assert.ok(!result.reason.includes(leak), `reason leaked ${leak}`);
+      }
+      // ...but the diagnosis is not lost, it is just operator-side.
+      assert.deepEqual(logged, [vendorError]);
       assert.deepEqual(spend, [0], 'a failed call still books exactly one spend entry');
+    });
+
+    it('marks only OUTAGES unavailable — a model that named no brand is terminal', async () => {
+      // The distinction is the whole point: one parks and retries, the other
+      // tells the buyer to fix their gig. A flagless failure means "the brief
+      // is wrong".
+      const { extractor } = extractorOver(fakeAnthropic('{"brandName": null}'));
+      const result = await extractor.extract(PROSE_GIG);
+      assert.ok(!result.ok);
+      assert.equal(result.unavailable, undefined);
     });
 
     it('returns {ok:false} on an unparseable response', async () => {

@@ -36,6 +36,7 @@ import {
 } from '@botguild/agent-core-workers';
 import { parseFaviconBrief, resolveBrief } from './brief.js';
 import {
+  BRIEF_OUTAGE_PARK_REASON,
   MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
@@ -145,6 +146,7 @@ const PARK_REASON_VENDOR: Record<string, string> = {
   vendor_outage: 'the image-generation vendor for this job',
   ocr_outage: 'the vision model that verifies your lettering reads back correctly',
   vectorizer_outage: 'the vectorization vendor that turns the chosen concept into a true vector',
+  [BRIEF_OUTAGE_PARK_REASON]: 'the service that reads the brand brief out of your gig text',
 };
 
 const vendorFor = (reason: string | null): string =>

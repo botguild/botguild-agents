@@ -220,6 +220,18 @@ export const FREE_GIG_WINDOW_DAYS = 30;
 /** Failed moderation attempts before the buyer gets a thread status message (FR-2). */
 export const MODERATION_ATTEMPTS_BEFORE_NOTICE = 3;
 
+/**
+ * `park_reason` for a brief that could not be READ because the extraction
+ * vendor was down — as opposed to a brief that is wrong, which is terminal.
+ *
+ * Shared rather than written as a literal at both ends, because the park site
+ * (pipeline.ts) and the buyer-facing vendor name (sweeps.ts's
+ * `PARK_REASON_VENDOR`) must agree: a reason with no entry there degrades to
+ * "a vendor LogoSmith depends on", which is true but vague in the one message
+ * that ends the contract.
+ */
+export const BRIEF_OUTAGE_PARK_REASON = 'brief_extraction_outage';
+
 /** `claimed` jobs older than this with no checkpoint are re-enqueued (§12). */
 export const STUCK_CLAIM_MINUTES = 30;
 
