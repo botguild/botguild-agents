@@ -52,6 +52,37 @@ const isRetryableStatus = (status: number): boolean => status === 429 || status 
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
+/**
+ * Run everything that happens AFTER a vendor accepted and billed a request, and
+ * make sure any failure inside it still reports what we were charged.
+ *
+ * STRUCTURAL, NOT AN ENUMERATION, AND THAT IS THE WHOLE POINT. The first
+ * version of this fix wrapped the two calls that were known to throw and left a
+ * comment on the outer catch-all asserting "nothing reaches this line already
+ * billed". That sentence was FALSE, and false for six separate paths: a 200
+ * whose body is a CDN/WAF interstitial, a body that is literal JSON `null`
+ * (`body.data` then throws on null), a stream that resets mid-read, the same two
+ * on the Recraft leg, and `ai.run` resolving null. Every one of them escaped to
+ * the outer catch and reported `retryable: true` with NO cost — the identical
+ * unmetered park loop the `costUsd` field exists to close, one branch over.
+ *
+ * A comment claiming a safety property is the most expensive kind to get wrong:
+ * it is precisely what stops the next reader from checking. So the property is
+ * now enforced by the shape of the code rather than asserted about it — a new
+ * dereference added anywhere below a billing point cannot silently opt out of
+ * cost attribution, because it is inside this wrapper by construction.
+ */
+async function billedAttempt(
+  costUsd: number,
+  attempt: () => Promise<GenerateResult>,
+): Promise<GenerateResult> {
+  try {
+    return await attempt();
+  } catch (err) {
+    return { ok: false, retryable: true, error: errorMessage(err), costUsd };
+  }
+}
+
 export function createGenerator(deps: {
   fetchImpl: FetchLike;
   ai: AiLike;
@@ -77,61 +108,57 @@ export function createGenerator(deps: {
         error: `ideogram returned ${response.status}`,
       };
     }
-    // PAST THIS LINE THE VENDOR HAS BEEN BILLED. The generation ran; every
-    // failure below is a PAID failure and carries `costUsd` so the FR-5 ledger
-    // sees it (see `GenerateResult`).
+    // PAST THIS LINE THE VENDOR HAS BEEN BILLED. The generation ran, so every
+    // failure below is a PAID failure — including the ones nobody enumerated.
+    // `billedAttempt` is what makes that structural rather than a claim.
     const billed = IMAGE_COST_USD.ideogram;
-    // VERIFIED LIVE 2026-07-30 against the real API. `created` is an ISO
-    // TIMESTAMP, not an id — the real per-request id is the `x-request-id`
-    // RESPONSE HEADER, and that is what the licence manifest must persist.
-    const requestId = response.headers.get('x-request-id') ?? undefined;
-    const body = (await response.json()) as {
-      created?: string;
-      data?: Array<{ url?: string; seed?: number; is_image_safe?: boolean }>;
-    };
-    const first = body.data?.[0];
-    const url = first?.url;
-    if (!url) {
+    return billedAttempt(billed, async () => {
+      // VERIFIED LIVE 2026-07-30 against the real API. `created` is an ISO
+      // TIMESTAMP, not an id — the real per-request id is the `x-request-id`
+      // RESPONSE HEADER, and that is what the licence manifest must persist.
+      const requestId = response.headers.get('x-request-id') ?? undefined;
+      // Both of the next two lines can throw on a 200: an unparseable body (a
+      // CDN/WAF interstitial, a reset stream) from `json()`, and a body of
+      // literal `null` from the `body.data` dereference.
+      const body = (await response.json()) as {
+        created?: string;
+        data?: Array<{ url?: string; seed?: number; is_image_safe?: boolean }>;
+      } | null;
+      const first = body?.data?.[0];
+      const url = first?.url;
+      if (!url) {
+        return {
+          ok: false,
+          retryable: true,
+          error: 'ideogram returned no image url',
+          costUsd: billed,
+        };
+      }
+      // The URL is EPHEMERAL — signed, with a 24 h `exp`. Fetch it now; never
+      // persist it. The pipeline PUTs the bytes to R2 immediately (Task 18) so a
+      // parked or DLQ-replayed job never depends on a dead vendor link.
+      const png = await fetchBytes(url);
+      if (!isPng(png)) {
+        return {
+          ok: false,
+          retryable: true,
+          error: 'ideogram asset was not a PNG',
+          costUsd: billed,
+        };
+      }
       return {
-        ok: false,
-        retryable: true,
-        error: 'ideogram returned no image url',
-        costUsd: billed,
+        ok: true,
+        costUsd: IMAGE_COST_USD.ideogram,
+        // `seed` makes a concept reproducible; record it in the gate audit detail.
+        concept: {
+          axisId: '',
+          vendor: 'ideogram',
+          vendorRequestId: requestId,
+          png,
+          seed: first.seed,
+        },
       };
-    }
-    // The URL is EPHEMERAL — signed, with a 24 h `exp`. Fetch it now; never
-    // persist it. The pipeline PUTs the bytes to R2 immediately (Task 18) so a
-    // parked or DLQ-replayed job never depends on a dead vendor link.
-    //
-    // Caught HERE rather than by the outer catch-all in `generate()`: that one
-    // cannot know whether the vendor had already been paid, and would report
-    // this paid failure as a free one.
-    let png: Uint8Array;
-    try {
-      png = await fetchBytes(url);
-    } catch (err) {
-      return { ok: false, retryable: true, error: errorMessage(err), costUsd: billed };
-    }
-    if (!isPng(png)) {
-      return {
-        ok: false,
-        retryable: true,
-        error: 'ideogram asset was not a PNG',
-        costUsd: billed,
-      };
-    }
-    return {
-      ok: true,
-      costUsd: IMAGE_COST_USD.ideogram,
-      // `seed` makes a concept reproducible; record it in the gate audit detail.
-      concept: {
-        axisId: '',
-        vendor: 'ideogram',
-        vendorRequestId: requestId,
-        png,
-        seed: first.seed,
-      },
-    };
+    });
   }
 
   // NOT verified live, unlike Ideogram above — this shape is from Recraft's
@@ -160,102 +187,103 @@ export function createGenerator(deps: {
     }
     // PAST THIS LINE THE VENDOR HAS BEEN BILLED — see `generateIdeogram`.
     const billed = IMAGE_COST_USD.recraft;
-    const body = (await response.json()) as {
-      id?: string;
-      data?: Array<{ url?: string; image_id?: string }>;
-    };
-    const url = body.data?.[0]?.url;
-    if (!url) {
-      return {
-        ok: false,
-        retryable: true,
-        error: 'recraft returned no image url',
-        costUsd: billed,
-      };
-    }
-    let bytes: Uint8Array;
-    try {
-      bytes = await fetchBytes(url);
-    } catch (err) {
-      return { ok: false, retryable: true, error: errorMessage(err), costUsd: billed };
-    }
-    const requestId = body.id ?? body.data?.[0]?.image_id;
-
-    // A vector-native return is the prize: it lets M2 skip Vectorizer.ai. When
-    // the URL yields only an SVG, the PNG comes back EMPTY — the pipeline
-    // (Task 18) rasterizes the sanitized SVG at 1024px for the OCR/pHash gates
-    // and persists the SVG to R2 for stage 2's short-circuit.
-    if (!isPng(bytes)) {
-      const text = new TextDecoder().decode(bytes);
-      if (text.includes('<svg')) {
+    return billedAttempt(billed, async () => {
+      const body = (await response.json()) as {
+        id?: string;
+        data?: Array<{ url?: string; image_id?: string }>;
+      } | null;
+      const url = body?.data?.[0]?.url;
+      if (!url) {
         return {
-          ok: true,
-          costUsd: IMAGE_COST_USD.recraft,
-          concept: {
-            axisId: '',
-            vendor: 'recraft',
-            vendorRequestId: requestId,
-            png: new Uint8Array(0),
-            nativeSvg: text,
-          },
+          ok: false,
+          retryable: true,
+          error: 'recraft returned no image url',
+          costUsd: billed,
+        };
+      }
+      const bytes = await fetchBytes(url);
+      const requestId = body?.id ?? body?.data?.[0]?.image_id;
+
+      // A vector-native return is the prize: it lets M2 skip Vectorizer.ai. When
+      // the URL yields only an SVG, the PNG comes back EMPTY — the pipeline
+      // (Task 18) rasterizes the sanitized SVG at 1024px for the OCR/pHash gates
+      // and persists the SVG to R2 for stage 2's short-circuit.
+      if (!isPng(bytes)) {
+        const text = new TextDecoder().decode(bytes);
+        if (text.includes('<svg')) {
+          return {
+            ok: true,
+            costUsd: IMAGE_COST_USD.recraft,
+            concept: {
+              axisId: '',
+              vendor: 'recraft',
+              vendorRequestId: requestId,
+              png: new Uint8Array(0),
+              nativeSvg: text,
+            },
+          };
+        }
+        return {
+          ok: false,
+          retryable: true,
+          error: 'recraft asset was neither PNG nor SVG',
+          costUsd: billed,
         };
       }
       return {
-        ok: false,
-        retryable: true,
-        error: 'recraft asset was neither PNG nor SVG',
-        costUsd: billed,
+        ok: true,
+        costUsd: IMAGE_COST_USD.recraft,
+        concept: { axisId: '', vendor: 'recraft', vendorRequestId: requestId, png: bytes },
       };
-    }
-    return {
-      ok: true,
-      costUsd: IMAGE_COST_USD.recraft,
-      concept: { axisId: '', vendor: 'recraft', vendorRequestId: requestId, png: bytes },
-    };
+    });
   }
 
   async function generateFlux(prompt: string): Promise<GenerateResult> {
-    const output = (await deps.ai.run(FLUX_MODEL_ID, { prompt })) as { image?: string };
+    const output = (await deps.ai.run(FLUX_MODEL_ID, { prompt })) as { image?: string } | null;
     // THE MODEL HAS RUN AND BEEN BILLED — see `generateIdeogram`. Klein is
     // near-free per call ($0.001), but the park loop this feeds is unbounded
     // without a spend signal, so "small" is not "zero".
     const billed = IMAGE_COST_USD.flux;
-    if (typeof output.image !== 'string') {
+    return billedAttempt(billed, async () => {
+      // `output?.image` rather than `output.image`: `ai.run` resolving null is
+      // one of the paths that used to throw straight past cost attribution.
+      if (typeof output?.image !== 'string') {
+        return {
+          ok: false,
+          retryable: true,
+          error: 'workers ai returned no image',
+          costUsd: billed,
+        };
+      }
+      // `atob` throws `InvalidCharacterError` on a non-base64 payload; the
+      // wrapper attributes it, so this branch only has to name it well.
+      let png: Uint8Array;
+      try {
+        const binary = atob(output.image);
+        png = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) png[i] = binary.charCodeAt(i);
+      } catch (err) {
+        return {
+          ok: false,
+          retryable: true,
+          error: `workers ai returned an undecodable image: ${errorMessage(err)}`,
+          costUsd: billed,
+        };
+      }
+      if (!isPng(png)) {
+        return {
+          ok: false,
+          retryable: true,
+          error: 'workers ai asset was not a PNG',
+          costUsd: billed,
+        };
+      }
       return {
-        ok: false,
-        retryable: true,
-        error: 'workers ai returned no image',
-        costUsd: billed,
+        ok: true,
+        costUsd: IMAGE_COST_USD.flux,
+        concept: { axisId: '', vendor: 'flux', png },
       };
-    }
-    let png: Uint8Array;
-    try {
-      const binary = atob(output.image);
-      png = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) png[i] = binary.charCodeAt(i);
-    } catch (err) {
-      // `atob` throws `InvalidCharacterError` on a non-base64 payload. Caught
-      // here, not by the outer catch-all, for the same reason as above.
-      return {
-        ok: false,
-        retryable: true,
-        error: `workers ai returned an undecodable image: ${errorMessage(err)}`,
-        costUsd: billed,
-      };
-    }
-    if (!isPng(png)) {
-      return {
-        ok: false,
-        retryable: true,
-        error: 'workers ai asset was not a PNG',
-        costUsd: billed,
-      };
-    }
-    return {
-      ok: true,
-      costUsd: IMAGE_COST_USD.flux,
-      concept: { axisId: '', vendor: 'flux', png },
-    };
+    });
   }
 
   return {
@@ -270,9 +298,18 @@ export function createGenerator(deps: {
         // Stamp the axis id here so no back end has to remember to.
         return result.ok ? { ...result, concept: { ...result.concept, axisId: axis.id } } : result;
       } catch (err) {
-        // No `costUsd`: this catch cannot tell a pre-billing network throw from
-        // a post-billing one, so the paid branches attach their own cost
-        // BEFORE unwinding here and nothing reaches this line already billed.
+        // WHAT ACTUALLY REACHES HERE, enumerated rather than asserted: a throw
+        // from `fetchImpl`/`ai.run` itself, i.e. before any response existed.
+        // Everything after a vendor accepted a request runs inside
+        // `billedAttempt`, which attributes its own cost and returns normally.
+        //
+        // NO `costUsd`, AND THAT IS A CONSERVATIVE GUESS, NOT A PROOF. A
+        // transport throw may mean the request never arrived, or that it
+        // arrived, was billed, and we lost the response — the two are
+        // indistinguishable from here. This under-reports the second case. It
+        // is a known gap, bounded by `sweepParkedJobs`' age bound rather than
+        // its spend bound; an earlier version of this comment claimed no billed
+        // call could reach this line, which was false for six paths.
         return { ok: false, retryable: true, error: errorMessage(err) };
       }
     },

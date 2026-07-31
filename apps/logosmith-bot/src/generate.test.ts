@@ -389,6 +389,76 @@ describe('generate — paid failures are visible to the spend ledger', () => {
     }
   });
 
+  // THE RESIDUAL, and the reason the fix is now structural rather than a list
+  // of wrapped calls. The first version wrapped the two calls known to throw and
+  // asserted on the outer catch-all that "nothing reaches this line already
+  // billed". That was false for SIX paths — every one of them a 200 (so the
+  // vendor ran the generation and charged us) that then threw past every
+  // costUsd-attaching branch and reported `retryable: true` with no cost.
+  //
+  // Measured on the real adapter: the covered dead-CDN-link case stops the park
+  // loop at cycle 11 with ledger $0.66 == real $0.66; before this fix the
+  // unparseable-body case NEVER stopped — 24 cycles, $1.44 real, $0.00 ledger.
+  describe('a 200 that then fails is still a PAID call, however it fails', () => {
+    const reset = (vendorHost: string) =>
+      ({
+        ok: true,
+        status: 200,
+        url: vendorHost,
+        headers: { get: () => null },
+        json: async () => {
+          throw new Error('ECONNRESET while streaming the body');
+        },
+      }) as unknown as Response;
+
+    const bodies: Array<[string, () => Response]> = [
+      // A CDN/WAF interstitial served with a 200 — `json()` throws.
+      ['an unparseable body', () => new Response('<html>edge error</html>', { status: 200 })],
+      // Valid JSON, but `null` — the `body.data` dereference throws.
+      ['a body of literal JSON null', () => new Response('null', { status: 200 })],
+      // Headers arrived, the body did not — `json()` throws.
+      ['a body stream that resets mid-read', () => reset('https://api.ideogram.ai/x')],
+    ];
+
+    for (const [name, respond] of bodies) {
+      it(`bills Ideogram for ${name}`, async () => {
+        const result = await createGenerator({
+          fetchImpl: async () => respond(),
+          ai: noAi,
+          ideogramApiKey: 'i',
+          recraftApiKey: 'r',
+        }).generate(ideogramAxis, 'p');
+        assert.ok(!result.ok && result.retryable);
+        assert.equal(result.costUsd, IMAGE_COST_USD.ideogram);
+      });
+
+      it(`bills Recraft for ${name}`, async () => {
+        const result = await createGenerator({
+          fetchImpl: async () => respond(),
+          ai: noAi,
+          ideogramApiKey: 'i',
+          recraftApiKey: 'r',
+        }).generate(recraftAxis, 'p');
+        assert.ok(!result.ok && result.retryable);
+        assert.equal(result.costUsd, IMAGE_COST_USD.recraft);
+      });
+    }
+
+    it('bills Workers AI when ai.run resolves null rather than a result object', async () => {
+      // `output.image` on null threw straight past cost attribution.
+      const result = await createGenerator({
+        fetchImpl: async () => {
+          throw new Error('fetch must not be used for flux');
+        },
+        ai: { run: async () => null as unknown as Record<string, unknown> },
+        ideogramApiKey: 'i',
+        recraftApiKey: 'r',
+      }).generate(fluxAxis, 'p');
+      assert.ok(!result.ok && result.retryable);
+      assert.equal(result.costUsd, IMAGE_COST_USD.flux);
+    });
+  });
+
   it('leaves costUsd ABSENT when the vendor was never billed', async () => {
     // A non-200 status and a transport throw both mean the generation never
     // ran. `undefined` rather than 0, so the caller can tell "free failure"

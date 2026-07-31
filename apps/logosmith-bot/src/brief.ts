@@ -79,6 +79,57 @@ const MAX_BRIEF_LIST_ENTRIES = 20;
 const MAX_BRIEF_LIST_ENTRY_CHARS = 200;
 
 /**
+ * Bounds on the SCALAR free-text fields, and the reason is CPU, not tokens.
+ *
+ * `similarity()` (gates/ocr.ts) is a Levenshtein distance, O(transcription ×
+ * brandName). Only the transcription is bounded — by the vision call's
+ * `max_tokens: 256`. Nothing bounded `brandName`, and intake accepted 1,000,000
+ * characters. Measured against a 1,000-char transcription:
+ *
+ *     200 chars ->     5.8 ms      10,000 ->    77 ms
+ *  40,000 chars ->   655 ms       160,000 -> 2,739 ms
+ *
+ * and the readback gate runs up to 9× per job (3 slots × 3 attempts), so a
+ * 160,000-character brand name is ~24.7 s against a 30 s Worker CPU budget.
+ * This is the one input C4 reached without bounding.
+ *
+ * THE LIKELIER OUTCOME IS A LIE, NOT A TIMEOUT. An oversized brief also inflates
+ * the FR-2 moderation payload, and `moderation.ts` maps EVERY `!response.ok` to
+ * `unavailable` (verified) — so a vendor 4xx caused by our own payload tells the
+ * buyer "that vendor has been unavailable for 3 attempts". False, and it is our
+ * payload, not their outage: exactly the honesty class the brief-extraction
+ * outage fix addresses two files away.
+ *
+ * Sized for what each field IS. A brand name is lettering on a logo and an
+ * industry is a short noun phrase — 200 characters is already far past either.
+ * `brief` is a style-direction paragraph, so it gets more room.
+ */
+const MAX_BRIEF_NAME_CHARS = 200;
+const MAX_BRIEF_TEXT_CHARS = 2_000;
+
+/**
+ * A scalar free-text field within its bound, or a reason it was refused.
+ *
+ * REFUSED, NOT TRUNCATED — the same reason the lists are (below). Truncating a
+ * `brandName` would be worse than truncating a list: that string is what gets
+ * RENDERED as lettering and then OCR-compared against itself, so a silently
+ * shortened one would generate a logo for a name the buyer did not ask for and
+ * then "verify" it against the shortened form. The gate would pass. That is the
+ * C4 failure shape wearing different clothes.
+ */
+function boundedText(
+  value: string,
+  field: string,
+  max: number,
+): { ok: true } | { ok: false; reason: string } {
+  if (value.length <= max) return { ok: true };
+  return {
+    ok: false,
+    reason: `${field} is ${value.length} characters and LogoSmith accepts at most ${max}`,
+  };
+}
+
+/**
  * A bounded `string[]`, or a reason it was refused.
  *
  * REFUSED, NOT TRUNCATED. Silently dropping half a buyer's list would generate
@@ -173,6 +224,25 @@ export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
     };
   }
 
+  const industry = raw['industry'].trim();
+  const styleDirection = nonBlankString(raw['brief']) ? raw['brief'].trim() : undefined;
+  const script = nonBlankString(raw['script']) ? raw['script'].trim() : undefined;
+
+  // Every scalar the brief can carry, checked by the same helper — the drift
+  // shape this codebase keeps paying for is a list that falls behind its type,
+  // so these are the four `LOGO_BRIEF_TEXT` classifies as scalars, and
+  // brief.test.ts asserts that no accepted brief exceeds the bound on any of
+  // them rather than trusting this call site to be complete.
+  for (const [value, field, max] of [
+    [brandName, 'brandName', MAX_BRIEF_NAME_CHARS],
+    [industry, 'industry', MAX_BRIEF_NAME_CHARS],
+    [styleDirection ?? '', 'brief', MAX_BRIEF_TEXT_CHARS],
+    [script ?? '', 'script', MAX_BRIEF_NAME_CHARS],
+  ] as const) {
+    const bounded = boundedText(value, field, max);
+    if (!bounded.ok) return bounded;
+  }
+
   const palette = boundedStringArray(raw['palettePreference'], 'palettePreference');
   if (!palette.ok) return palette;
   const avoid = boundedStringArray(raw['avoid'], 'avoid');
@@ -182,11 +252,11 @@ export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
     ok: true,
     brief: {
       brandName,
-      industry: raw['industry'].trim(),
-      ...(nonBlankString(raw['brief']) ? { brief: raw['brief'].trim() } : {}),
+      industry,
+      ...(styleDirection !== undefined ? { brief: styleDirection } : {}),
       ...(palette.value ? { palettePreference: palette.value } : {}),
       ...(avoid.value ? { avoid: avoid.value } : {}),
-      ...(nonBlankString(raw['script']) ? { script: raw['script'].trim() } : {}),
+      ...(script !== undefined ? { script } : {}),
     },
   };
 }

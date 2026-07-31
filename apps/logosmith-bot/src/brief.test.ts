@@ -2,7 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkLogoUrl, isLatinScript, parseFaviconBrief, parseLogoBrief } from './brief.js';
 import { normalizeForMatch, similarity } from './gates/ocr.js';
-import { logoBriefFreeText } from './types.js';
+import { LOGO_BRIEF_FIELDS, logoBriefFreeText } from './types.js';
+import type { LogoBrief } from './types.js';
 
 const fence = (json: unknown): string =>
   `We need a mark for our new place.\n\n\`\`\`json\n${JSON.stringify(json, null, 2)}\n\`\`\`\n`;
@@ -61,6 +62,60 @@ describe('parseLogoBrief', () => {
       assert.ok(!result.ok, `${field} entries must be bounded`);
       assert.match(result.reason, new RegExp(`entry in ${field} is 201 characters`));
     }
+  });
+
+  // THE HAZARD IS CPU, NOT TOKENS. `similarity()` is a Levenshtein distance,
+  // O(transcription x brandName); only the transcription is bounded (the vision
+  // call's `max_tokens: 256`). Measured against a 1,000-char transcription:
+  // 10k-char brandName = 77 ms, 40k = 655 ms, 160k = 2,739 ms — and the readback
+  // gate runs up to 9x per job, so 160k chars is ~24.7 s of a 30 s Worker CPU
+  // budget. Intake accepted 1,000,000 characters.
+  //
+  // The likelier outcome is a LIE, not a timeout: an oversized brief inflates
+  // the FR-2 moderation payload, `moderation.ts` maps every `!response.ok` to
+  // `unavailable`, and the buyer is told the vendor has been down for 3
+  // attempts. It was our payload.
+  it('refuses an oversized scalar field, naming which one and by how much', () => {
+    const cases: Array<[string, number]> = [
+      ['brandName', 201],
+      ['industry', 201],
+      ['script', 201],
+      ['brief', 2001],
+    ];
+    for (const [field, length] of cases) {
+      const result = parseLogoBrief(
+        fence({
+          brandName: 'Harbor & Vine',
+          industry: 'boutique inn',
+          [field]: 'x'.repeat(length),
+        }),
+      );
+      assert.ok(!result.ok, `${field} must be bounded`);
+      assert.match(result.reason, new RegExp(`${field} is ${length} characters`));
+    }
+  });
+
+  it('refuses the megabyte brand name that used to reach the readback gate', () => {
+    const result = parseLogoBrief(
+      fence({ brandName: 'A'.repeat(1_000_000), industry: 'boutique inn' }),
+    );
+    assert.ok(!result.ok);
+    assert.match(result.reason, /brandName is 1000000 characters/);
+  });
+
+  it('accepts scalars that sit exactly on the bounds', () => {
+    // A false rejection is not free: these are real fields on a real brief.
+    const result = parseLogoBrief(
+      fence({
+        brandName: 'x'.repeat(200),
+        industry: 'y'.repeat(200),
+        script: 'z'.repeat(200),
+        brief: 'w'.repeat(2000),
+      }),
+    );
+    assert.ok(result.ok);
+    assert.equal(result.brief.brandName.length, 200);
+    assert.equal(result.brief.brief?.length, 2000);
   });
 
   it('accepts lists that sit exactly on the bounds', () => {
@@ -282,6 +337,46 @@ describe('brand-name intake feeds the lettering gate something to verify', () =>
       const result = parseLogoBrief(fence({ brandName, industry: 'boutique inn' }));
       assert.ok(!result.ok, brandName);
       assert.match(result.reason, /no letters or digits/);
+    }
+  });
+
+  it('bounds EVERY free-text field of LogoBrief, each one exercised on its own', () => {
+    // THE FIRST VERSION OF THIS TEST WAS VACUOUS AND ITS COMMENT SAID
+    // OTHERWISE. It oversized every field at once and asserted refusal — which
+    // one bounded field satisfies, leaving the other five untested. Deleting
+    // `brief` from the intake loop left it green. A test that claims to catch a
+    // forgotten field has to fail when a field is forgotten.
+    //
+    // The field list is DERIVED from `LOGO_BRIEF_FIELDS` (itself derived from
+    // the compile-time-exhaustive `LOGO_BRIEF_TEXT`), and the table below is
+    // asserted to cover it exactly — so adding a field to `LogoBrief` fails
+    // here until it is bounded, rather than silently skipping it.
+    const oversized: Record<keyof Required<LogoBrief>, unknown> = {
+      brandName: 'x'.repeat(201),
+      industry: 'x'.repeat(201),
+      brief: 'x'.repeat(2001),
+      script: 'x'.repeat(201),
+      palettePreference: ['x'.repeat(201)],
+      avoid: ['x'.repeat(201)],
+    };
+    assert.deepEqual(
+      Object.keys(oversized).sort(),
+      [...LOGO_BRIEF_FIELDS].sort(),
+      'a field was added to LogoBrief without a bound case here',
+    );
+
+    for (const field of LOGO_BRIEF_FIELDS) {
+      // Otherwise entirely valid — only this one field is over its bound, so a
+      // refusal can only be attributable to it.
+      const result = parseLogoBrief(
+        fence({
+          brandName: 'Harbor & Vine',
+          industry: 'boutique inn',
+          [field]: oversized[field],
+        }),
+      );
+      assert.ok(!result.ok, `${field} is not bounded at intake`);
+      assert.match(result.reason, new RegExp(field), `${field}'s refusal must name it`);
     }
   });
 

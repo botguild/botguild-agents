@@ -52,6 +52,18 @@ export function logoBriefFreeText(brief: LogoBrief): string[] {
   return Object.values(LOGO_BRIEF_TEXT).flatMap((read) => [...read(brief)]);
 }
 
+/**
+ * The NAMES of those fields, derived from the same exhaustive mapped type.
+ *
+ * Exists so a test can assert something about EVERY field individually rather
+ * than about a hand-written list that drifts. `brief.test.ts` uses it to prove
+ * each free-text field is length-bounded at intake — a check that was quietly
+ * vacuous while it was written against a fully-oversized fixture, because one
+ * bounded field was enough to refuse the whole brief and the other five went
+ * untested.
+ */
+export const LOGO_BRIEF_FIELDS = Object.keys(LOGO_BRIEF_TEXT) as (keyof Required<LogoBrief>)[];
+
 /** The FREE favicon gig's brief: one existing logo to repackage. */
 export interface FaviconBrief {
   logoUrl: string;
