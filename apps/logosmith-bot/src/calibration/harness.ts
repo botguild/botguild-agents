@@ -128,8 +128,25 @@ function shiftChar(ch: string): string {
  * PRIMARY guarantee the mismatch stays far from the original, on much firmer
  * ground than the character shift above: Levenshtein distance between two
  * strings is always >= the difference in their lengths, so appending these
- * 14 characters puts a floor of 14 under the edit distance regardless of
- * what the shift does to the rest of the string.
+ * 14 characters puts a floor of 14 under the edit distance — ALWAYS, for any
+ * input, in any script. That raw floor is unconditional.
+ *
+ * What is NOT unconditional: the `<0.5` similarity RATIO this module's own
+ * tests check for. `shiftChar` is a no-op outside `a-z`/`0-9`, so for a name
+ * built entirely from characters outside that range (e.g. Cyrillic, CJK),
+ * the shift contributes nothing and only the 14-character marker diverges —
+ * measured directly, a 20-character Cyrillic name yields
+ * `similarity = 0.588`, ABOVE the harness's own 0.5 bar (14 / (20+14) ≈
+ * 0.412 edit-distance ratio, i.e. 0.588 similarity). This does not threaten
+ * the shipped `GOLDEN_NAMES` fixture (every entry measures 0.00–0.17, per
+ * `harness.test.ts`) because every entry is Latin-script, where the shift
+ * genuinely scrambles the content too — but it means the `<0.5` guarantee
+ * is proven for Latin-script names under roughly 40 characters, not for
+ * "any name under ~50 characters" as an earlier draft of this comment
+ * claimed. `harness.test.ts` enforces the Latin-script precondition on
+ * `GOLDEN_NAMES` directly (matching `isLatinScript` in `../brief.ts`, this
+ * bot's own intake rule) so that precondition stays load-bearing rather
+ * than assumed.
  */
 const MISMATCH_MARKER = 'zqxvwkmismatch';
 
@@ -351,8 +368,9 @@ export interface UnstableCheck {
 }
 
 export interface AxisRegenBurn {
+  /** Distinct golden NAMES with usable known-good evidence on this axis — not a raw check count (see `nameWeightedRate`). */
   considered: number;
-  /** Fraction of considered known-good checks that did NOT pass — a proxy for how often this axis would burn an FR-5 regeneration. null when nothing usable was measured. */
+  /** Name-weighted fraction of considered names whose own known-good check(s) on this axis did NOT pass — a proxy for how often this axis would burn an FR-5 regeneration. null when nothing usable was measured. */
   failRate: number | null;
 }
 
@@ -368,17 +386,21 @@ export interface CalibrationSummary {
   imageCount: number;
   ocrThreshold: number;
   phashThreshold: number;
-  /** Fraction of known-bad checks with usable data that correctly scored BELOW threshold. null when nothing was usable. */
+  /** Name-weighted fraction of known-bad checks with usable data that correctly scored BELOW threshold. null when nothing was usable. */
   garbledDetectionRate: number | null;
+  /** Distinct names contributing usable known-bad evidence — NOT a raw check count. */
   garbledConsidered: number;
-  /** Fraction of known-good checks with usable data that scored AT OR ABOVE threshold. null when nothing was usable. */
+  /** Name-weighted fraction of known-good checks with usable data that scored AT OR ABOVE threshold. null when nothing was usable. */
   stylizedPassRate: number | null;
+  /** Distinct names contributing usable known-good evidence — NOT a raw check count. */
   stylizedConsidered: number;
+  /** Every check's full detail (mean, variance, pass, unstable) — the literal "reports per-image score variance" requirement. `unstableChecks` below is a filtered view of this same data. */
+  checks: CheckSummary[];
   unstableChecks: UnstableCheck[];
   regenBurnByAxis: Record<string, AxisRegenBurn>;
-  /** null when fewer than two images share a golden name (no pair to measure). */
+  /** null when fewer than two images share a golden name (no pair to measure) — this ALSO blocks `canFreeze`, since MIN_PHASH_HAMMING cannot be evaluated without it. */
   phash: PhashDistribution | null;
-  /** True only when the evidence is both sufficient and trustworthy AND the measured rates clear `minAcceptableRate`. */
+  /** True only when the evidence is sufficient and trustworthy for BOTH frozen constants (OCR_SIMILARITY_THRESHOLD and MIN_PHASH_HAMMING) AND the measured rates clear `minAcceptableRate`. */
   canFreeze: boolean;
   /** Why `canFreeze` is false; empty when true. */
   blockers: string[];
@@ -387,7 +409,15 @@ export interface CalibrationSummary {
 export interface SummarizeOptions {
   ocrThreshold?: number;
   phashThreshold?: number;
-  /** §14: the golden set must hold at least this many distinct names before a freeze recommendation is even considered. Default 30. */
+  /**
+   * §14: the golden set must hold at least this many distinct names before a
+   * freeze recommendation is even considered. Default AND absolute floor is
+   * 30 — this option can only RAISE the bar, never lower it. An option is a
+   * caller-supplied number with no bound of its own; if lowering it below 30
+   * actually worked, `summarize([], { minGoldenNames: 0 })` would report
+   * `canFreeze: true` on zero evidence, which is exactly the failure mode
+   * this whole function exists to prevent. See `resolveMinGoldenNames`.
+   */
   minGoldenNames?: number;
   /**
    * Below this, `garbledDetectionRate` or `stylizedPassRate` blocks the
@@ -398,6 +428,14 @@ export interface SummarizeOptions {
    * would only ever confirm a threshold, never report one as wrong. Default
    * 0.9 — a judgement call, not a value handed down by the brief, and
    * therefore deliberately overridable rather than hardcoded silently.
+   *
+   * Must lie in `(0, 1]` to mean anything — `0` or a negative value would
+   * make `rate < minAcceptableRate` false for every real rate, silently
+   * disabling this exact safety net. A value outside `(0, 1]` is treated as
+   * absent and falls back to the default rather than being honoured; see
+   * `resolveMinAcceptableRate`. A caller CAN still legitimately loosen this
+   * to something like `0.5` — that is a real, meaningful bar, not a
+   * degenerate attempt to switch the check off.
    */
   minAcceptableRate?: number;
 }
@@ -405,7 +443,43 @@ export interface SummarizeOptions {
 const DEFAULT_MIN_GOLDEN_NAMES = 30;
 const DEFAULT_MIN_ACCEPTABLE_RATE = 0.9;
 
-interface CheckStats {
+/**
+ * Options may TIGHTEN this gate, never LOOSEN it — the same allow-list shape
+ * this session has already applied to a parser, a reference check, and a
+ * quota: `Math.max` against the real floor means a caller can raise the bar
+ * (`minGoldenNames: 50`) but a value at or below 30 has NO EFFECT, because
+ * `Math.max(anything <= 30, 30) === 30`. There is deliberately no code path
+ * by which a `SummarizeOptions` value can make this number smaller than 30.
+ */
+function resolveMinGoldenNames(requested: number | undefined): number {
+  return Math.max(requested ?? DEFAULT_MIN_GOLDEN_NAMES, DEFAULT_MIN_GOLDEN_NAMES);
+}
+
+/**
+ * Unlike `minGoldenNames`, a caller MAY legitimately loosen this below the
+ * default 0.9 (it is a judgement call this module introduced, not a brief
+ * requirement) — but only to another value that still MEANS something. `0`
+ * or a negative number would make `rate < minAcceptableRate` false for
+ * every real rate in `[0, 1]`, silently switching the whole safety net off;
+ * anything above `1` would make it true for every real rate, which is just
+ * as degenerate the other way. A value outside `(0, 1]` is therefore not a
+ * looser bar — it isn't a bar at all — so it is treated as not having been
+ * supplied, and the safe default is used instead.
+ */
+function resolveMinAcceptableRate(requested: number | undefined): number {
+  if (typeof requested === 'number' && requested > 0 && requested <= 1) return requested;
+  return DEFAULT_MIN_ACCEPTABLE_RATE;
+}
+
+/**
+ * Full per-check detail — one entry per `(name, axisId, label)` triple,
+ * covering EVERY check, not just the unstable ones (`unstableChecks` is a
+ * filtered view of this same data). This is the literal "reports per-image
+ * score variance" half of the brief's requirement 2: the mean/variance/pass
+ * verdict for every check is inspectable here, not just implied by whether
+ * it happens to be flagged unstable.
+ */
+export interface CheckSummary {
   name: string;
   axisId: string;
   label: 'known-good' | 'known-bad';
@@ -423,15 +497,36 @@ function popVariance(values: number[]): number {
   return values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
 }
 
+/**
+ * A `status: 'ok'` run whose `score` is not a finite number (NaN, +/-Infinity
+ * — reachable only through a malformed upstream call or a hostile fixture,
+ * never through `gates/ocr.ts`'s own `similarity()`, which cannot produce
+ * one) is treated as carrying NO usable evidence, exactly like an
+ * `unavailable` run — never as a pass or a fail.
+ *
+ * This is not defensive theatre: `NaN >= threshold` and `NaN < threshold`
+ * are BOTH `false` in JavaScript, so a single non-finite score silently
+ * turns an entire check's MEAN into `NaN`, and `NaN >= threshold` evaluates
+ * to `pass: false` — which a "known-bad" check reads as "correctly
+ * detected". A obvious false-accept (four real scores at 0.95, one NaN)
+ * would therefore report as a clean detection instead of the miss it is.
+ * `gates/ocr.ts`'s own `MIN_VISION_PROMPT_TOKENS` canary carries the same
+ * `Number.isFinite` guard for exactly this class of bug — see its comment
+ * on why `typeof x === 'number'` alone does not close it (`typeof NaN ===
+ * 'number'` is `true`).
+ */
 function statsFor(
   name: string,
   axisId: string,
   label: 'known-good' | 'known-bad',
   check: CalibrationCheck,
   threshold: number,
-): CheckStats {
+): CheckSummary {
   const scores = check.runs
-    .filter((run): run is { status: 'ok'; score: number } => run.status === 'ok')
+    .filter(
+      (run): run is { status: 'ok'; score: number } =>
+        run.status === 'ok' && Number.isFinite(run.score),
+    )
     .map((run) => run.score);
   const usableRuns = scores.length;
   const unavailableRuns = check.runs.length - usableRuns;
@@ -496,21 +591,59 @@ function buildPhashSummary(results: CalibrationImageResult[]): PhashDistribution
   };
 }
 
-function buildRegenBurn(knownGoodStats: CheckStats[]): Record<string, AxisRegenBurn> {
-  const byAxis = new Map<string, CheckStats[]>();
+/**
+ * Average a boolean outcome ACROSS DISTINCT NAMES, not across checks.
+ *
+ * Weighting by raw check count is exploitable: a `summarize` caller (or a
+ * fixture with an accidental duplicate) that supplies one name a thousand
+ * times drowns out every other name in the aggregate. Concretely: 29 names
+ * each contributing one FAILED known-bad check, plus one name contributing
+ * a thousand PASSING duplicates, yields a check-weighted rate of
+ * `1000 / 1029 ~= 0.972` — reading as "the gate works great" while 29 of 30
+ * real names (96.7%) got it completely wrong. Averaging each DISTINCT
+ * name's own local rate first, THEN averaging across names, gives every
+ * name equal weight regardless of how many checks (duplicate or otherwise)
+ * it happens to carry: the same scenario reports `~0.033`. For the normal,
+ * well-formed case every real `runCalibration` run produces — one check per
+ * `(name, axis)` pair, no duplicates — this is mathematically IDENTICAL to
+ * a plain check-weighted average (a per-group average of equal-sized groups
+ * equals the average of the whole), so it changes nothing for a real
+ * calibration run and only matters against the duplication attack.
+ */
+function nameWeightedRate(
+  stats: CheckSummary[],
+  isSuccess: (stat: CheckSummary) => boolean,
+): { rate: number | null; consideredNames: number } {
+  const byName = new Map<string, CheckSummary[]>();
+  for (const stat of stats) {
+    if (stat.pass === null) continue; // no usable evidence from this specific check
+    const list = byName.get(stat.name) ?? [];
+    list.push(stat);
+    byName.set(stat.name, list);
+  }
+  const perNameRates: number[] = [];
+  for (const list of byName.values()) {
+    const successCount = list.filter(isSuccess).length;
+    perNameRates.push(successCount / list.length);
+  }
+  if (perNameRates.length === 0) return { rate: null, consideredNames: 0 };
+  const rate = perNameRates.reduce((sum, r) => sum + r, 0) / perNameRates.length;
+  return { rate, consideredNames: perNameRates.length };
+}
+
+function buildRegenBurn(knownGoodStats: CheckSummary[]): Record<string, AxisRegenBurn> {
+  const byAxis = new Map<string, CheckSummary[]>();
   for (const stat of knownGoodStats) {
     const list = byAxis.get(stat.axisId) ?? [];
     list.push(stat);
     byAxis.set(stat.axisId, list);
   }
   const out: Record<string, AxisRegenBurn> = {};
-  for (const [axisId, stats] of byAxis) {
-    const considered = stats.filter((s) => s.pass !== null);
-    const failed = considered.filter((s) => s.pass === false);
-    out[axisId] = {
-      considered: considered.length,
-      failRate: considered.length > 0 ? failed.length / considered.length : null,
-    };
+  for (const [axisId, statsForAxis] of byAxis) {
+    // Same duplication hazard as the top-level rates, scoped to one axis:
+    // weight by distinct name within the axis, not by raw check count.
+    const { rate, consideredNames } = nameWeightedRate(statsForAxis, (s) => s.pass === false);
+    out[axisId] = { considered: consideredNames, failRate: rate };
   }
   return out;
 }
@@ -528,8 +661,11 @@ export function summarize(
 ): CalibrationSummary {
   const ocrThreshold = options.ocrThreshold ?? OCR_SIMILARITY_THRESHOLD;
   const phashThreshold = options.phashThreshold ?? MIN_PHASH_HAMMING;
-  const minGoldenNames = options.minGoldenNames ?? DEFAULT_MIN_GOLDEN_NAMES;
-  const minAcceptableRate = options.minAcceptableRate ?? DEFAULT_MIN_ACCEPTABLE_RATE;
+  // Both resolvers are unconditional invariants, not passthroughs: an option
+  // may tighten either gate, never loosen it below the real floor. See each
+  // resolver's own comment for exactly what "loosen" would have meant here.
+  const minGoldenNames = resolveMinGoldenNames(options.minGoldenNames);
+  const minAcceptableRate = resolveMinAcceptableRate(options.minAcceptableRate);
 
   const goldenNames = new Set(results.map((r) => r.name));
 
@@ -540,24 +676,42 @@ export function summarize(
     statsFor(r.name, r.axisId, 'known-bad', r.knownBad, ocrThreshold),
   );
 
-  const stylizedConsidered = knownGoodStats.filter((s) => s.pass !== null).length;
-  const stylizedPassed = knownGoodStats.filter((s) => s.pass === true).length;
-  const garbledConsidered = knownBadStats.filter((s) => s.pass !== null).length;
+  // Name-weighted, not check-weighted (C2) — see `nameWeightedRate`'s own
+  // comment for why raw check counting is exploitable by duplication.
+  const stylized = nameWeightedRate(knownGoodStats, (s) => s.pass === true);
   // A known-bad check is correctly rejected when it scores BELOW threshold
   // (pass === false, since `pass` here means "scored at/above threshold").
-  const garbledDetected = knownBadStats.filter((s) => s.pass === false).length;
-
-  const garbledDetectionRate = garbledConsidered > 0 ? garbledDetected / garbledConsidered : null;
-  const stylizedPassRate = stylizedConsidered > 0 ? stylizedPassed / stylizedConsidered : null;
+  const garbled = nameWeightedRate(knownBadStats, (s) => s.pass === false);
+  const stylizedPassRate = stylized.rate;
+  const stylizedConsidered = stylized.consideredNames;
+  const garbledDetectionRate = garbled.rate;
+  const garbledConsidered = garbled.consideredNames;
 
   const allStats = [...knownGoodStats, ...knownBadStats];
   const unstable = allStats.filter((s) => s.unstable);
   const inconclusive = allStats.filter((s) => s.usableRuns === 0);
+  // A check with exactly one usable run HAS evidence (unlike `inconclusive`
+  // above, which has none) but not enough to tell whether repeat runs
+  // straddle the threshold — `unstable` requires `usableRuns >= 2` by
+  // construction, so with `runsPerImage: 1` (or an OCR outage leaving every
+  // check at one usable run) NO check could EVER be flagged unstable, and
+  // the drift-risk signal this calibration exists to catch goes silently
+  // dark rather than reading as "checked and found stable".
+  const insufficientRunsForInstability = allStats.filter((s) => s.usableRuns === 1);
 
   const regenBurnByAxis = buildRegenBurn(knownGoodStats);
   const phash = buildPhashSummary(results);
 
   const blockers: string[] = [];
+  // Unconditional: no option can waive this. `goldenNames.size < minGoldenNames`
+  // below already implies this whenever minGoldenNames holds its floor, but a
+  // second, independent check costs nothing and does not rely on that other
+  // check never regressing.
+  if (results.length === 0) {
+    blockers.push(
+      'no results were provided — cannot recommend freezing anything against zero evidence',
+    );
+  }
   if (goldenNames.size < minGoldenNames) {
     blockers.push(
       `golden set has ${goldenNames.size} distinct name(s), below the required minimum of ${minGoldenNames}`,
@@ -576,6 +730,14 @@ export function summarize(
         'counted as a pass or a fail',
     );
   }
+  if (insufficientRunsForInstability.length > 0) {
+    blockers.push(
+      `${insufficientRunsForInstability.length} image check(s) have only a single usable OCR run, ` +
+        'which cannot show whether repeat runs straddle the threshold (the drift risk this ' +
+        `calibration exists to catch) — increase runsPerImage to at least 2: ` +
+        insufficientRunsForInstability.map((s) => `${s.name}/${s.axisId}/${s.label}`).join(', '),
+    );
+  }
   if (garbledDetectionRate !== null && garbledDetectionRate < minAcceptableRate) {
     blockers.push(
       `garbled-detection rate ${garbledDetectionRate.toFixed(3)} is below the minimum acceptable ` +
@@ -588,6 +750,21 @@ export function summarize(
         `acceptable rate ${minAcceptableRate} — this threshold is rejecting too many legible concepts`,
     );
   }
+  // This task exists to freeze TWO constants, not one — a report that never
+  // consults `phash` here would recommend freezing MIN_PHASH_HAMMING with no
+  // evidence for it at all, however clean the OCR side looks.
+  if (phash === null) {
+    blockers.push(
+      'no pairwise pHash data was measured (every golden name needs at least two axis images ' +
+        'with a decodable phash) — MIN_PHASH_HAMMING cannot be evaluated, let alone frozen',
+    );
+  } else if (phash.min < phashThreshold) {
+    blockers.push(
+      `the minimum observed pairwise pHash distance (${phash.min}) is BELOW the MIN_PHASH_HAMMING ` +
+        `threshold (${phashThreshold}) — at least one golden name produced two same-job concepts ` +
+        'the real distinctness gate would have rejected as too similar',
+    );
+  }
 
   return {
     goldenCount: goldenNames.size,
@@ -598,6 +775,7 @@ export function summarize(
     garbledConsidered,
     stylizedPassRate,
     stylizedConsidered,
+    checks: allStats,
     unstableChecks: unstable.map((s) => ({
       name: s.name,
       axisId: s.axisId,

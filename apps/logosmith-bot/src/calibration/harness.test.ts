@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { isLatinScript } from '../brief.js';
 import { OCR_SIMILARITY_THRESHOLD } from '../config.js';
 import { normalizeForMatch, similarity } from '../gates/index.js';
 import { renderSvgToPng } from '../pack/render.js';
@@ -95,6 +96,12 @@ describe('GOLDEN_NAMES', () => {
       'expected at least one single-character case',
     );
   });
+
+  it("is Latin-script only, matching this bot's own intake rule (brief.ts's isLatinScript) — buildMismatchName's <0.5 similarity guarantee is only proven for Latin-script names (see its own comment), so the fixture must not silently drift outside that", () => {
+    for (const { name } of GOLDEN_NAMES) {
+      assert.ok(isLatinScript(name), `"${name}" is not Latin-script`);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -133,6 +140,31 @@ describe('buildMismatchName', () => {
       assert.ok(score < 0.5, `expected < 0.5 for "${name}", got ${score}`);
     }
   });
+
+  it('guarantees only a raw edit-distance floor of 14 for non-Latin input, NOT the <0.5 ratio (review finding: shiftChar is a no-op outside a-z/0-9)', () => {
+    // A 20-character Cyrillic name: shiftChar leaves every character
+    // unchanged (outside a-z/0-9), so only the 14-character marker
+    // diverges. Measured: similarity = 0.588, ABOVE this module's own 0.5
+    // bar — proving the <0.5 guarantee genuinely does NOT extend to
+    // non-Latin input, exactly as the corrected comment on MISMATCH_MARKER
+    // now states. GOLDEN_NAMES is guarded elsewhere (see the GOLDEN_NAMES
+    // Latin-script test) so this case can never reach the shipped fixture.
+    const cyrillic = 'прекраснаямаркаа'; // 16 chars; pad to ~20 for the measurement below
+    const name = cyrillic + cyrillic.slice(0, 4); // 20 characters
+    assert.equal([...name].length, 20, 'fixture precondition: exactly 20 characters');
+    const mismatch = buildMismatchName(name);
+    const normalizedName = normalizeForMatch(name);
+    const normalizedMismatch = normalizeForMatch(mismatch);
+    // The raw floor DOES still hold: mismatch is exactly 14 characters
+    // longer, and Levenshtein distance is always >= the length difference.
+    assert.equal([...normalizedMismatch].length - [...normalizedName].length, 14);
+    const score = similarity(normalizedName, normalizedMismatch);
+    assert.ok(
+      score > 0.5,
+      `expected the <0.5 bar to genuinely NOT hold for non-Latin input (got ${score}) — ` +
+        'if this ever fails, the comment on MISMATCH_MARKER needs re-measuring, not the code',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -147,7 +179,7 @@ describe('summarize', () => {
       result({ name: 'Gamma', goodScores: [0.5], badScores: [0.2] }), // good FAILS (stylized-but-legible pass rate hit); bad correctly rejected
       result({ name: 'Delta', goodScores: [0.96], badScores: [0.9] }), // good passes; bad is a FALSE ACCEPT (scores above threshold)
     ];
-    const summary = summarize(results, { minGoldenNames: 1 });
+    const summary = summarize(results);
     assert.equal(summary.stylizedPassRate, 3 / 4);
     assert.equal(summary.stylizedConsidered, 4);
     assert.equal(summary.garbledDetectionRate, 3 / 4);
@@ -167,7 +199,7 @@ describe('summarize', () => {
       'fixture precondition: mean must look acceptable',
     );
 
-    const summary = summarize([steady, wobbly], { minGoldenNames: 1 });
+    const summary = summarize([steady, wobbly]);
     assert.ok(
       summary.unstableChecks.some((c) => c.name === 'Wobbly' && c.label === 'known-good'),
       'Wobbly should be flagged unstable',
@@ -179,17 +211,42 @@ describe('summarize', () => {
     );
   });
 
-  it('reports per-image score variance across repeat runs', () => {
+  it("reports per-image score variance across repeat runs, on the real returned summary (regression: this test used to discard summarize()'s return value entirely)", () => {
     const flat = result({ name: 'Flat', goodScores: [0.95, 0.95, 0.95] });
     const noisy = result({ name: 'Noisy', goodScores: [0.9, 0.99, 0.87] });
-    summarize([flat, noisy], { minGoldenNames: 1 });
-    // Variance is not directly exposed on CalibrationSummary today, but every
-    // instability decision is DERIVED from it — assert the derivation here
-    // directly against a hand-computed population variance so a future
-    // refactor of statsFor can't silently change the definition unnoticed.
+    const summary = summarize([flat, noisy]);
+
+    const flatCheck = summary.checks.find((c) => c.name === 'Flat' && c.label === 'known-good');
+    const noisyCheck = summary.checks.find((c) => c.name === 'Noisy' && c.label === 'known-good');
+    assert.ok(flatCheck, 'expected a checks entry for Flat/known-good');
+    assert.ok(noisyCheck, 'expected a checks entry for Noisy/known-good');
+
+    // Not exact equality: three identical 0.95 values still leave a few
+    // ULPs of floating-point noise from the mean-subtraction (measured:
+    // ~1.2e-32), not a real bug.
+    assert.ok(
+      flatCheck!.variance !== null && flatCheck!.variance < 1e-9,
+      `three identical scores should have ~zero population variance, got ${flatCheck!.variance}`,
+    );
+
     const mean = (0.9 + 0.99 + 0.87) / 3;
-    const variance = [0.9, 0.99, 0.87].reduce((sum, v) => sum + (v - mean) ** 2, 0) / 3;
-    assert.ok(variance > 0, 'fixture precondition: noisy scores must have nonzero variance');
+    const expectedNoisyVariance =
+      [0.9, 0.99, 0.87].reduce((sum, v) => sum + (v - mean) ** 2, 0) / 3;
+    assert.ok(
+      expectedNoisyVariance > 0,
+      'fixture precondition: noisy scores must have nonzero variance',
+    );
+    assert.equal(
+      noisyCheck!.variance,
+      expectedNoisyVariance,
+      "must match statsFor's own population-variance computation exactly, not merely be truthy",
+    );
+
+    // PROVED BY MUTATION (performed manually against this exact test, not
+    // shipped as a permanent mutant): hardcoding statsFor's `variance` to a
+    // constant `0`, or deleting the `popVariance` call entirely, makes this
+    // assertion fail (0 !== expectedNoisyVariance ~= 0.00246...) — see the
+    // task report for the transcript. Reverting restores green.
   });
 
   it('reports the pHash distribution as min/median/p10 across all pairs (hand-verified fixture)', () => {
@@ -207,7 +264,7 @@ describe('summarize', () => {
       result({ name: 'C', axisId: 'lockup', phash: 'ffffffffffffffff' }),
       result({ name: 'C', axisId: 'emblem', phash: '0000000000000003' }),
     ];
-    const summary = summarize(results, { minGoldenNames: 1 });
+    const summary = summarize(results);
     assert.ok(summary.phash, 'expected a phash summary');
     assert.equal(summary.phash!.pairCount, 5);
     assert.equal(summary.phash!.min, 2);
@@ -216,20 +273,18 @@ describe('summarize', () => {
   });
 
   it('reports phash as null when fewer than two images share a golden name', () => {
-    const summary = summarize([result({ name: 'Solo', phash: '0000000000000000' })], {
-      minGoldenNames: 1,
-    });
+    const summary = summarize([result({ name: 'Solo', phash: '0000000000000000' })]);
     assert.equal(summary.phash, null);
   });
 
-  it('reports regeneration burn per axis from the known-good check', () => {
+  it('reports regeneration burn per axis from the known-good check, weighted by distinct name', () => {
     const results = [
       result({ name: 'A', axisId: 'wordmark', goodScores: [0.95] }), // pass
       result({ name: 'B', axisId: 'wordmark', goodScores: [0.4] }), // fail
       result({ name: 'C', axisId: 'emblem', goodScores: [0.4] }), // fail
       result({ name: 'D', axisId: 'emblem', goodScores: [0.4] }), // fail
     ];
-    const summary = summarize(results, { minGoldenNames: 1 });
+    const summary = summarize(results);
     assert.equal(summary.regenBurnByAxis.wordmark?.considered, 2);
     assert.equal(summary.regenBurnByAxis.wordmark?.failRate, 0.5);
     assert.equal(summary.regenBurnByAxis.emblem?.considered, 2);
@@ -251,7 +306,7 @@ describe('summarize', () => {
         runs: [unavailableRun(), unavailableRun(), unavailableRun()],
       },
     };
-    const summary = summarize([mixed], { minGoldenNames: 1 });
+    const summary = summarize([mixed]);
     // known-good: 3 of 5 runs usable, all >= threshold.
     assert.equal(summary.stylizedConsidered, 1);
     assert.equal(summary.stylizedPassRate, 1);
@@ -277,18 +332,37 @@ describe('summarize', () => {
     const results = Array.from({ length: 30 }, (_, i) =>
       result({ name: `Name${i}`, goodScores: [0.95, 0.96, 0.94], badScores: [0.05, 0.04, 0.06] }),
     );
-    results.push(result({ name: 'Wobbly', goodScores: [0.9, 0.8], badScores: [0.05] }));
+    results.push(result({ name: 'Wobbly', goodScores: [0.9, 0.8], badScores: [0.05, 0.04] }));
     const summary = summarize(results);
     assert.equal(summary.goldenCount, 31);
     assert.equal(summary.canFreeze, false);
     assert.ok(summary.blockers.some((b) => /unstable/i.test(b)));
   });
 
-  it('recommends freezing once >=30 distinct names are present, nothing is unstable, and rates are healthy', () => {
-    const results = Array.from({ length: 30 }, (_, i) =>
-      result({ name: `Name${i}`, goodScores: [0.95, 0.96, 0.94], badScores: [0.05, 0.06, 0.04] }),
-    );
+  it('recommends freezing once >=30 distinct names are present, nothing is unstable, rates are healthy, AND pHash separation clears the threshold', () => {
+    // Three well-separated 64-bit hashes reused across every name: pairwise
+    // distinctness is assessed WITHIN one name's own axis images
+    // (buildPhashSummary groups by name), so reusing the same three hex
+    // values across different names is fine — only within-name comparisons
+    // are ever computed.
+    const HASH_A = '0000000000000000';
+    const HASH_B = 'ffff000000000000'; // distance 16 from A
+    const HASH_C = '00000000ffff0000'; // distance 16 from A, distance 32 from B
+    const results: CalibrationImageResult[] = [];
+    for (let i = 0; i < 30; i++) {
+      const name = `Name${i}`;
+      const goodScores = [0.95, 0.96, 0.94];
+      const badScores = [0.05, 0.06, 0.04];
+      results.push(result({ name, axisId: 'wordmark', phash: HASH_A, goodScores, badScores }));
+      results.push(result({ name, axisId: 'lockup', phash: HASH_B, goodScores, badScores }));
+      results.push(result({ name, axisId: 'emblem', phash: HASH_C, goodScores, badScores }));
+    }
     const summary = summarize(results);
+    assert.equal(
+      summary.phash!.min,
+      16,
+      'fixture precondition: the closest pair in any one name is 16 apart',
+    );
     assert.equal(summary.canFreeze, true);
     assert.deepEqual(summary.blockers, []);
   });
@@ -298,7 +372,7 @@ describe('summarize', () => {
     // would accept obviously mismatched lettering. A harness that only ever
     // confirmed the current constant would not surface this.
     const results = Array.from({ length: 30 }, (_, i) =>
-      result({ name: `Name${i}`, goodScores: [0.95], badScores: [0.9] }),
+      result({ name: `Name${i}`, goodScores: [0.95, 0.95], badScores: [0.9, 0.9] }),
     );
     const summary = summarize(results);
     assert.equal(
@@ -327,6 +401,222 @@ describe('summarize', () => {
     assert.equal(summary.stylizedPassRate, null);
     assert.equal(summary.phash, null);
     assert.equal(summary.canFreeze, false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Review round 1 — C1 through C5, each reproduced with a concrete dataset
+  // and asserted `canFreeze: false` with a named blocker.
+  // -------------------------------------------------------------------------
+
+  describe('C1 — canFreeze must consult the pHash threshold, not just OCR', () => {
+    it('refuses to recommend freezing when no pairwise pHash data exists at all, even with perfect OCR health and enough names', () => {
+      // 30 names, ONE image each — no second axis image for any name, so no
+      // pair can ever be formed anywhere in the dataset.
+      const results = Array.from({ length: 30 }, (_, i) =>
+        result({ name: `Name${i}`, goodScores: [0.95, 0.96, 0.94], badScores: [0.05, 0.06, 0.04] }),
+      );
+      const summary = summarize(results);
+      assert.equal(summary.phash, null, 'fixture precondition: no name has a second axis image');
+      assert.equal(summary.canFreeze, false);
+      assert.ok(
+        summary.blockers.some((b) => /pHash/.test(b) && /MIN_PHASH_HAMMING/.test(b)),
+        'must name the missing pHash evidence, not silently ignore it',
+      );
+    });
+
+    it('refuses to recommend freezing when the minimum observed pairwise pHash distance falls below the threshold, even with perfect OCR health', () => {
+      // 30 names, perfect OCR data, two axis images each — but ONE name's
+      // pair is only 1 bit apart (Hamming distance 1), far below
+      // MIN_PHASH_HAMMING's default of 10. Before this fix, `phash.min = 1`
+      // against a threshold of 10 sailed through as `canFreeze: true` with
+      // no mention of it anywhere.
+      const results: CalibrationImageResult[] = [];
+      for (let i = 0; i < 30; i++) {
+        const name = `Name${i}`;
+        const goodScores = [0.95, 0.96, 0.94];
+        const badScores = [0.05, 0.06, 0.04];
+        results.push(
+          result({ name, axisId: 'wordmark', phash: '0000000000000000', goodScores, badScores }),
+        );
+        results.push(
+          result({
+            name,
+            axisId: 'lockup',
+            phash: i === 0 ? '0000000000000001' : '000000000000ffff',
+            goodScores,
+            badScores,
+          }),
+        );
+      }
+      const summary = summarize(results);
+      assert.equal(
+        summary.phash!.min,
+        1,
+        "fixture precondition: name 0's pair is only 1 bit apart",
+      );
+      assert.equal(summary.canFreeze, false);
+      assert.ok(
+        summary.blockers.some((b) => /minimum observed pairwise pHash distance/i.test(b)),
+        'must name the phash violation specifically, not just fail silently',
+      );
+    });
+  });
+
+  describe('C2 — rates must be weighted by distinct name, not by raw check count', () => {
+    it("is not fooled by one name's duplicate checks masking near-total failure across the rest of the golden set", () => {
+      const results: CalibrationImageResult[] = [];
+      // 29 distinct names, each contributing exactly ONE known-bad check
+      // that is a clean FALSE ACCEPT (scores above threshold -> a miss).
+      for (let i = 0; i < 29; i++) {
+        results.push(result({ name: `Real${i}`, badScores: [0.95] }));
+      }
+      // One name contributes 1000 duplicate known-bad checks, all correctly
+      // detected. Check-weighted, this reads as `1000 / 1029 ~= 0.972`
+      // ("the gate works great") while 29 of 30 real names (96.7%) missed
+      // completely.
+      for (let i = 0; i < 1000; i++) {
+        results.push(result({ name: 'Duplicated', badScores: [0.05] }));
+      }
+      const summary = summarize(results);
+      assert.equal(summary.goldenCount, 30, 'fixture precondition: exactly 30 distinct names');
+      assert.equal(
+        summary.garbledConsidered,
+        30,
+        'must count DISTINCT NAMES with usable evidence, not 1029 raw checks',
+      );
+      // Name-weighted: 29 names each contribute a local rate of 0 (their
+      // only check missed); one contributes a local rate of 1 (all 1000 of
+      // its duplicates correctly detected). Averaged per NAME: (29*0+1)/30.
+      assert.equal(summary.garbledDetectionRate, 1 / 30);
+      assert.equal(summary.canFreeze, false);
+      assert.ok(summary.blockers.some((b) => /garbled-detection rate/i.test(b)));
+    });
+  });
+
+  describe('C3 — options may tighten the gate, never loosen it', () => {
+    it('refuses to let minGoldenNames lower the real floor below 30, even for a caller-supplied 0 on zero evidence', () => {
+      const summary = summarize([], { minGoldenNames: 0 });
+      assert.equal(summary.canFreeze, false);
+      assert.ok(summary.blockers.some((b) => /no results were provided/i.test(b)));
+      assert.ok(summary.blockers.some((b) => /30/.test(b)));
+    });
+
+    it('refuses to let minAcceptableRate disable the rate safety net via 0 or a negative value', () => {
+      // 30 names, every known-bad check a clean false accept (rate 0).
+      const results = Array.from({ length: 30 }, (_, i) =>
+        result({ name: `Name${i}`, goodScores: [0.95, 0.96, 0.94], badScores: [0.9, 0.91, 0.89] }),
+      );
+      for (const degenerate of [0, -1, -100]) {
+        const summary = summarize(results, { minAcceptableRate: degenerate });
+        assert.equal(summary.garbledDetectionRate, 0, `precondition broke for ${degenerate}`);
+        assert.ok(
+          summary.blockers.some(
+            (b) => /garbled-detection rate/i.test(b) && /minimum acceptable/i.test(b),
+          ),
+          `minAcceptableRate: ${degenerate} must not disable the safety net`,
+        );
+        assert.equal(summary.canFreeze, false);
+      }
+    });
+
+    it('treats an out-of-range minAcceptableRate (>1) as absent, falling back to the default, rather than making the check impossible to pass', () => {
+      // Perfectly healthy 30-name dataset (rate 1 on both sides); an
+      // honoured minAcceptableRate of 2 would make `1 < 2` true and force a
+      // spurious block on data that could not possibly be cleaner.
+      const results = Array.from({ length: 30 }, (_, i) =>
+        result({ name: `Name${i}`, goodScores: [0.95, 0.96, 0.94], badScores: [0.05, 0.06, 0.04] }),
+      );
+      for (const outOfRange of [1.5, 2, 100]) {
+        const summary = summarize(results, { minAcceptableRate: outOfRange });
+        assert.equal(
+          summary.blockers.some((b) => /minimum acceptable/i.test(b)),
+          false,
+          `minAcceptableRate: ${outOfRange} must fall back to the default on perfectly healthy data`,
+        );
+      }
+    });
+
+    it('honours a legitimate, non-degenerate minAcceptableRate override (loosening is allowed; disabling is not)', () => {
+      // 21 of 30 names correctly detected, 9 missed: a real rate of 0.7,
+      // neither 0 nor 1 nor a degenerate value.
+      const results = [
+        ...Array.from({ length: 21 }, (_, i) => result({ name: `Detected${i}`, badScores: [0.3] })),
+        ...Array.from({ length: 9 }, (_, i) => result({ name: `Missed${i}`, badScores: [0.95] })),
+      ];
+      const strict = summarize(results, { minAcceptableRate: 0.9 });
+      assert.equal(strict.garbledDetectionRate, 21 / 30);
+      assert.ok(strict.blockers.some((b) => /garbled-detection rate/i.test(b)));
+
+      const relaxed = summarize(results, { minAcceptableRate: 0.5 });
+      assert.equal(
+        relaxed.blockers.some((b) => /garbled-detection rate/i.test(b)),
+        false,
+        'a real, valid rate like 0.5 must be honoured, not silently reset to the default',
+      );
+    });
+  });
+
+  describe('C4 — canFreeze must require enough repeat runs to test for instability at all', () => {
+    it('refuses to recommend freezing when no check has enough usable runs to test for a straddle (e.g. runsPerImage: 1)', () => {
+      // 30 names, ONE run each, every score just above the threshold (0.86
+      // vs 0.85) — structurally incapable of ever showing a straddle, since
+      // `unstable` requires usableRuns >= 2. Before this fix this reported
+      // `unstableChecks: []` and read as "checked, found stable" instead of
+      // "never checked at all".
+      const results = Array.from({ length: 30 }, (_, i) =>
+        result({ name: `Name${i}`, goodScores: [0.86], badScores: [0.05] }),
+      );
+      const summary = summarize(results);
+      assert.equal(
+        summary.unstableChecks.length,
+        0,
+        'fixture precondition: nothing CAN be flagged unstable with 1 run each',
+      );
+      assert.equal(summary.canFreeze, false);
+      assert.ok(
+        summary.blockers.some((b) => /single usable OCR run/i.test(b)),
+        'must block on insufficient runs for the instability check, not read silence as stability',
+      );
+    });
+  });
+
+  describe('C5 — a non-finite score must be excluded, never counted as a detection', () => {
+    it('excludes a NaN score from every rate rather than letting it masquerade as a pass or a fail', () => {
+      // Every one of 30 names has a known-bad check with 4 clean
+      // false-accepts (0.95, well above the 0.85 threshold) plus one NaN.
+      // Before the Number.isFinite guard, the naive mean of
+      // [0.95,0.95,0.95,0.95,NaN] is NaN, and `NaN >= threshold` is `false`
+      // in JavaScript — which a known-bad check reads as "correctly
+      // detected", so this would have reported garbledDetectionRate: 1
+      // (perfect) instead of the 0 (total miss) the four REAL scores show.
+      const results = Array.from({ length: 30 }, (_, i) =>
+        result({
+          name: `Name${i}`,
+          goodScores: [0.95, 0.96, 0.94],
+          badScores: [0.95, 0.95, 0.95, 0.95, NaN],
+        }),
+      );
+      const summary = summarize(results);
+      assert.equal(
+        summary.garbledDetectionRate,
+        0,
+        'four real 0.95 scores are an obvious miss; the NaN must not flip this to "detected"',
+      );
+      const anyBadCheck = summary.checks.find((c) => c.label === 'known-bad');
+      assert.ok(anyBadCheck);
+      assert.equal(
+        anyBadCheck!.usableRuns,
+        4,
+        'the NaN run must be excluded, not counted as usable',
+      );
+      assert.equal(
+        anyBadCheck!.pass,
+        true,
+        'mean of the 4 usable scores (0.95) is at/above threshold — correctly NOT detected',
+      );
+      assert.equal(summary.canFreeze, false);
+      assert.ok(summary.blockers.some((b) => /garbled-detection rate/i.test(b)));
+    });
   });
 });
 
@@ -402,7 +692,6 @@ describe('runCalibration', () => {
       sources: nodeWasmSources(),
       golden,
       runsPerImage: 2,
-      minGoldenNames: 1,
     });
 
     assert.equal(generatorCalls.length, 6); // 2 names x 3 DEFAULT_AXES
@@ -472,7 +761,6 @@ describe('runCalibration', () => {
       sources: nodeWasmSources(),
       golden,
       runsPerImage: 1,
-      minGoldenNames: 1,
     });
 
     assert.equal(report.results.length, 2); // wordmark + emblem generated; lockup failed
@@ -512,7 +800,6 @@ describe('runCalibration', () => {
       sources: nodeWasmSources(),
       golden,
       runsPerImage: 3,
-      minGoldenNames: 1,
     });
 
     for (const r of report.results) {
