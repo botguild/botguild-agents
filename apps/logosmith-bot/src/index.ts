@@ -18,7 +18,7 @@ import {
   createProposer,
   logContractReview,
 } from '@botguild/agent-core';
-import type { CostEstimator, Proposer } from '@botguild/agent-core';
+import type { CostEstimator, Gig, Proposer } from '@botguild/agent-core';
 import {
   createConsoleLogger,
   createD1NegotiationStore,
@@ -91,9 +91,10 @@ import {
   resolveSelectionForContract,
   runDailySweep,
   runFifteenMinuteSweep,
+  type JobQueueLike,
   type SweepServices,
 } from './sweeps.js';
-import type { JobMessage } from './types.js';
+import type { JobMessage, JobStage } from './types.js';
 
 export interface Env {
   DB: D1Database;
@@ -158,6 +159,68 @@ export function resolveDeliverable(
   const contentType = DELIVERABLE_TYPES[file];
   if (!contentType) return null;
   return { key: `${token}/${file}`, contentType };
+}
+
+/**
+ * Which stage 1 a funded contract actually is.
+ *
+ * Funding starts stage 1 only — stage 2 (`vector`) is claimed by the selection
+ * sweep, because the payload carries no milestone id and M2 begins when a
+ * winner exists, not when escrow is funded (FR-15). But WHICH stage 1 depends
+ * on the gig: a FREE gig (the US-2 favicon repackage, the US-3 taster) runs the
+ * `single` stage. Routing a $0 gig into `concepts` would compile Haiku axes and
+ * buy three Ideogram/Recraft images for a contract that pays nothing, and would
+ * never consult the FR-14 quota on the way — precisely the "unlimited free
+ * image generation billed to us" the free funnel exists to prevent.
+ *
+ * "Is this free?" is asked as `pricingCalc(gig).price === 0` rather than by
+ * re-deriving the favicon-brief / zero-budget test here — the same question,
+ * asked the same way, that `maybePropose` (sweeps.ts) asks to route the
+ * PROPOSAL. So the stage a gig is worked as cannot drift from the price it was
+ * bid at: config.ts's calculator returns 0 for exactly the free shapes.
+ */
+export function stageForFundedGig(gig: Gig): JobStage {
+  return pricingCalc(gig).price === 0 ? 'single' : 'concepts';
+}
+
+export interface MilestoneFundedDeps {
+  client: Pick<AgentClient, 'getContract' | 'getGig'>;
+  jobs: Pick<JobStore, 'claim'>;
+  /** The same structural queue seam the sweeps consume, so a Node test can hand
+   *  in a recorder without a Workers `Queue` binding. */
+  queue: JobQueueLike;
+  logger: Logger;
+}
+
+/**
+ * The FR-15 fast ack: resolve the stage, D1 idempotency claim, Queue send, 200.
+ *
+ * A factory rather than an inline closure so the routing decision is reachable
+ * from a plain Node test with fakes. That matters more here than anywhere else
+ * in this file: a stage mis-route is invisible from inside either stage — both
+ * would run perfectly well, just on the wrong contract — so the only place it
+ * can be caught is at this seam.
+ *
+ * A `getContract`/`getGig` failure THROWS, so the app answers 500 and the
+ * platform redelivers. Guessing a stage from a gig we could not read is the one
+ * outcome worse than a retry: guess `concepts` and a free gig buys paid images;
+ * guess `single` and a paid contract burns one of the buyer's free allowances.
+ * Nothing is claimed before the stage is known, so a redelivery starts clean.
+ */
+export function createMilestoneFundedHandler(deps: MilestoneFundedDeps): WebhookHandler {
+  const { client, jobs, queue, logger } = deps;
+  return async (event) => {
+    const { contractId } = event.payload as { contractId: string };
+    const contract = await client.getContract(contractId);
+    const gig = await client.getGig(contract.gigId);
+    const stage = stageForFundedGig(gig);
+    const jobKey = await buildJobKey(contractId, stage);
+    const decision = await jobs.claim(jobKey, contractId, stage);
+    logger.info({ contractId, jobKey, stage, ...decision }, 'milestone.funded claim decision');
+    if (decision.action === 'enqueue') {
+      await queue.send({ contractId, jobKey, stage });
+    }
+  };
 }
 
 // --- Service graph ----------------------------------------------------------
@@ -342,18 +405,12 @@ function buildApp(
 ): Hono {
   const { logger, client, secretStore, jobs, concepts, selection, botId } = deps;
 
-  // Funding starts stage 1 only. Stage 2 (`vector`) is claimed by the selection
-  // sweep, not by a webhook — the payload has no milestone id and M2 begins
-  // when a winner exists, not when escrow is funded (FR-15).
-  const onMilestoneFunded: WebhookHandler = async (event) => {
-    const { contractId } = event.payload as { contractId: string };
-    const jobKey = await buildJobKey(contractId, 'concepts');
-    const decision = await jobs.claim(jobKey, contractId, 'concepts');
-    logger.info({ contractId, jobKey, ...decision }, 'milestone.funded claim decision');
-    if (decision.action === 'enqueue') {
-      await env.JOBS.send({ contractId, jobKey, stage: 'concepts' });
-    }
-  };
+  const onMilestoneFunded = createMilestoneFundedHandler({
+    client,
+    jobs,
+    queue: env.JOBS,
+    logger,
+  });
 
   const onProposalAccepted: WebhookHandler = async (event) => {
     const { contractId } = event.payload as { contractId: string };
