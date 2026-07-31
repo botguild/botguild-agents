@@ -52,8 +52,14 @@ export const scorerConfig: ScorerConfig = {
     'svg',
   ],
   keywordsForFullScore: 3,
-  budgetMin: 5,
-  budgetMax: 150,
+  // INTRODUCTORY $1 PRICING (2026-07-30) — REVERT TARGET: budgetMin 5,
+  // budgetMax 150 (PRD-era range, sized for the $25 seed anchor). A read-only
+  // live sample of 78 open BotGuild gigs measured real budgets at $0.08-$0.99
+  // (median $0.44): the old floor scored the Budget factor 0 for every one of
+  // them, and the old ceiling was 30-1875x any real budget. See SEED_PRICE_USD
+  // below for the full rationale; all four recalibrated values move together.
+  budgetMin: 0.25,
+  budgetMax: 5,
   proposalThreshold: 40,
 };
 
@@ -61,15 +67,49 @@ export const scorerConfig: ScorerConfig = {
 // Gig-listing anchors (PRD §11). The estimator may bid above these
 // (max(1.5×cost, gig.budget)); pricingCalc supplies the deterministic baseline
 // plus the timeline and the two milestone checkpoints.
-export const SEED_PRICE_USD = 25;
+//
+// INTRODUCTORY $1 PRICING (2026-07-30). A read-only live sample of 78 open
+// BotGuild gigs measured real budgets at $0.08-$0.99 (median $0.44) — roughly
+// 50x below the PRD's $25 seed anchor. User ruling: "Go ahead with $1
+// introductory pricing. We will revert to the original pricing later" — this
+// is a deliberate, reversible promotional price, not a permanent repricing.
+//
+// ALL FOUR VALUES BELOW MOVE TOGETHER, because the anchor alone is inert:
+// `createProposer` (proposer.ts) uses the cost ESTIMATOR's price whenever one
+// is wired up (it is, for the paid proposer — see index.ts), and only falls
+// back to this file's `pricingCalc` price if the estimator throws. The
+// estimator's bid is `max(round(1.5×cost), gig.budget)` (bidPrice() in
+// estimator.ts), where absent a live Claude estimate `cost =
+// applyRateCard(fallbackEstimate, rateCard)`. The PRD-era rate card priced
+// that fallback at $6.35 (verified below), i.e. a $10 floor — already
+// 10-125x every budget in the live sample, so lowering just this constant
+// would have kept bidding $10 regardless of what SEED_PRICE_USD said. See the
+// `rateCard` comment below for the recalibrated arithmetic, and
+// config.test.ts's "produces a bid floor..." test, which pins the actual
+// floor rather than this constant.
+//
+// REVERT TARGET: SEED_PRICE_USD 25 (PRD §11).
+export const SEED_PRICE_USD = 1;
 
+// REVERT TARGET (PRD-era rate card): perClaudeCall 0.05, perKToken 0.01,
+// perComputeMinute 0.05, perRun 0.5, fixedOverhead 5 — against
+// `fallbackEstimate` below, applyRateCard gives 5 + 8×0.05 + 15×0.01 + 6×0.05
+// + 1×0.5 = $6.35, so bidPrice's target = round(1.5×6.35) = $10 (arithmetic
+// verified in Node, not by inspection). PRD-era SEED_PRICE_USD=25 only "won"
+// the max() because the PRD assumed gig.budget ran near the $25 anchor too;
+// against the live sample's real budgets, this $10 floor would have dominated
+// instead. Recalibrated so applyRateCard(fallbackEstimate, rateCard) =
+// 0.05 + 8×0.002 + 15×0.004 + 6×0.003 + 1×0.25 = $0.394, and
+// round(1.5×0.394) = $1 — landing exactly on the introductory anchor, with
+// headroom above the ~$0.20-0.40 real per-job vendor cost (IMAGE_COST_USD)
+// and below the $0.99 top of the live budget sample.
 export const rateCard: RateCard = {
-  perClaudeCall: 0.05,
-  perKToken: 0.01,
-  perBrowserMinute: 0, // no browser in this bot
-  perComputeMinute: 0.05,
-  perRun: 0.5,
-  fixedOverhead: 5,
+  perClaudeCall: 0.002,
+  perKToken: 0.004,
+  perBrowserMinute: 0, // no browser in this bot (unchanged)
+  perComputeMinute: 0.003,
+  perRun: 0.25,
+  fixedOverhead: 0.05,
 };
 
 export const fallbackEstimate: ResourceEstimate = {
@@ -144,7 +184,36 @@ export function pricingCalc(gig: Gig): {
 // --- Hard caps (FR-5, FR-14) --------------------------------------------------
 export const CONCEPT_COUNT = 3;
 export const MAX_REGENS_PER_SLOT = 2;
-export const MAX_SPEND_USD = 2.5;
+
+// INTRODUCTORY $1 PRICING — REVERT TARGET: 2.5 (PRD §11, ~10% of the $25
+// anchor). Against the $1 anchor, 2.5 would exceed revenue 2.5x on every job,
+// so this cannot just shrink proportionally — it must stay BELOW
+// SEED_PRICE_USD (see config.test.ts's "never lets a capped job cost more
+// than it earns"). Recalibrated to 0.6 (60% of the $1 anchor).
+//
+// VERIFIED (Node, not by inspection) against TODAY'S fixed axis routing
+// (axes.ts: wordmark+lockup -> ideogram, emblem -> recraft) and IMAGE_COST_USD:
+// the absolute worst case — every one of the 3 concept slots burning its full
+// FR-5 allowance of 3 attempts (1 initial + MAX_REGENS_PER_SLOT regens) —
+// costs exactly 2×3×$0.06 + 1×3×$0.08 = $0.60. That is precisely this cap,
+// with zero slack: today, no job is ever spend-capped short of its full
+// regeneration allowance, but there is also no headroom left for a vendor
+// price rise, an added concept slot, or a costlier axis-vendor reassignment
+// before the cap WOULD start truncating regenerations that used to complete.
+// `decideSlotAction` is still a stop-AFTER threshold in general, not a
+// ceiling (checked BEFORE each generation, so the call that crosses the line
+// completes — see its docstring in pipeline.ts) — that policy has no room to
+// actually bite mid-regeneration under today's numbers, but do not read the
+// $0.60/$0.60 exact match as slack; it is the opposite.
+//
+// Stage 2 adds at most one further ~$0.20 Vectorizer.ai call NOT counted
+// against this cap (runVectorStage's docstring in pipeline.ts) unless the
+// winning concept came from Recraft's native-SVG path, which skips it —
+// so worst-case total real vendor spend on a paid job (stage 1 + stage 2) is
+// $0.60 + $0.20 = $0.80 against the $1 anchor, before any overhead the
+// estimator's rateCard models separately. The buyer-facing delivery note
+// quotes both this cap and the realized spend either way.
+export const MAX_SPEND_USD = 0.6;
 export const FREE_GIGS_PER_PAYER = 3;
 export const FREE_GIG_WINDOW_DAYS = 30;
 

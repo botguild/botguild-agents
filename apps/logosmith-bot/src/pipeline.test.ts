@@ -623,16 +623,19 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
 
   it('delivers two concepts with the shortfall itemized when the spend cap bites', async () => {
     const h = await setup({
-      generate: (axisId) => okConcept(axisId, MARKS[axisFixture(axisId)]!, 1.0),
+      // Fake per-image cost, NOT IMAGE_COST_USD — chosen only so 3 generations
+      // exercise the cap (see the comment below for the inequality it satisfies).
+      generate: (axisId) => okConcept(axisId, MARKS[axisFixture(axisId)]!, 0.25),
       ocr: (fixture) => verdict(fixture !== 'checker'),
     });
     const result = await runConceptStage(h.config, message(h.jobKey));
 
     assert.deepEqual(result, { outcome: 'partial' });
-    // Slots 1 and 2 pass at $1 each; slot 3 is allowed one attempt at $2.00 <
-    // $2.50, and the cap then stops every further regeneration.
+    // Slots 1 and 2 pass at $0.25 each (spend 0.50 < $0.6 cap); slot 3 is
+    // allowed one attempt at $0.75 (>= the $0.6 cap: 2x0.25 < 0.6 <= 3x0.25),
+    // and the cap then stops every further regeneration.
     assert.equal(h.generated.length, 3);
-    assert.equal((await h.jobs.get(h.jobKey))?.checkpoint?.spendUsd, 3.0);
+    assert.equal((await h.jobs.get(h.jobKey))?.checkpoint?.spendUsd, 0.75);
 
     assert.equal(h.deliveries.length, 1);
     const note = h.deliveries[0]!.note;
@@ -762,7 +765,10 @@ describe('runConceptStage — caps are enforced from the persisted checkpoint', 
   it('delivers the paid work already in the checkpoint without regenerating it', async () => {
     const h = await setup();
     await h.jobs.saveCheckpoint(h.jobKey, {
-      spendUsd: 2.0,
+      // Under the $0.6 cap (not AT it) so slot 3's shortfall below is
+      // attributed to attempts-exhausted, not spend-cap — that distinction is
+      // the point of this test.
+      spendUsd: 0.4,
       slots: [
         seededSlot(1, { status: 'passed', attempts: 1, phash: '0000000000000000' }),
         seededSlot(2, { status: 'passed', attempts: 1, phash: 'ffffffffffff0000' }),
