@@ -263,15 +263,29 @@ describe('namespace-prefix bypass regression tests (critical)', () => {
   });
 });
 
-describe('external-reference regression tests (critical — SVGO inlineStyles laundering)', () => {
-  it('CRITICAL: rejects a <style> rule smuggling an external url(), before any optimizer runs', () => {
+describe('external-reference regression tests (critical — allow-list the FORM, not a scheme blocklist)', () => {
+  it('CRITICAL: rejects a <style> rule smuggling an external url() — TWO mechanisms fire at once', () => {
     // The exact reproduction: a CSS rule referencing an outside origin,
-    // applied via a class selector rather than a direct attribute.
+    // applied via a class selector rather than a direct attribute. Both the
+    // allowlist (<style> is not a recognized element) AND the new
+    // fragment-only reference check (the url() text inside the <style>
+    // block is found by the same whole-document scan that finds one in any
+    // other attribute) reject this independently — neither depends on the
+    // other, which is exactly why the laundered form two tests down still
+    // fails even once the <style> tag itself is gone.
     const probe =
       '<svg viewBox="0 0 10 10"><style>.a{fill:url(https://evil.example.com/track.svg)}</style>' +
       '<path class="a" d="M0 0 L1 1"/></svg>';
     const result = checkTrueVector(probe);
-    assert.equal(result.pass, false, '<style> is not in the allowlist, so the raw gate rejects it');
+    assert.equal(result.pass, false);
+    assert.ok(
+      result.violations.some((v) => /non-vector element: <style>/i.test(v)),
+      'the allowlist must reject the <style> tag itself',
+    );
+    assert.ok(
+      result.violations.some((v) => /non-fragment reference/i.test(v)),
+      'the whole-document url() scan must ALSO reject the smuggled reference, independent of the allowlist',
+    );
   });
 
   it('CRITICAL: rejects the LAUNDERED form — url() inlined onto an allowed element, <style> gone', () => {
@@ -279,15 +293,15 @@ describe('external-reference regression tests (critical — SVGO inlineStyles la
     // produces from the probe above: the <style> tag is deleted, the rule
     // becomes an inline `style=` attribute on the <path> it targeted. The
     // <style> exclusion in the allowlist can no longer catch this — it never
-    // sees a <style> tag. This is what EXTERNAL_REF_RE exists to catch, and
-    // it must also catch vendor markup that arrives in this shape NATIVELY,
-    // with no <style> tag ever involved at any point.
+    // sees a <style> tag. This is what the fragment-only check exists to
+    // catch, and it must also catch vendor markup that arrives in this shape
+    // NATIVELY, with no <style> tag ever involved at any point.
     const laundered =
       '<svg viewBox="0 0 10 10"><path d="m0 0 1 1" ' +
       'style="fill:url(https://evil.example.com/track.svg)"/></svg>';
     const result = checkTrueVector(laundered);
     assert.equal(result.pass, false, 'laundered inline style= must still be rejected');
-    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
   });
 
   it('CRITICAL: rejects <use href="..."> pointing at an external document', () => {
@@ -296,7 +310,7 @@ describe('external-reference regression tests (critical — SVGO inlineStyles la
       '<use href="https://evil.example.com/other.svg#x"/></svg>';
     const result = checkTrueVector(probe);
     assert.equal(result.pass, false);
-    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
   });
 
   it('CRITICAL: rejects an external xlink:href on a gradient', () => {
@@ -306,7 +320,7 @@ describe('external-reference regression tests (critical — SVGO inlineStyles la
       '</defs><path d="M0 0 L1 1" fill="url(#g1)"/></svg>';
     const result = checkTrueVector(probe);
     assert.equal(result.pass, false);
-    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
   });
 
   it('rejects a protocol-relative external reference with no explicit scheme', () => {
@@ -315,7 +329,108 @@ describe('external-reference regression tests (critical — SVGO inlineStyles la
       '<path d="M0 0 L1 1" style="fill:url(//evil.example.com/x.svg)"/></svg>';
     const result = checkTrueVector(probe);
     assert.equal(result.pass, false);
-    assert.ok(result.violations.some((v) => /external reference/i.test(v)));
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+  });
+
+  describe('CRITICAL (round 2 review) — schemes that need no "//" at all', () => {
+    // Per the WHATWG URL Standard, the six "special" schemes (http, https,
+    // ws, wss, ftp, file) do not require "//" — the parser inserts it:
+    // new URL('https:evil.example.com/x').href === 'https://evil.example.com/x'
+    // (verified against Node's own URL implementation before writing this).
+    // A regex requiring a literal "//" — the previous round's EXTERNAL_REF_RE
+    // — never sees this as a match, so it shipped. The fragment-only
+    // allowlist below closes it by construction: "https:evil.example.com/x"
+    // simply does not start with "#", full stop, no scheme reasoning at all.
+    const NO_SLASH_URL = 'https:evil.example.com/x.svg#y';
+
+    it('rejects href="https:evil.example.com/x.svg#y" (no "//")', () => {
+      const probe = `<svg viewBox="0 0 10 10"><use href="${NO_SLASH_URL}"/><path d="M0 0 L1 1"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects xlink:href="https:evil.example.com/x.svg#y" (no "//")', () => {
+      const probe =
+        `<svg viewBox="0 0 10 10"><defs><linearGradient id="g1" xlink:href="${NO_SLASH_URL}"/>` +
+        '</defs><path d="M0 0 L1 1" fill="url(#g1)"/></svg>';
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects url(https:evil.example.com/x.svg#y) (no "//")', () => {
+      const probe = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" style="fill:url(${NO_SLASH_URL})"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+  });
+
+  describe('CRITICAL (round 2 review) — ASCII tab/newline inside the scheme', () => {
+    // The WHATWG URL parser's OWN first preprocessing step is "remove all
+    // ASCII tab or newline from input" — wherever they occur, not just at
+    // the ends. new URL('h\tttps://evil.example.com/x').href ===
+    // 'https://evil.example.com/x' (verified before writing this). A
+    // contiguous-match regex never sees "h\tttps://" as "https://". The
+    // fragment-only allowlist strips tab/newline the same way BEFORE
+    // judging the value, so this closes by the same construction as above.
+    const TAB_IN_SCHEME = 'h\tttps://evil.example.com/x';
+
+    it('rejects href="h<TAB>ttps://evil.example.com/x"', () => {
+      const probe = `<svg viewBox="0 0 10 10"><use href="${TAB_IN_SCHEME}"/><path d="M0 0 L1 1"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects url(https:<TAB>//evil.example.com/x) (tab straight after the colon)', () => {
+      const probe =
+        '<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" ' +
+        'style="fill:url(https:\t//evil.example.com/x)"/></svg>';
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+  });
+
+  it('positive guard: xlink:href gradient chains, clip-path, and mask references still pass', () => {
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="base"><stop offset="0%"/></linearGradient>' +
+      '<linearGradient id="g1" xlink:href="#base"/>' +
+      '<clipPath id="c"><rect width="5" height="5"/></clipPath>' +
+      '<mask id="m"><rect width="10" height="10" fill="#fff"/></mask>' +
+      '</defs><g clip-path="url(#c)" mask="url(#m)">' +
+      '<path d="M0 0 L1 1" fill="url(#g1)"/></g></svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `legitimate internal references must not be flagged; got: ${result.violations.join(', ')}`,
+    );
+  });
+
+  it('positive guard: quoted, whitespace-padded, and uppercase fragment forms all still pass', () => {
+    // A literal apostrophe, not an HTML entity: checkTrueVector is a raw
+    // string scan, not an entity-decoding parser, so "&#39;" would reach it
+    // as the five literal characters "&#39;" — not a quote at all — and
+    // prove nothing about url('#id') handling.
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="g1"><stop offset="0%"/></linearGradient>' +
+      '</defs>' +
+      '<path d="M0 0 L1 1" style="fill:url(\'#g1\')"/>' + // single-quoted
+      '<path d="M1 1 L2 2" style="fill:url( #g1 )"/>' + // whitespace-padded
+      '<path d="M2 2 L3 3" style="fill:URL(#g1)"/>' + // uppercase function name
+      '<use HREF="#g1"/>' + // uppercase attribute name
+      '</svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `quoted/padded/uppercase fragment forms must not be flagged; got: ${result.violations.join(', ')}`,
+    );
   });
 
   it('positive guard: same-document fragment references are NOT external and still pass', () => {
@@ -356,5 +471,20 @@ describe('viewBox value validation (critical — presence alone was not enough)'
   it('accepts negative and decimal viewBox components', () => {
     const result = checkTrueVector('<svg viewBox="-5 -5.5 10.25 10"><path d="M0 0 L1 1"/></svg>');
     assert.equal(result.census.hasViewBox, true);
+  });
+
+  it('IMPORTANT (round 2 review): accepts scientific-notation components — spec-legal, was a false rejection', () => {
+    // SVG's own <number> grammar permits an exponent. Before this fix,
+    // VIEWBOX_NUMBER_RE had no exponent support, so a well-formed,
+    // spec-legal logo with this (unusual but valid) viewBox would fail to
+    // ship — a false rejection, the opposite failure mode from the Criticals
+    // in the sibling describe block above.
+    const result = checkTrueVector('<svg viewBox="0 0 1e2 1e2"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(
+      result.census.hasViewBox,
+      true,
+      "exponent notation is legal per SVG's <number> grammar and must not be rejected",
+    );
+    assert.equal(result.pass, true);
   });
 });
