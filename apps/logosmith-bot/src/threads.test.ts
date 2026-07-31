@@ -43,15 +43,19 @@ describe('parseSelection', () => {
     assert.equal(parseSelection('anything but concept 1'), null);
   });
 
-  // Round 3: this now nulls out — an accepted cost, not a bug. The scoped
-  // lookbehind that used to protect this exact case (a cue only counted if
-  // it preceded the match within a window) is the same design that let
-  // "concept 1 is nice, but concept 2" confidently return 1, the concept
-  // the buyer had just rejected (next test below). A cue anywhere in the
-  // message now nulls the whole thing, with no attempt to work out which
-  // mention it modifies — a buyer who gets no response here simply follows
-  // up; shipping the wrong logo is the worse failure this trades away.
-  it('nulls a message with a cue anywhere, even one that only qualifies a harmless follow-up request', () => {
+  // This is a DELIBERATE REVERSAL of a round-2 instruction, not a weakened
+  // assertion: round 2 explicitly required protecting this exact case
+  // (`assert.equal(parseSelection('concept 2, but can you make it blue?'),
+  // 2)`, via a scoped lookbehind that only counted a cue if it preceded the
+  // match within a window). Round 3's review explicitly withdrew that
+  // requirement ("Drop the protection; keep the safety") once the same
+  // scoped-window mechanism was shown to be exactly what let "concept 1 is
+  // nice, but concept 2" confidently return 1 — the concept the buyer had
+  // just rejected (next test below). A cue anywhere in the message now
+  // nulls the whole thing, with no attempt to work out which mention it
+  // modifies — a buyer who gets no response here simply follows up;
+  // shipping the wrong logo is the worse failure this trades away.
+  it('nulls a message with a cue anywhere, even one that only qualifies a harmless follow-up request (round 2 protected this; round 3 reversed it on explicit review instruction)', () => {
     assert.equal(parseSelection('concept 2, but can you make it blue?'), null);
   });
 
@@ -64,6 +68,21 @@ describe('parseSelection', () => {
   it('does not confidently return the de-prioritized concept in a negated or comparative sentence', () => {
     assert.equal(parseSelection('concept 1 is nice, but concept 2'), null);
     assert.equal(parseSelection("I'd rather have concept 2 than concept 1"), null);
+  });
+
+  // Locking in two more accepted costs explicitly, so they can never be
+  // mistaken for defects: a future probe will find a buyer plainly picking
+  // concept 2 here and get null. That is intentional, not a gap — it is
+  // the exact same whole-message cue check that fixes the C1 cases just
+  // above ("concept 1 is nice, but concept 2" confidently returning 1, the
+  // REJECTED concept). Loosening this to let "no problem"/"no rush" through
+  // would require scoping the check back down to work out which mention a
+  // cue modifies — precisely the reasoning that produced the C1 bug in the
+  // first place. If this test is ever "fixed" to return 2, the inverted-
+  // answer hole those C1 cases exposed reopens.
+  it('accepts a null for an idiomatic cue rather than risk an inverted pick', () => {
+    assert.equal(parseSelection('no problem, concept 2'), null);
+    assert.equal(parseSelection('no rush — go with 2'), null);
   });
 
   // The scoped lookbehind was also non-monotonic — the tell that it was
