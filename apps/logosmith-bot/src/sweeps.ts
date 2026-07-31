@@ -34,6 +34,7 @@ import {
   type D1NegotiationStore,
   type SeenStore,
 } from '@botguild/agent-core-workers';
+import { parseFaviconBrief, resolveBrief } from './brief.js';
 import {
   PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
@@ -41,6 +42,7 @@ import {
   pricingCalc,
   scorerConfig,
 } from './config.js';
+import type { ProseBriefExtractor } from './proseBrief.js';
 import {
   buildJobKey,
   saveReputationSnapshot,
@@ -93,6 +95,13 @@ export interface SweepServices extends SelectionResolutionDeps {
   /** Estimator-free proposer for FREE gigs (favicon/taster) — see config.ts. */
   freeProposer: Proposer;
   costEstimator: CostEstimator;
+  /**
+   * Prose-brief fallback for the ~all real gigs that carry no fenced JSON.
+   * Required, not optional: an optional extractor would default to "resolve
+   * nothing", which reads as "skip every prose gig" — a silent fail-open on the
+   * one decision this seam exists to make.
+   */
+  briefExtractor: ProseBriefExtractor;
 }
 
 const clockOf = (deps: { now?: () => Date }): (() => Date) => deps.now ?? ((): Date => new Date());
@@ -155,10 +164,39 @@ const vendorFor = (reason: string | null): string =>
  * question by construction — config.ts's calculator returns 0 for exactly the
  * free shapes and SEED_PRICE_USD otherwise — so the routing cannot drift away
  * from the pricing it is routing for.
+ *
+ * A gig whose brief cannot be resolved at all is skipped rather than bid on:
+ * the pipeline would reject it after funding, and a rejected funded contract
+ * costs reputation that a silent non-bid does not.
  */
 export async function maybePropose(s: SweepServices, gig: Gig): Promise<void> {
   const log = s.logger.child({ gigId: gig.id });
   if (!shouldPropose(gig, scorerConfig)) return;
+
+  // THE ORDERING BELOW IS THE COST CONTROL, AND IT IS DELIBERATE. Prose
+  // extraction is a Haiku call — MEASURED at 412 input tokens for a
+  // representative gig, so ~$0.0005 a call against a $1 anchor — and it runs
+  // strictly AFTER `shouldPropose`: on the relevance-cleared candidates only,
+  // never on every gig the 15-minute poll lists. The poll's SeenStore bounds it
+  // further to once per gig id. Hoisting it above the score would turn a
+  // per-candidate cost into ~$0.0005 × every open gig on the marketplace, every
+  // fifteen minutes, forever.
+  //
+  // The favicon gig is exempt because it carries no LogoBrief at all — its
+  // brief is a `logoUrl` (US-2), which `parseFaviconBrief` validates on its
+  // own, and running a brand-name extraction against it would only ever refuse
+  // it. Asked here rather than reused from `pricingCalc(gig).price === 0`
+  // because that value is 0 for BOTH free shapes and the other one (the $0
+  // taster) does need a LogoBrief — this is the intake question, not the
+  // pricing question.
+  const description = gig.description ?? '';
+  if (!parseFaviconBrief(description).ok) {
+    const brief = await resolveBrief(gig, s.briefExtractor);
+    if (!brief.ok) {
+      log.info({ reason: brief.reason }, 'no intakeable logo brief; not bidding on this gig');
+      return;
+    }
+  }
 
   const free = pricingCalc(gig).price === 0;
   const draft = await (free ? s.freeProposer : s.proposer).generateProposal(gig);

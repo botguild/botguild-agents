@@ -37,7 +37,16 @@ import {
   runFifteenMinuteSweep,
   type SweepServices,
 } from './sweeps.js';
-import type { ConceptState, FetchLike, JobCheckpoint, JobMessage, JobStage } from './types.js';
+import type {
+  ConceptState,
+  FetchLike,
+  JobCheckpoint,
+  JobMessage,
+  JobStage,
+  LogoBrief,
+} from './types.js';
+import { parseLogoBrief, type BriefResult } from './brief.js';
+import type { ProseGig } from './proseBrief.js';
 
 const logger = createConsoleLogger({ service: 'test', botId: 'bot-logosmith', level: 'silent' });
 const BOT_ID = 'bot-logosmith';
@@ -153,6 +162,10 @@ interface Harness {
   breakNegotiation: { value: boolean };
   /** Contract ids whose thread read throws, standing in for a platform 5xx. */
   failThreadsFor: Set<string>;
+  /** Every gig handed to the prose-brief extractor, in order. */
+  extractorCalls: ProseGig[];
+  /** What the scripted extractor returns; a valid brief by default. */
+  extractorResult: { value: BriefResult<LogoBrief> };
   at<T>(when: Date, fn: () => Promise<T>): Promise<T>;
 }
 
@@ -177,6 +190,15 @@ async function makeHarness(): Promise<Harness> {
   const fetchedUrls: string[] = [];
   const breakNegotiation = { value: false };
   const failThreadsFor = new Set<string>();
+
+  // The prose-brief extractor stands in for a Haiku call. It succeeds by
+  // default so the proposer-routing tests keep testing routing, and records
+  // every call so the "which gigs did we pay a model to read?" question — the
+  // cost control in `maybePropose` — is directly assertable.
+  const extractorCalls: ProseGig[] = [];
+  const extractorResult: { value: BriefResult<LogoBrief> } = {
+    value: { ok: true, brief: { brandName: 'Harbor & Vine', industry: 'boutique inn' } },
+  };
 
   const client = {
     async listGigs(): Promise<Gig[]> {
@@ -279,6 +301,12 @@ async function makeHarness(): Promise<Harness> {
     } as unknown as SweepServices['reputationSource'],
     proposer: tagProposer('paid'),
     freeProposer: tagProposer('free'),
+    briefExtractor: {
+      async extract(gig: ProseGig): Promise<BriefResult<LogoBrief>> {
+        extractorCalls.push(gig);
+        return extractorResult.value;
+      },
+    },
     costEstimator: {
       async estimate(): Promise<never> {
         throw new Error('costEstimator.estimate: not scripted for these tests');
@@ -307,6 +335,8 @@ async function makeHarness(): Promise<Harness> {
     fetchedUrls,
     breakNegotiation,
     failThreadsFor,
+    extractorCalls,
+    extractorResult,
     async at<T>(when: Date, fn: () => Promise<T>): Promise<T> {
       const previous = clock.value;
       clock.value = when;
@@ -1152,6 +1182,11 @@ describe('maybePropose', () => {
     );
     assert.equal(h.proposalsSent.length, 1);
     assert.equal(h.proposalsSent[0].proposer, 'free');
+    assert.deepEqual(
+      h.extractorCalls,
+      [],
+      'a favicon gig carries no LogoBrief; extracting a brand name from it would only refuse it',
+    );
   });
 
   it('stays silent on an unrelated gig', async () => {
@@ -1176,6 +1211,85 @@ describe('maybePropose', () => {
       h.proposalsSent.map((entry) => entry.gigId),
       ['g-swept'],
     );
+  });
+});
+
+describe('maybePropose — brief intake gates the bid (Task 27)', () => {
+  // The default gig description is prose with no fenced JSON — the shape a
+  // live probe measured on 78 of 78 open gigs — so these tests exercise the
+  // fallback rather than a synthetic edge case.
+  const PROSE = 'A logo for Harbor & Vine, our new seaside inn.';
+  assert.equal(parseLogoBrief(PROSE).ok, false, 'precondition: prose has no fenced brief');
+
+  it('bids on a prose gig once the extractor resolves a brief', async () => {
+    const h = await makeHarness();
+    await maybePropose(h.services, makeGig({ id: 'g-prose', description: PROSE }));
+
+    assert.equal(h.extractorCalls.length, 1, 'the fenced path found nothing, so extraction ran');
+    assert.deepEqual(
+      h.proposalsSent.map((entry) => entry.gigId),
+      ['g-prose'],
+    );
+  });
+
+  it('does not bid when neither the fenced brief nor the prose yields one', async () => {
+    const h = await makeHarness();
+    h.extractorResult.value = { ok: false, reason: 'the gig names no brand' };
+
+    await maybePropose(h.services, makeGig({ id: 'g-nameless', description: PROSE }));
+
+    assert.equal(h.extractorCalls.length, 1, 'precondition: the extractor was consulted');
+    assert.deepEqual(
+      h.proposalsSent,
+      [],
+      'the pipeline would reject this contract after funding; do not win it',
+    );
+  });
+
+  it('never pays for extraction on a gig that failed the relevance bar', async () => {
+    const h = await makeHarness();
+    // Scored first, extracted second — the difference between ~$0.0008 per
+    // candidate and ~$0.0008 x every gig on the marketplace, every 15 minutes.
+    await maybePropose(
+      h.services,
+      makeGig({
+        id: 'g-off',
+        category: 'Pet Care',
+        title: 'Dog walking',
+        description: 'Walk him.',
+      }),
+    );
+
+    assert.deepEqual(h.proposalsSent, []);
+    assert.deepEqual(h.extractorCalls, []);
+  });
+
+  it('never pays for extraction when the gig already carries a fenced brief', async () => {
+    const h = await makeHarness();
+    const description = '```json\n{"brandName":"Harbor & Vine","industry":"inn"}\n```';
+    assert.equal(parseLogoBrief(description).ok, true, 'precondition: the fenced path resolves');
+
+    await maybePropose(h.services, makeGig({ id: 'g-fenced', description }));
+
+    assert.equal(h.proposalsSent.length, 1);
+    assert.deepEqual(h.extractorCalls, [], 'the fenced fast path must stay free');
+  });
+
+  it('hands the extractor the structured gig fields, not just the description', async () => {
+    const h = await makeHarness();
+    await maybePropose(
+      h.services,
+      makeGig({
+        id: 'g-rich',
+        description: PROSE,
+        deliverables: ['Primary lockup'],
+        tags: ['logo', 'hospitality'],
+      }),
+    );
+
+    assert.equal(h.extractorCalls.length, 1);
+    assert.deepEqual(h.extractorCalls[0]!.deliverables, ['Primary lockup']);
+    assert.deepEqual(h.extractorCalls[0]!.tags, ['logo', 'hospitality']);
   });
 });
 

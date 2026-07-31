@@ -1,10 +1,15 @@
 // Brief intake (FR-1). The platform has no structured-brief primitive, so the
-// brief rides as a fenced JSON block in the gig description. Parsed at proposal
-// time (the scorer skips gigs whose brief is missing, invalid, or non-Latin, so
-// un-intakeable work is never won) and re-validated at milestone.funded.
+// brief may ride as a fenced JSON block in the gig description — and when it
+// does not (measured live: 0 of 78 open gigs did), `resolveBrief` falls back to
+// prose extraction (proseBrief.ts), whose output is validated by the SAME
+// `parseLogoBrief` below. Resolved at proposal time (the scorer skips gigs
+// whose brief is missing, invalid, or non-Latin, so un-intakeable work is never
+// won) and re-validated at milestone.funded.
 //
-// Every function here is pure: `checkLogoUrl` decides the URL *policy* and does
-// NOT fetch. The size/type/timeout guards run at fetch time in the pipeline.
+// Every function here is pure and synchronous except `resolveBrief`, which is
+// async only because the extractor it delegates to is: `checkLogoUrl` decides
+// the URL *policy* and does NOT fetch. The size/type/timeout guards run at
+// fetch time in the pipeline.
 
 import type { FaviconBrief, LogoBrief } from './types.js';
 
@@ -76,6 +81,51 @@ export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
       ...(stringArray(raw['avoid']) ? { avoid: stringArray(raw['avoid']) } : {}),
       ...(nonBlankString(raw['script']) ? { script: raw['script'].trim() } : {}),
     },
+  };
+}
+
+/**
+ * The prose-extraction seam (implemented by `createProseBriefExtractor` in
+ * proseBrief.ts).
+ *
+ * Declared structurally HERE, generic over the gig shape, rather than importing
+ * the extractor's concrete type: config.ts imports this module for the $0
+ * pricing branch, so brief.ts must stay a leaf whose only import is ./types.js
+ * (see MIN_SOURCE_PX below for the same constraint stated from the other side).
+ * Importing proseBrief.ts — which imports config.ts — would close that cycle.
+ */
+export interface LogoBriefExtractorLike<G> {
+  extract(gig: G): Promise<BriefResult<LogoBrief>>;
+}
+
+/**
+ * The combined brief resolver: fenced JSON first, prose extraction second.
+ *
+ * The fenced path stays free — the extractor is a paid model call and is only
+ * reached when there is no valid fenced brief to find, so a gig that carries
+ * one never pays for extraction.
+ *
+ * Extraction is NOT a relaxation. It cannot rescue a brief the fenced path
+ * deliberately rejected (a non-Latin brand name, a blank field), because the
+ * extractor re-validates its own candidate through this module's
+ * `parseLogoBrief` before returning it. The fenced block is preferred not
+ * because it is trusted more but because it is cheaper and unambiguous.
+ *
+ * Both reasons are reported on failure: "no fenced block" and "the prose named
+ * no brand" are different problems for the buyer to fix.
+ */
+export async function resolveBrief<G extends { description?: string | null }>(
+  gig: G,
+  extractor: LogoBriefExtractorLike<G>,
+): Promise<BriefResult<LogoBrief>> {
+  const fenced = parseLogoBrief(gig.description ?? '');
+  if (fenced.ok) return fenced;
+
+  const extracted = await extractor.extract(gig);
+  if (extracted.ok) return extracted;
+  return {
+    ok: false,
+    reason: `${fenced.reason}; prose extraction also failed: ${extracted.reason}`,
   };
 }
 

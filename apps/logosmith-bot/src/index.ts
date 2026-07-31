@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Logger } from 'pino';
+import Anthropic from '@anthropic-ai/sdk';
 import {
   AgentClient,
   AgentMcpClient,
@@ -72,7 +73,7 @@ import type { Hono } from 'hono';
 //    experiment — dynamic imports get inlined into the single-file Workers
 //    bundle) — reverified here by `wrangler deploy --dry-run` (see the task
 //    report for the resulting bundle numbers).
-import { botProfile, fallbackEstimate, pricingCalc, rateCard } from './config.js';
+import { HAIKU_MODEL_ID, botProfile, fallbackEstimate, pricingCalc, rateCard } from './config.js';
 import { createDisputeResponder, type DisputeResponder } from './disputes.js';
 import {
   buildJobKey,
@@ -88,6 +89,7 @@ import {
 } from './jobs.js';
 import { renderProgressPage, renderProgressEvent } from './progress.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
+import { createProseBriefExtractor } from './proseBrief.js';
 import {
   resolveSelectionForContract,
   runDailySweep,
@@ -423,6 +425,16 @@ function getServices(env: Env): Services {
     proposer,
     freeProposer,
     costEstimator,
+    // Gig discovery runs before any contract exists, so there is no D1 job row
+    // to book this against — the structured log line IS the ledger entry, and
+    // `recordSpend` is required by the extractor's own type so it cannot be
+    // constructed without one. Fires on every extraction, refused ones
+    // included: a refusal still burned tokens.
+    briefExtractor: createProseBriefExtractor({
+      anthropic: new Anthropic({ apiKey: env.ANTHROPIC_API_KEY }),
+      recordSpend: (costUsd) =>
+        logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'prose brief extraction spend'),
+    }),
     queue: env.JOBS,
     apiUrl: env.BOTGUILD_API_URL,
     apiKey: env.BOTGUILD_API_KEY,
