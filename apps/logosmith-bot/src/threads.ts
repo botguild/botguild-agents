@@ -79,171 +79,209 @@ export function createThreadReader(deps: ThreadReaderDeps): ThreadReader {
   };
 }
 
-// "concept N" / "option N" / "#N" / "go with N" / "make it N" / "let's do
-// N", case-insensitive, matched anywhere in the text (the last three only
-// at the tail of the message — see parseSelection's doc comment). Reused
-// across calls: String#matchAll clones the regex internally, so a shared
-// `g`-flagged pattern does not carry stateful `lastIndex` across
-// invocations the way `.exec()`/`.test()` would.
+// ---------------------------------------------------------------------------
+// Selection parsing — whole-message affirmative templates.
 //
-// (?!\.\d) after every digit group rejects decimals ("concept 2.5" is not
-// slot 2) without a second pass — \b alone doesn't catch this, since a word
-// boundary holds just as well before '.' as before a space.
-const SLOT_PATTERN =
-  /\b(?:concept|option)\s*#?\s*(\d+)(?!\.\d)\b|#(\d+)(?!\.\d)\b|\b(?:go\s+with|make\s+it|let'?s\s+do)\s*#?\s*(\d+)(?!\.\d)\b(?=[\s.,!?]*$)/gi;
+// THE SHAPE OF THIS PARSER IS THE POINT. Read this before changing anything
+// below it.
+//
+// Every earlier version of this module extracted a *positive* signal (a slot
+// number, substring-matched anywhere in the message) and then tried to
+// disqualify it with a blocklist of *negative* markers: first a per-match
+// negation lookbehind window, then a whole-message negation-cue list. Both
+// fail OPEN. English rejection vocabulary is unbounded — skip, veto, nope,
+// hard pass, decline, "ranks last", "bottom choice", "no-go", "cannot
+// accept", "never in a million years" — so every unlisted way of saying "not
+// that one" produced a CONFIDENT WRONG SLOT, which is the one outcome this
+// module exists to prevent. Three rounds of extending the list each bought
+// exactly the strings that round enumerated and left the same hole.
+//
+// So the parser is inverted: it recognizes only affirmative *selection
+// shapes*, and the ENTIRE trimmed message must be one of them. There is no
+// rejection list at all, because there is nothing to reject — anything the
+// templates do not recognize, in any position, is null by construction. The
+// set of ways to reject a concept is infinite and not ours to enumerate; the
+// set of ways to affirmatively pick one is small and is defined right here.
+//
+// The lists that remain (LEAD_IN, POLITE, AFFIRM) are still enumerations, but
+// they fail CLOSED: an unlisted lead-in or an unlisted surrounding word yields
+// null, never a guess. That asymmetry is the whole reason an allow-list is
+// safe where a deny-list is not. Adding to them is fine; the rule for doing
+// so is at the bottom of parseSelection's doc comment.
+//
+// The two structural guards earlier rounds got right are preserved, in
+// stronger form:
+//   - '#N' gating (was: an allow-list of the single preceding word). Now
+//     '#N' is only recognized when the whole message is a template, so both
+//     what precedes it AND what follows it are constrained. Every reference
+//     number — "invoice #2", "PO #2", "SKU #2", "the meeting is #2 on the
+//     agenda" — is denied without naming a single reference noun.
+//   - Multi-slot ambiguity ("I like concept 1 and concept 2" is not a
+//     choice). No longer a counting step, because a second slot mention
+//     cannot survive the anchors: the text between two mentions is never a
+//     lead-in or a politeness word, so the template simply does not match.
+//     The behaviour is unchanged and still tested; only the mechanism is.
+// ---------------------------------------------------------------------------
 
-// Negation/contrast cues. Checked ANYWHERE in the message (containsNegationCue
-// below), never in a window around a specific match — round 2 shipped a
-// scoped lookbehind and it was wrong: it let "concept 1 is nice, but concept
-// 2" confidently return 1 (the REJECTED concept), because "but" sat just
-// outside the window around the surviving "concept 2" mention, and it did
-// the same to "I'd rather have concept 2 than concept 1". Working out which
-// mention a cue grammatically modifies is genuinely NLP-complete; a regex
-// must not pretend otherwise. A cue anywhere plus any slot match is null,
-// full stop — see parseSelection's doc comment for the costs this accepts.
-const NEGATION_CUES = new Set(['not', 'but', 'except', 'rather', 'instead', 'avoid', 'no']);
+// Whitespace and decoration that may TRAIL a selection without being part of
+// it. Excludes every letter and digit, so no content word can ever hide in
+// here, and three deliberate omissions found by the round-5 adversarial pass:
+//   - '>', an email/chat quote marker. A buyer quoting the bot's own "reply
+//     with `concept 1|2|3`" back at it must not parse as a pick.
+//   - '(' ')' '[' ']', which turn emoticons into decoration: "concept 2 :("
+//     parsed as a confident 2 while the buyer was visibly unhappy about it.
+//     Sentiment is not something this parser can read, so a message carrying
+//     any is not a clean selection. ":)" fails closed for the same reason —
+//     that is the correct direction to be wrong in.
+//   - no emoji or symbols of any kind, so "concept 2 👎" is null.
+const SEP = String.raw`[\s.,;:!?'"\`\-–—…]`;
 
-// '#N' is gated by an ALLOW-list, not a deny-list. Round 2 shipped a
-// deny-list of reference-number nouns (invoice, order, room, ...) and it
-// caught exactly those nouns and no others — "PO #2", "SKU #2", "lot #2"
-// all still returned confident wrong slots, because a deny-list only ever
-// covers nouns someone thought of. Accepting '#N' only when it opens the
-// message or follows one of these recognized selection words makes an
-// unrecognized preceding word null by construction, forever, with no list
-// to keep extending.
-const HASH_ALLOWLIST = new Set([
-  'like',
-  'prefer',
-  'pick',
-  'choose',
-  'want',
-  'take',
-  'love',
-  'best',
-  'is',
-  'go',
-  'with',
-]);
+// Decoration that may LEAD a selection: the same set MINUS the dash family.
+// A trailing dash is punctuation; a leading one is a minus sign or a negating
+// bullet, and "-2" must not read as slot 2. The cost is that "- concept 2"
+// (a bulleted single-line reply) is null too, which is the safe direction.
+const LEAD_SEP = String.raw`[\s.,;:!?'"\`…]`;
 
-/**
- * The nearest whitespace-delimited token of `text` before `index`,
- * lowercased with leading/trailing punctuation stripped (apostrophes kept,
- * so "don't" survives intact for the "n't" check). undefined when nothing
- * precedes `index`.
- */
-function nearestTokenBefore(text: string, index: number): string | undefined {
-  const before = text
-    .slice(0, index)
-    .split(/\s+/)
-    .filter((token) => token.length > 0);
-  const nearest = before[before.length - 1];
-  return nearest === undefined
-    ? undefined
-    : nearest.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase();
-}
+// The only words allowed to sit beside a selection without being part of it:
+// politeness, nothing else. 'best' is included because the locked test
+// "we like #2 best" needs it; it is harmless because it can only appear
+// where a message has already matched a selection shape.
+//
+// Note what is NOT here and therefore fails closed: "concept 2 for sure",
+// "concept 2 it is", "concept 2, thanks so much". Those return null. Adding
+// more politeness is a safe change (it can only turn nulls into picks, never
+// change which slot a pick resolves to) — adding anything that is not purely
+// phatic is not.
+const POLITE = String.raw`(?:please|pls|thanks|thank\s+you|thx|best)`;
 
-/** True when a negation/contrast cue (see NEGATION_CUES) appears anywhere in `text`. */
-function containsNegationCue(text: string): boolean {
-  return text
-    .split(/\s+/)
-    .filter((token) => token.length > 0)
-    .map((token) => token.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase())
-    .some((token) => NEGATION_CUES.has(token) || token.includes("n't"));
-}
+// Bare affirmation, allowed only in FRONT of a selection ("yes, concept 2",
+// "ok #3 please"), because that is the only place it is said. These are
+// affirmative markers, so admitting them can only ever confirm a pick, never
+// invert one — "definitely not concept 2" and "yes but skip concept 2" still
+// fail, because the negating word sits between the affirmation and the slot
+// and nothing may be skipped over.
+const AFFIRM = String.raw`(?:yes|yeah|yep|yup|ok|okay|sure|definitely)`;
+
+/** Phatic words allowed to precede a selection, in any order or repetition. */
+const LEADING_FILLER = String.raw`(?:${AFFIRM}|${POLITE})`;
+
+// A reference to a slot: "concept N", "option N", "#N", or a bare "N".
+// Separators between the noun and the number are permissive ("concept 2",
+// "concept-2", "concept #2", "concept: 2") because they carry no meaning.
+//
+// (?!\.\d) rejects decimals: "concept 2.5" must not silently truncate to
+// slot 2. The whole-message anchor would catch it anyway (".5" is not a
+// legal trailer), but the lookahead states the intent locally and survives
+// any future loosening of the trailer.
+const SLOT_REFERENCE = String.raw`(?:(?:concept|option)\s*[-–—:]?\s*(?:#\s*)?|#\s*)?(\d+)(?!\.\d)`;
+
+// Affirmative lead-ins. Each is a COMPLETE phrase that must be followed
+// immediately by the slot reference — there is no wildcard between the two,
+// which is what makes composition safe: "I don't like concept 2", "I cannot
+// accept concept 2", "I'd rather have concept 2 than concept 1" and "my
+// least favorite is concept 2" all fail, because the inserted word is not
+// part of any lead-in and nothing may be skipped over.
+const SUBJECT = String.raw`(?:i|we)(?:'ll|'d|'m|'re|\s+will|\s+would|\s+am|\s+are)?`;
+const CHOICE_VERB = String.raw`(?:take|pick|choose|like|love|prefer|want|vote\s+for|vote|go\s+with|going\s+with)`;
+const LEAD_IN = String.raw`(?:${SUBJECT}\s+${CHOICE_VERB}|let'?s\s+(?:do|use|try|pick|choose|go\s+with|make\s+it)|go\s+with|going\s+with|make\s+it|give\s+me|use|pick|choose|my\s+(?:pick|choice|vote|favou?rite)\s+is)`;
+
+// The one pattern the whole parser runs on, anchored at both ends. No 'g'
+// flag on purpose: this is a module-level regex reused across calls, and
+// only a 'g'/'y' pattern carries a stateful lastIndex into the next
+// .exec()/.test().
+const SELECTION_TEMPLATE = new RegExp(
+  `^${LEAD_SEP}*(?:${LEADING_FILLER}${LEAD_SEP}+)*(?:${LEAD_IN}\\s+)?${SLOT_REFERENCE}(?:${SEP}*${POLITE})*${SEP}*$`,
+  'i',
+);
 
 /**
  * Parses free text into a 1-based concept slot (1-3), or null when the text
- * is not a string, names no slot, names an out-of-range or unrecognized
- * slot, names more than one distinct slot, or contains a negation/contrast
- * cue anywhere at all. Never throws, for any input — it is a public export,
- * and a field typed `string` (e.g. `ThreadMessage.body`) can carry whatever
- * an unsafe upstream cast actually put there, not what the type promises.
+ * is not a string, or is not — in its entirety — a recognized affirmative
+ * selection. Never throws, for any input: it is a public export, and a field
+ * typed `string` (e.g. `ThreadMessage.body`) can carry whatever an unsafe
+ * upstream cast actually put there, not what the type promises.
  *
- * Accepted forms — substring-matched anywhere in the message, so natural
- * phrasing like "I'll take concept 1 please" still parses:
- *   - "concept N", "option N".
- *   - "#N" — but only when it opens the message, or the single nearest word
- *     before it is a recognized selection word (see HASH_ALLOWLIST). This is
- *     deliberately an allow-list, not a deny-list: "invoice #2", "PO #2",
- *     "lot #2", and every other reference-number phrasing nobody enumerated
- *     are all denied by the same rule, forever, rather than by a list that
- *     can only ever cover nouns someone thought of.
- *   - "go with N", "make it N", "let's do N" — but only when N is the last
- *     thing in the message, aside from trailing punctuation. These are
- *     free-form action phrases rather than dedicated selection syntax, so if
- *     more text follows the number it is very likely modifying something
- *     else — "go with 3 colors", "make it 2x bigger" are quantities, not a
- *     pick (the latter is also caught by the plain word-boundary check,
- *     since "2x" has no boundary between digit and letter).
- *   - a bare "N", only when the *entire* message is just the digit, so a
- *     stray number inside an ordinary sentence ("give me 3 more") is not
- *     mistaken for a pick.
+ * The rule is a single sentence: THE WHOLE MESSAGE MUST BE A SELECTION.
+ * There is no rejection list, no negation check, no "which mention did the
+ * buyer mean" heuristic. A message is a pick only when, after trimming and
+ * whitespace/apostrophe normalization, it consists of nothing but:
  *
- * Two ways a match is discarded before it reaches the ambiguity count below:
- *   - Decimals: "concept 2.5" and "#2.5" must not silently truncate to 2 —
- *     a digit run immediately followed by '.' and another digit is not a
- *     slot number.
- *   - An unrecognized word (or nothing) before "#N" — see HASH_ALLOWLIST.
+ *     [politeness] [affirmative lead-in] <slot reference> [politeness]
  *
- * Two distinct (surviving) slots named in one message is an unresolved
- * ambiguity, not a choice — "I like concept 1 and concept 2" must not
- * silently collapse to 1 (or 2). Recognizing "go with N" makes "concept 2 is
- * terrible, go with 3" land here too: the sentence names two distinct
- * slots, and ambiguity — not any attempt to parse "is terrible" — is what
- * makes this null instead of a confident, wrong 2.
+ * where
+ *   - <slot reference> is "concept N", "option N", "#N", or a bare "N"
+ *     (see SLOT_REFERENCE);
+ *   - [affirmative lead-in] is one of a small closed set — "I'll take",
+ *     "we like", "I prefer", "I'm going with", "go with", "make it",
+ *     "let's do", "pick", "choose", "use", "give me", "my choice is", and
+ *     their close variants (see LEAD_IN);
+ *   - [politeness] is "please"/"thanks"/"thank you"/"best" and punctuation
+ *     (see POLITE, SEP).
  *
- * Last: if the message contains a negation/contrast cue — "not", "but",
- * "except", "rather", "instead", "avoid", "no", an "n't" contraction —
- * ANYWHERE, the whole result is null, even if exactly one slot survived
- * everything above. This is deliberately not scoped to a window around the
- * match. A scoped lookbehind was tried first and rejected: it let "concept 1
- * is nice, but concept 2" confidently return 1 — the concept the buyer had
- * just rejected — because "but" sat outside the window around the surviving
- * "concept 2" mention, and it did the same to "I'd rather have concept 2
- * than concept 1". Working out which mention a cue grammatically modifies is
- * genuinely NLP-complete; a regex must not pretend otherwise. The cost is
- * real and accepted: "concept 2, but can you make it blue?", "no problem,
- * concept 2", and "no rush — go with 2" all null out too, even though a
- * human reads each as an unambiguous pick. That is the trade: a buyer who
- * gets no response follows up within 72 hours (FR-9's default-selection
- * timeout); a buyer who gets the wrong logo has already been failed, and a
- * wrong-but-confident answer is worse than null by this module's own rule.
+ * Anything else — one unrecognized word, in front or behind — is null.
+ *
+ * WHY THIS SHAPE. Rejections do not have to be recognized as rejections,
+ * which is the property that ends the confident-wrong-answer bug class:
+ *   - "skip concept 2", "veto concept 1", "pass on concept 1", "declining
+ *     concept 2, moving on", "I cannot accept concept 2" — the lead-in is
+ *     not recognized.
+ *   - "concept 1 was my second choice", "concept 3 is my bottom choice",
+ *     "concept 2 ranks last for me", "concept 2 is a no-go for me",
+ *     "concept 2, never in a million years", "concept 2? nope, love 3" —
+ *     the trailing content is not recognized.
+ * None of those words ("skip", "veto", "nope", "no-go", "bottom", "ranks
+ * last", "cannot") appears anywhere in this module, and none needs to. They
+ * fail because they were never affirmatively recognized. An unbounded
+ * vocabulary is exactly what an allow-list does not have to enumerate.
+ *
+ * THE ACCEPTED COST, stated plainly so nobody "fixes" it. Verbose but
+ * perfectly clear picks now return null:
+ *
+ *     "concept 2 looks perfect, let's go with that"   -> null
+ *     "concept 2 is the winner"                       -> null
+ *     "concept 2 it is!"                              -> null
+ *     "concept 2 for sure"                            -> null
+ *     "we love concept 2, ship it"                    -> null
+ *     "concept 2, but can you make it blue?"          -> null
+ *     "no problem, concept 2"                         -> null
+ *     "concept two" (spelled-out numerals)            -> null
+ *
+ * That is the trade, and it is the right way round. A buyer who gets no
+ * response follows up, and FR-9's 72-hour default-selection timeout catches
+ * the ones who don't; a buyer who gets the wrong logo has already been
+ * failed. Every attempt so far to buy those nulls back has been an attempt
+ * to reason about text *around* a slot number, and every one of them shipped
+ * a confidently inverted answer instead ("concept 1 is nice, but concept 2"
+ * returning 1 — the rejected concept).
+ *
+ * THE RULE FOR EXTENDING THIS. Adding an affirmative lead-in or a politeness
+ * word is a safe, expected change; adding one can only turn a null into a
+ * pick, never change which slot an existing pick resolves to. Two conditions:
+ * (1) the addition must be a complete phrase that is followed IMMEDIATELY by
+ * the slot reference, with no wildcard in between — that adjacency is what
+ * keeps "I don't like concept 2" and "my least favorite is concept 2" out;
+ * (2) there must be no natural sentence that begins with the new phrase and
+ * continues directly into a slot reference while meaning the opposite. What
+ * is NOT a safe change is relaxing either anchor to let unrecognized text
+ * sit beside a match. That is the change that has been made and reverted
+ * three times.
  */
 export function parseSelection(text: unknown): number | null {
   if (typeof text !== 'string') return null;
-  const trimmed = text.trim();
-  if (!trimmed) return null;
+  // Curly apostrophes (every phone keyboard produces them) must not defeat
+  // "I'll"/"let's"; internal runs of whitespace and newlines are collapsed so
+  // a two-line "concept 2\n\nthanks!" reads the same as the one-line form.
+  const normalized = text.replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
 
-  const slots = new Set<number>();
-  for (const match of trimmed.matchAll(SLOT_PATTERN)) {
-    const n = Number(match[1] ?? match[2] ?? match[3]);
-    if (n < 1 || n > 3) continue;
+  const match = SELECTION_TEMPLATE.exec(normalized);
+  if (!match) return null;
 
-    if (match[2] !== undefined) {
-      const matchIndex = match.index ?? 0;
-      const opensMessage = matchIndex === 0;
-      if (!opensMessage) {
-        const nearest = nearestTokenBefore(trimmed, matchIndex);
-        if (nearest === undefined || !HASH_ALLOWLIST.has(nearest)) continue;
-      }
-    }
-
-    slots.add(n);
-  }
-
-  // Bare "N": only fires when nothing else matched AND the whole trimmed
-  // message is nothing but the digit — deliberately narrower than the
-  // keyword forms above, which match as a substring.
-  if (slots.size === 0 && /^\d+$/.test(trimmed)) {
-    const n = Number(trimmed);
-    if (n >= 1 && n <= 3) slots.add(n);
-  }
-
-  if (slots.size === 0) return null;
-  if (containsNegationCue(trimmed)) return null;
-
-  const [onlySlot] = slots;
-  return slots.size === 1 && onlySlot !== undefined ? onlySlot : null;
+  // The template constrains the shape, not the range: "concept 4", "concept
+  // 0" and "concept 12" are all well-formed selections of a concept that was
+  // never delivered. There are exactly three.
+  const slot = Number(match[1]);
+  return slot >= 1 && slot <= 3 ? slot : null;
 }
 
 /**
@@ -254,13 +292,16 @@ export function parseSelection(text: unknown): number | null {
  * Two choices worth being explicit about:
  *
  * 1. Bot messages are excluded *before* parsing, not filtered out of the
- *    result afterwards. The M1 delivery message itself ends with "reply
- *    with 'concept 1|2|3'" (PRD FR-8), which — read on its own —
- *    parses to slot 1 through the exact same "concept N" rule a real buyer
- *    reply uses; `parseSelection` has no way to know it is quoting itself.
- *    Excluding bot messages by sender first means that text is never even
- *    offered to the parser, regardless of parseSelection's pattern set now
- *    or later.
+ *    result afterwards. `parseSelection` is sender-blind by construction —
+ *    it sees text, never authorship — so any text the bot posts that happens
+ *    to be a recognized selection shape parses exactly like a buyer's reply
+ *    would. That is not hypothetical: the bot writes "concept N" into the M1
+ *    delivery note, the gate-failure notes ("it is too similar to concept
+ *    1"), and any confirmation echoing the pick back. Whether any *current*
+ *    bot message parses is beside the point and must not be relied on — the
+ *    template set is expected to grow. Deciding authorship first means bot
+ *    text is never offered to the parser at all, which is a guarantee that
+ *    holds for whatever the parser recognizes next year.
  *
  * 2. The first parseable buyer reply wins, not the most recent one.
  *    `SelectionStore.select` is itself first-write-wins (its UPDATE is
@@ -273,10 +314,11 @@ export function parseSelection(text: unknown): number | null {
  *
  * A message that itself parses ambiguously is treated exactly like a
  * message that does not mention a concept at all: it is skipped, and the
- * scan continues. The ambiguity check happens once per message, inside
- * `parseSelection`, never across messages — an unclear reply must not block
- * a clearer reply the buyer sends afterward, and a clear reply elsewhere in
- * the thread must never be used to "resolve" a different, ambiguous one.
+ * scan continues. Parsing is per-message and pure — `parseSelection` sees
+ * one string and nothing else, never the thread — so an unclear reply
+ * cannot block a clearer reply the buyer sends afterward, and a clear reply
+ * elsewhere in the thread can never be used to "resolve" a different,
+ * ambiguous one.
  */
 export function findSelection(messages: ThreadMessage[], botId: string): number | null {
   for (const message of messages) {

@@ -25,138 +25,255 @@ describe('parseSelection', () => {
     assert.equal(parseSelection(''), null);
   });
 
-  // The exact tail of the bot's own M1 delivery message (PRD FR-8: "reply
-  // with `concept 1|2|3`"). It parses the same as any buyer reply would —
-  // parseSelection has no notion of who sent a message — which is exactly
-  // why findSelection must exclude bot-authored messages by sender *before*
-  // parsing, rather than filtering the result afterward. See findSelection.
-  it('parses the M1 instruction text like any other message, which is why sender filtering has to happen before parsing', () => {
-    assert.equal(parseSelection("reply with 'concept 1|2|3'"), 1);
+  // parseSelection is sender-blind by construction: it sees text, never
+  // authorship. Under the round-5 template parser this particular string —
+  // the tail of the bot's own M1 delivery note (PRD FR-8: "reply with
+  // `concept 1|2|3`") — happens not to be a recognized selection shape, so
+  // it is null. That is INCIDENTAL and must not be leaned on. The guarantee
+  // is findSelection's sender filter: the bot also writes plain "concept N"
+  // into its delivery and gate-failure notes, and any such text parses
+  // exactly like a buyer's reply would (second assertion). Authorship is
+  // therefore decided before parsing, not after. See findSelection.
+  it('is sender-blind: nothing in the parser distinguishes bot-authored text from a buyer reply', () => {
+    assert.equal(parseSelection("reply with 'concept 1|2|3'"), null);
+    assert.equal(parseSelection('concept 1'), 1);
   });
 
-  // Negation/contrast: a cue word immediately before a matched slot makes
-  // that specific match unreliable. Reviewer-found: "not concept 2" was
-  // returning 2 (the buyer meant anything BUT 2), and "anything but concept
-  // 1" was returning 1 — both confident and wrong.
-  it('refuses to guess a slot that is negated or set up as a contrast', () => {
+  // ==== The class this module kept reopening: a confident WRONG slot ====
+  //
+  // Rounds 1-3 each extracted a slot number by substring match and then
+  // tried to disqualify it with a list of negation cues. Every unlisted way
+  // of saying "not that one" leaked a confident wrong answer, and English
+  // rejection vocabulary has no bottom. Round 5 inverted the parser: the
+  // WHOLE message must be a recognized affirmative shape, so these are null
+  // because they were never affirmatively recognized — not because anyone
+  // enumerated "skip", "veto", "nope", "hard pass" or "no-go". Grep the
+  // module: none of those words appears in it, and none needs to.
+  //
+  // These fifteen are the exact strings the round-4 review found still
+  // leaking through the previous design.
+  it('returns null for every rejection phrasing, without recognizing rejection vocabulary', () => {
+    // Unrecognized lead-in.
+    assert.equal(parseSelection('skip concept 2'), null);
+    assert.equal(parseSelection('pass on concept 1'), null);
+    assert.equal(parseSelection('veto concept 1'), null);
+    assert.equal(parseSelection('declining concept 2, moving on'), null);
+    assert.equal(parseSelection('give me anything other than concept 2'), null);
+    assert.equal(parseSelection('I cannot accept concept 2'), null);
+    // Unrecognized trailing content.
+    assert.equal(parseSelection('concept 2 is a hard pass'), null);
+    assert.equal(parseSelection('concept 2 is out'), null);
+    assert.equal(parseSelection('concept 1 was my second choice'), null);
+    assert.equal(parseSelection('concept 1 is my least favorite'), null);
+    assert.equal(parseSelection('concept 3 is my bottom choice'), null);
+    assert.equal(parseSelection('concept 2 ranks last for me'), null);
+    assert.equal(parseSelection('concept 2 is a no-go for me'), null);
+    assert.equal(parseSelection('concept 2, never in a million years'), null);
+    assert.equal(parseSelection('concept 2? nope, love 3'), null);
+  });
+
+  // The same property, checked against vocabulary that appears in no review,
+  // no report and no test before this one — the point being that novelty is
+  // irrelevant to a parser that only recognizes affirmatives.
+  it('returns null for rejection vocabulary nobody has ever listed', () => {
+    for (const text of [
+      'nix concept 2',
+      'ditch concept 1',
+      'scrap concept 3',
+      'shelve concept 2 please',
+      'I would sooner eat glass than ship concept 2',
+      'concept 2 over my dead body',
+      'concept 2 is dead last',
+      'concept 2 gets a no from me',
+      'thumbs down on #2',
+      'concept 2 is the one to cut',
+      'we are ruling out concept 2',
+      'steer clear of concept 2, thanks',
+    ]) {
+      assert.equal(parseSelection(text), null, text);
+    }
+  });
+
+  // Also null, and for the same one reason. Grouped here because these are
+  // the cases where the previous designs did their worst: they returned the
+  // concept the buyer had just REJECTED (an inverted answer), not merely a
+  // wrong one. Round 2's scoped lookbehind vetoed the wrong mention; round
+  // 3's whole-message cue list caught these two but not the fifteen above.
+  it('never returns the de-prioritized concept from a contrast or comparison', () => {
     assert.equal(parseSelection('not concept 2'), null);
     assert.equal(parseSelection('anything but concept 1'), null);
-  });
-
-  // This is a DELIBERATE REVERSAL of a round-2 instruction, not a weakened
-  // assertion: round 2 explicitly required protecting this exact case
-  // (`assert.equal(parseSelection('concept 2, but can you make it blue?'),
-  // 2)`, via a scoped lookbehind that only counted a cue if it preceded the
-  // match within a window). Round 3's review explicitly withdrew that
-  // requirement ("Drop the protection; keep the safety") once the same
-  // scoped-window mechanism was shown to be exactly what let "concept 1 is
-  // nice, but concept 2" confidently return 1 — the concept the buyer had
-  // just rejected (next test below). A cue anywhere in the message now
-  // nulls the whole thing, with no attempt to work out which mention it
-  // modifies — a buyer who gets no response here simply follows up;
-  // shipping the wrong logo is the worse failure this trades away.
-  it('nulls a message with a cue anywhere, even one that only qualifies a harmless follow-up request (round 2 protected this; round 3 reversed it on explicit review instruction)', () => {
-    assert.equal(parseSelection('concept 2, but can you make it blue?'), null);
-  });
-
-  // Adversarial-review-found: both of these used to confidently return the
-  // concept the buyer explicitly DE-PRIORITIZED, because the cue sat just
-  // outside the scoped lookbehind window around the surviving mention. This
-  // is exactly the failure mode this module's own contract calls worse
-  // than null — the reason the window was deleted in favor of a
-  // whole-message check.
-  it('does not confidently return the de-prioritized concept in a negated or comparative sentence', () => {
     assert.equal(parseSelection('concept 1 is nice, but concept 2'), null);
     assert.equal(parseSelection("I'd rather have concept 2 than concept 1"), null);
-  });
-
-  // Locking in two more accepted costs explicitly, so they can never be
-  // mistaken for defects: a future probe will find a buyer plainly picking
-  // concept 2 here and get null. That is intentional, not a gap — it is
-  // the exact same whole-message cue check that fixes the C1 cases just
-  // above ("concept 1 is nice, but concept 2" confidently returning 1, the
-  // REJECTED concept). Loosening this to let "no problem"/"no rush" through
-  // would require scoping the check back down to work out which mention a
-  // cue modifies — precisely the reasoning that produced the C1 bug in the
-  // first place. If this test is ever "fixed" to return 2, the inverted-
-  // answer hole those C1 cases exposed reopens.
-  it('accepts a null for an idiomatic cue rather than risk an inverted pick', () => {
-    assert.equal(parseSelection('no problem, concept 2'), null);
-    assert.equal(parseSelection('no rush — go with 2'), null);
-  });
-
-  // The scoped lookbehind was also non-monotonic — the tell that it was
-  // wrong in principle, not just missing a case: this longer, more hedged
-  // sentence already nulled correctly under it (via the multi-slot
-  // ambiguity rule, since both mentions still matched), while the shorter,
-  // more natural phrasing above did not. A whole-message cue check makes
-  // both null for the same reason, regardless of how much text separates
-  // the cue from a mention.
-  it('is not sensitive to how much text sits between the cue and a mention', () => {
     assert.equal(
       parseSelection('concept 1 is a nice color choice overall but I think I prefer concept 2'),
       null,
     );
+    assert.equal(parseSelection('concept 2 is terrible, go with 3'), null);
   });
 
-  it('recognizes go with N, make it N, and lets do N as selections', () => {
+  // ==== The accepted cost, locked so it is never "fixed" ====
+  //
+  // Read this before changing anything above. Each of these is a buyer
+  // plainly picking a concept, and each returns null. That is the price of
+  // requiring the whole message to be a recognized shape, and it is
+  // deliberate. The only way to make them parse is to let unrecognized text
+  // sit beside a slot number — which is exactly what rounds 1-3 did, and
+  // exactly what produced "concept 1 is nice, but concept 2" -> 1, an
+  // inverted answer shipped with confidence. A buyer who gets no response
+  // follows up, and FR-9's 72-hour default-selection timeout catches the
+  // ones who don't; a buyer who gets the wrong logo has already been failed.
+  //
+  // If you want one of these to parse, add an affirmative LEAD_IN or POLITE
+  // entry for its exact shape (safe: it can only turn a null into a pick).
+  // Do NOT relax the anchors.
+  it('accepts a null for a verbose but perfectly clear pick rather than relax the anchors', () => {
+    assert.equal(parseSelection("concept 2 looks perfect, let's go with that"), null);
+    assert.equal(parseSelection('concept 2 is the winner'), null);
+    assert.equal(parseSelection('concept 2 it is!'), null);
+    assert.equal(parseSelection('concept 2 for sure'), null);
+    assert.equal(parseSelection('we love concept 2, ship it'), null);
+    assert.equal(parseSelection('concept two'), null); // spelled-out numerals
+    // Round 2 explicitly REQUIRED this one to return 2, via the scoped
+    // lookbehind that then produced the inverted answers above; round 3
+    // reversed it on explicit review instruction ("Drop the protection;
+    // keep the safety"). It stays null here for the stronger reason: the
+    // trailing clause is not a recognized part of any selection shape.
+    assert.equal(parseSelection('concept 2, but can you make it blue?'), null);
+    // Idioms that only ever nulled by accident of the old cue list, and now
+    // null structurally.
+    assert.equal(parseSelection('no problem, concept 2'), null);
+    assert.equal(parseSelection('no rush — go with 2'), null);
+  });
+
+  it('recognizes the affirmative lead-in forms', () => {
     assert.equal(parseSelection('go with 3'), 3);
     assert.equal(parseSelection('make it 1'), 1);
     assert.equal(parseSelection("let's do 2"), 2);
     assert.equal(parseSelection('lets do 2'), 2);
+    assert.equal(parseSelection('go with concept 2'), 2);
+    assert.equal(parseSelection("Let's go with concept 2!"), 2);
+    assert.equal(parseSelection("We'll take concept 3, thank you!"), 3);
+    assert.equal(parseSelection("I'm going with 2"), 2);
+    assert.equal(parseSelection('I choose concept 2'), 2);
+    assert.equal(parseSelection('my pick is concept 2'), 2);
+    assert.equal(parseSelection('please go with 2'), 2);
+    assert.equal(parseSelection('yes, concept 2'), 2);
+    assert.equal(parseSelection('thanks, concept 2'), 2);
+    // Curly apostrophes (every phone keyboard emits them) must not defeat
+    // the "I'll"/"let's" forms.
+    assert.equal(parseSelection('I’ll take concept 1 please'), 1);
+    assert.equal(parseSelection('let’s do 2'), 2);
+    // Whitespace and casing normalization, including the multi-line reply.
+    assert.equal(parseSelection('CONCEPT 2'), 2);
+    assert.equal(parseSelection('concept\t2'), 2);
+    assert.equal(parseSelection('concept 2\n\nthanks!'), 2);
+    assert.equal(parseSelection('concept-2'), 2);
+    assert.equal(parseSelection('concept #2'), 2);
   });
 
-  // Named for exactly what it checks: recognizing "go with N" turns this
-  // one sentence into a two-slot ambiguity instead of a stale first match
-  // on "concept 2" — not a claim that contrast-and-correction sentences in
-  // general resolve this way (they don't all; see the negation-cue tests
-  // above, which cover sentences with no second recognized form to surface).
-  it('the go-with form surfaces a second slot in "concept 2 is terrible, go with 3", turning it into an ambiguity rather than a stale first match', () => {
-    assert.equal(parseSelection('concept 2 is terrible, go with 3'), null);
+  // The mirror image of the lead-in list: a lead-in only counts when the
+  // slot reference follows it IMMEDIATELY. That adjacency is what makes
+  // enumerating affirmative lead-ins safe — no rejection can be built by
+  // slipping a negating word in behind one, because nothing may be skipped
+  // over. Each of these begins with a recognized lead-in and still nulls.
+  it('does not let a recognized lead-in carry unrecognized text into a pick', () => {
+    assert.equal(parseSelection("I don't like concept 2"), null);
+    assert.equal(parseSelection('I like concept 2 the least'), null);
+    assert.equal(parseSelection('we like #2 least'), null);
+    assert.equal(parseSelection('I want concept 2 removed'), null);
+    assert.equal(parseSelection('use concept 2 as an example of what not to do'), null);
+    assert.equal(parseSelection('my least favorite is concept 2'), null);
+    assert.equal(parseSelection('my choice is not concept 2'), null);
+    assert.equal(parseSelection('definitely not concept 2'), null);
+    assert.equal(parseSelection('go with anything but 2'), null);
   });
 
-  // Widening the match surface to catch the above risks catching phrases
-  // where the number is a quantity, not a pick — both guarded here: "2x"
-  // has no word boundary between digit and letter, and the "go with N"
-  // family only matches when N is the last thing in the message.
-  it('does not read a quantity after go-with or make-it as a selection', () => {
+  // Quantities: the same digit answering a different question. The trailing
+  // anchor is what separates them from a pick.
+  it('does not read a quantity as a selection', () => {
     assert.equal(parseSelection('go with 3 colors'), null);
     assert.equal(parseSelection('make it 2x bigger'), null);
+    assert.equal(parseSelection("I'll take 2 weeks"), null);
+    assert.equal(parseSelection('give me 3 more'), null);
+    assert.equal(parseSelection('I want 2 revisions'), null);
+    assert.equal(parseSelection('can we get 2 more concepts'), null);
   });
 
-  // '#N' is gated by an ALLOW-list of recognized selection words (or
-  // starting the message), not a deny-list of reference nouns — a deny-list
-  // only ever covers nouns someone thought of. Named for what it actually
-  // checks: an unrecognized preceding word denies '#N', full stop, whether
-  // or not that word happens to look like a reference-number noun. These
-  // twelve are samples, not an enumerated category the code recognizes —
-  // three round-2 found (invoice/order/room) and nine adversarial review
-  // added (PO/SKU/lot/bay/gate/aisle/badge/case/batch).
-  it('denies "#N" whenever the preceding word is not a recognized selection word', () => {
-    assert.equal(parseSelection('see invoice #2 for details'), null);
-    assert.equal(parseSelection('order #2 shipped'), null);
-    assert.equal(parseSelection('room #2, second floor'), null);
-    assert.equal(parseSelection('PO #2'), null);
-    assert.equal(parseSelection('SKU #2'), null);
-    assert.equal(parseSelection('lot #2'), null);
-    assert.equal(parseSelection('bay #2'), null);
-    assert.equal(parseSelection('gate #2'), null);
-    assert.equal(parseSelection('aisle #2'), null);
-    assert.equal(parseSelection('badge #2'), null);
-    assert.equal(parseSelection('case #2'), null);
-    assert.equal(parseSelection('batch #2'), null);
-    // 'no' sat in both round-2 lists (a negation cue AND a denied noun, for
-    // "item no. 2") — under the allow-list it needs no special case, since
-    // 'no' was never a recognized selection word either way.
-    assert.equal(parseSelection('No, #2 is my favorite'), null);
+  // '#N' used to be gated by an allow-list of the single word before it.
+  // Round 5 subsumes that: '#N' is recognized only when the WHOLE message
+  // is a selection shape, so what follows it is constrained too. The twelve
+  // reference nouns below (three found in round 2, nine by adversarial
+  // review) are samples, not a category the code knows about — and the
+  // seven cases after them are the ones the round-4 review found the
+  // allow-list alone could not stop, because in every one the allow-listed
+  // word really did precede the '#N'.
+  it('denies "#N" unless the whole message is a recognized selection shape', () => {
+    for (const text of [
+      'see invoice #2 for details',
+      'order #2 shipped',
+      'room #2, second floor',
+      'PO #2',
+      'SKU #2',
+      'lot #2',
+      'bay #2',
+      'gate #2',
+      'aisle #2',
+      'badge #2',
+      'case #2',
+      'batch #2',
+      'No, #2 is my favorite',
+    ]) {
+      assert.equal(parseSelection(text), null, text);
+    }
+    // Allow-listed word before '#N', unrecognized text after it.
+    for (const text of [
+      'the meeting is #2 on the agenda',
+      'I want #2 more days to decide',
+      'keep the best #2 elements from the design',
+      "let's go with #2 friends to the meeting",
+      "I'll take #2 minutes to reply",
+      'Our office is #2 on Main Street',
+      'can we go #2 in the lineup',
+    ]) {
+      assert.equal(parseSelection(text), null, text);
+    }
   });
 
-  // The allow-list's positive side: '#N' is a pick when it opens the
-  // message, or a recognized selection word (not just 'like', from the
-  // locked test above) immediately precedes it.
-  it('accepts "#N" at the start of a message or after a recognized selection word', () => {
+  // The positive side: '#N' is a pick when the whole message is a shape.
+  it('accepts "#N" when the whole message is a selection shape', () => {
     assert.equal(parseSelection('#2 please'), 2);
     assert.equal(parseSelection('I prefer #1'), 1);
+    assert.equal(parseSelection('my choice is #3'), 3);
+  });
+
+  // Ambiguity ("two concepts named, so no choice was made") is no longer a
+  // counting step — it falls out of the anchors, because whatever sits
+  // between two slot mentions is never a lead-in or a politeness word. The
+  // BEHAVIOUR is what matters and it is unchanged; this test exists so a
+  // future refactor that reintroduces substring matching fails loudly.
+  it('treats a message naming two slots as no selection at all', () => {
+    assert.equal(parseSelection('I like concept 1 and concept 2'), null);
+    assert.equal(parseSelection('concept 1 concept 2'), null);
+    assert.equal(parseSelection('go with 1 or 2'), null);
+    assert.equal(parseSelection('#1 #2'), null);
+    assert.equal(parseSelection("I'll take concept 1 and concept 3 please"), null);
+    assert.equal(parseSelection('1 or 2'), null);
+  });
+
+  // Decoration carries meaning this parser cannot read, so it is not
+  // swallowed. A leading '-' is a minus sign or a negating bullet ("-2" is
+  // not slot 2); an emoticon or emoji is sentiment. All fail closed, which
+  // costs "concept 2 :)" and "- concept 2" their pick — the safe direction.
+  it('does not swallow decoration that could carry meaning', () => {
+    assert.equal(parseSelection('-2'), null);
+    assert.equal(parseSelection('concept 2 :('), null);
+    assert.equal(parseSelection('concept 2 \u{1F44E}'), null);
+    assert.equal(parseSelection('> concept 2'), null);
+    assert.equal(parseSelection('concept 1|2|3'), null);
+    // Plain sentence punctuation and quoting still decorate a clean pick.
+    assert.equal(parseSelection('concept 2!'), 2);
+    assert.equal(parseSelection('concept 2, thanks!'), 2);
+    assert.equal(parseSelection('"concept 2"'), 2);
   });
 
   // A digit immediately followed by '.' and another digit is a decimal, not
@@ -197,6 +314,19 @@ describe('findSelection', () => {
   it("ignores the bot's own instruction message", () => {
     const messages = [bot("reply with 'concept 1|2|3'"), buyer('concept 2')];
     assert.equal(findSelection(messages, 'bot-logosmith'), 2);
+  });
+
+  // The test above no longer exercises the sender filter on its own: under
+  // the round-5 template parser the M1 instruction tail is not a recognized
+  // shape, so it would be skipped even without the filter. This one does
+  // exercise it, and is the case that actually matters — the bot writes
+  // plain "concept N" into its delivery and gate-failure notes, and a
+  // first-wins scan without the sender filter would hand back the bot's own
+  // number instead of the buyer's. Delete the filter and this test fails
+  // with 1 instead of 3.
+  it('excludes a bot message that would otherwise win the first-wins race', () => {
+    const messages = [bot('concept 1'), buyer('concept 3')];
+    assert.equal(findSelection(messages, 'bot-logosmith'), 3);
   });
 
   it('takes the FIRST buyer selection, not the last', () => {
