@@ -90,6 +90,27 @@ trust a given failure.
   and the Google Fonts pairing in `brand.json` are advisory outputs, not
   warranted ones.
 
+- **There is no re-run and no revision round, and the warranty no longer
+  claims one.** `botProfile.warrantyTerms` and both delivery notes used to
+  promise that a failing artifact "is re-run free of charge, plus one
+  revision round on the selected mark". Nothing implements either: there is
+  no thread trigger and no code path that mints a per-revision claim key
+  (`grep -rn "revision" src/ --include '*.ts'` outside the tests returns only
+  prose). Task 23 left that path deliberately unbuilt, because any scheme has
+  to preserve the original `concepts` and `gate_audit` rows and the obvious
+  one collides with them on the primary key — losing the evidence of what was
+  delivered at the moment of a dispute.
+
+  The terms now describe what the bot does do: every stated check runs
+  **before** delivery and a failing artifact is not shipped at all; the
+  evidence page, validation report and license manifest stay available with
+  every measurement behind those claims; and a dispute gets that complete
+  record filed (`assembleDisputeEvidence`). `freeGigs.test.ts`'s FR-18 suite
+  characterises what a re-run *would* inherit if one is ever built — a fresh
+  FR-5 cap and no free-gig quota cost — and constructs the claim key itself.
+  Do not read it as evidence that anything triggers one. **Building the
+  re-run/revision path is an open product decision.**
+
 ## Required secrets
 
 Set every one of these with `wrangler secret put <NAME>` before the Worker

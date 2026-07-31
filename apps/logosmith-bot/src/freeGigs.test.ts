@@ -1456,10 +1456,23 @@ describe('processJobMessage — the free stage is routed, not refused', () => {
 });
 
 // ---------------------------------------------------------------------------
-// FR-18 — the warranty revision round
+// FR-18 — the properties a warranty re-run WOULD inherit. NOT SHIPPED.
+//
+// READ THIS BEFORE TRUSTING THE NAME BELOW. There is no warranty re-run in this
+// bot: no thread trigger, and no code path that mints a `#revision-N` claim key
+// — the test constructs that key itself. `grep -rn "revision" src/ --include
+// '*.ts'` outside the tests returns only prose. Task 23's ruling deliberately
+// left the whole path unbuilt (any scheme must preserve the original `concepts`
+// and `gate_audit` rows, which the obvious one collides with), and the
+// buyer-facing copy no longer promises it.
+//
+// What these tests DO establish is real and worth keeping: IF such a path is
+// ever built on a per-revision claim key, it inherits a fresh FR-5 cap and
+// consumes no free-gig allowance. They characterise a design constraint for
+// whoever builds it. They are not evidence that anything triggers it.
 // ---------------------------------------------------------------------------
 
-describe('the warranty revision round (FR-18)', () => {
+describe('a warranty re-run would inherit a fresh cap and no quota cost (FR-18, path unbuilt)', () => {
   const AXES: StyleAxis[] = [
     { id: 'wordmark', label: 'wordmark', prompt: 'p1', vendor: 'ideogram' },
     { id: 'lockup', label: 'lockup', prompt: 'p2', vendor: 'ideogram' },

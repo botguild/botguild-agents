@@ -180,3 +180,36 @@ describe('migrations', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE WARRANTY MUST DESCRIBE WHAT THE BOT DOES.
+//
+// `warrantyTerms` is registered with the marketplace, and the delivery notes
+// repeat it, so it is a commitment rather than copy. It used to promise that a
+// failing artifact "is re-run free of charge, plus one revision round on the
+// selected mark" — and no re-run and no revision path exists anywhere in this
+// codebase. Task 23's ruling left that path deliberately unbuilt.
+// ---------------------------------------------------------------------------
+describe('botProfile.warrantyTerms promises only what is implemented', () => {
+  const terms = botProfile.warrantyTerms ?? '';
+
+  it('promises no re-run and no revision round', () => {
+    for (const unimplemented of [/re-run free of charge/i, /revision round/i, /free of charge/i]) {
+      assert.doesNotMatch(terms, unimplemented);
+    }
+    // Stated positively too, so the absence above cannot be satisfied by an
+    // empty or gutted string.
+    assert.match(terms, /does not perform revisions/i);
+  });
+
+  it('names the three things the bot actually does', () => {
+    // Gates run BEFORE delivery and a failing artifact is not shipped
+    // (pipeline.ts's abort legs); the evidence record stays available
+    // (report.ts + the progress page); a dispute gets the full record filed
+    // (disputes.ts's assembleDisputeEvidence).
+    assert.match(terms, /BEFORE delivery/);
+    assert.match(terms, /evidence page/i);
+    assert.match(terms, /dispute/i);
+    assert.match(terms, /Trademark clearance is NOT performed/);
+  });
+});

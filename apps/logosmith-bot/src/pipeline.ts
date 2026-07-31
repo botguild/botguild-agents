@@ -511,6 +511,32 @@ interface NoteInput {
 }
 
 /**
+ * WHAT A BUYER CAN ACTUALLY DO once LogoSmith has stopped, in the bot's own
+ * words — used by every terminal abort note on the paid path.
+ *
+ * EVERY ONE OF THOSE NOTES USED TO SAY "reply in this thread and we will
+ * re-run / rebuild it", AND NO CODE PATH COULD ACT ON ANY OF THEM.
+ * `markDelivered` is what removes a job from the parked sweep's reach and from
+ * re-claim, and `resolveSelectionForContract` only ever acts on a contract
+ * still in `concepts_delivered` — so a reply to any of those messages went
+ * nowhere at all. That is the exact defect Task 22 fixed as a Critical for the
+ * refused-pick note: instructing an action and guaranteeing it cannot work.
+ *
+ * These three CAN be acted on, and each is implemented: re-posting a gig is
+ * picked up by `maybePropose` on the 15-minute poll; cancelling is the payer's
+ * own platform action (refunds are payer-only, so the bot never claims it can
+ * issue one); and a dispute reaches `assembleDisputeEvidence`, which files the
+ * whole record. Nothing here promises a re-run, because nothing implements one.
+ */
+const WHAT_YOU_CAN_DO_NEXT =
+  'LogoSmith cannot re-run or revise this contract from a reply — nothing further will happen ' +
+  'on it from LogoSmith’s side. What does work: post the gig again (adjusted if you like) and ' +
+  'LogoSmith will bid on it automatically; or cancel this contract from your side to release ' +
+  'the escrow, which LogoSmith cannot do itself; or raise a dispute, and LogoSmith will file ' +
+  'its complete evidence record — every gate result, transcription and measurement — with the ' +
+  'platform.';
+
+/**
  * The M1 delivery note (FR-8). The platform posts the first ~500 characters
  * verbatim into the contract thread as the delivery summary, so the selection
  * instruction sits in the opening lines where truncation cannot eat it.
@@ -540,8 +566,11 @@ function buildM1Note(input: NoteInput): string {
     lines.push(`SHORTFALL — ${passing.length} of ${CONCEPT_COUNT} concepts delivered.`);
     for (const slot of missing) lines.push(shortfallLine(slot, checkpoint.spendUsd));
     lines.push(
-      'You may accept this set — the 14-day warranty re-runs the missing concept free — or ' +
-        'dispute the delivery. You are not being asked to pay extra either way.',
+      'You may accept this set and pick a winner from it, or dispute the delivery — LogoSmith ' +
+        'will file its complete evidence record if you do. LogoSmith does not re-run the ' +
+        'missing concept: nothing in this bot performs a second concept round, and promising ' +
+        'one it cannot deliver would be worse than the shortfall. You are not being asked to ' +
+        'pay extra either way.',
     );
     lines.push('');
   }
@@ -585,9 +614,8 @@ function buildAbortNote(input: {
   lines.push('');
   lines.push(`Full per-concept evidence: ${progressUrl}`);
   lines.push(
-    'LogoSmith cannot cancel or refund a contract itself — please cancel this contract from ' +
-      'your side to release the escrow. If you would rather retry with an adjusted brief ' +
-      '(a shorter brand name reads back far more reliably), reply here and we will re-run it.',
+    `${WHAT_YOU_CAN_DO_NEXT} If you do re-post, a shorter brand name reads back far more ` +
+      'reliably than a long one.',
   );
   return lines.join('\n');
 }
@@ -679,10 +707,13 @@ function buildM2Note(input: M2NoteInput): string {
     `Per-image license manifest: ${input.licensesUrl}`,
     `Evidence page: ${input.progressUrl}`,
     '',
-    'Warranty (14 days): a logo.svg that does not pass the true-vector parse, any artifact at the ' +
-      'wrong pixel dimensions, or a broken or incomplete ZIP is re-run free of charge, plus one ' +
-      'revision round on this mark. The font pairing is advisory, not warranted. Trademark ' +
-      'clearance is NOT performed and NOT warranted.',
+    'Warranty: every check above ran BEFORE this delivery, and a pack failing any of them is ' +
+      'not shipped at all — that is the guarantee, and it is why this pack exists rather than a ' +
+      'promise to fix one later. For 14 days the evidence page, validation report and license ' +
+      'manifest above stay available with every measurement behind those claims, and LogoSmith ' +
+      'files that complete record if you raise a dispute. LogoSmith does not perform revisions ' +
+      'or redesigns. The font pairing is advisory, not warranted. Trademark clearance is NOT ' +
+      'performed and NOT warranted.',
   ].join('\n');
 }
 
@@ -707,8 +738,7 @@ function buildWinnerGateNote(brief: LogoBrief, winner: ConceptRow, progressUrl: 
       'no work product is being claimed.',
     '',
     `Full per-concept evidence: ${progressUrl}`,
-    'Reply in this thread naming one of the concepts that did pass and the pack will be built ' +
-      'from that one instead.',
+    WHAT_YOU_CAN_DO_NEXT,
   ].join('\n');
 }
 
@@ -722,16 +752,14 @@ function buildPackFailureNote(
     `LogoSmith could not deliver Milestone 2 for "${brief.brandName}".`,
     '',
     'The assembled brand pack did not clear its own delivery gates, so nothing has been delivered ' +
-      'and no work product is being claimed. Shipping a pack that fails these checks is exactly ' +
-      'what the warranty exists to prevent, so it is not being shipped at all.',
+      'and no work product is being claimed. Refusing to ship a pack that fails these checks is ' +
+      'precisely what those checks are for.',
     '',
     'Gate results:',
     ...gateLines(gates),
     '',
     `Evidence page: ${progressUrl}`,
-    'Reply in this thread and the pack will be rebuilt from your chosen concept. LogoSmith cannot ' +
-      'cancel or refund a contract itself — if you would rather stop here, please cancel from your ' +
-      'side to release the escrow.',
+    WHAT_YOU_CAN_DO_NEXT,
   ].join('\n');
 }
 
@@ -792,8 +820,8 @@ export async function runConceptStage(
         'exactly as it should appear on the logo, and what the brand does. Plain prose is fine ' +
         '(for example: "a logo for Harbor & Vine, a seaside inn"); a fenced JSON block with ' +
         '`brandName` and `industry` also works and is read first. The brand name must be Latin ' +
-        'script — other scripts are outside this version. Post that in this thread and the job ' +
-        'will re-run; nothing has been generated and no work is being claimed.',
+        'script — other scripts are outside this version. Nothing has been generated and no ' +
+        `work is being claimed. ${WHAT_YOU_CAN_DO_NEXT}`,
     );
     await jobs.markDelivered(jobKey, 'rejected');
     return { outcome: 'aborted' };
@@ -1308,9 +1336,8 @@ export async function runVectorStage(
     await client.sendMessage(
       contractId,
       'LogoSmith cannot build the brand pack: the logo brief for this contract no longer ' +
-        `validates — ${briefResult.reason}. Post a corrected brief in this thread and the pack ` +
-        'will be rebuilt from the concept you chose; nothing further has been generated and no ' +
-        'additional work is being claimed.',
+        `validates — ${briefResult.reason}. Nothing further has been generated and no ` +
+        `additional work is being claimed. ${WHAT_YOU_CAN_DO_NEXT}`,
     );
     await jobs.markDelivered(jobKey, 'aborted');
     return { outcome: 'aborted' };
@@ -1386,8 +1413,7 @@ export async function runVectorStage(
       contractId,
       `LogoSmith cannot build the brand pack: the stored artwork for concept ${winnerSlot} is no ` +
         'longer retrievable, so there is nothing to vectorize. Nothing has been delivered and no ' +
-        'additional work is being claimed. Reply in this thread and the concept round will be ' +
-        're-run free of charge under the warranty.',
+        `additional work is being claimed. ${WHAT_YOU_CAN_DO_NEXT}`,
     );
     await jobs.markDelivered(jobKey, 'aborted');
     return { outcome: 'aborted' };
@@ -1442,8 +1468,7 @@ export async function runVectorStage(
       'LogoSmith cannot deliver Milestone 2: converting your chosen concept to a true vector ' +
         `produced a file that does not pass the true-vector check — ${vector.error}. Rather than ` +
         'ship an "SVG" that wraps a raster, nothing has been delivered and no work product is ' +
-        'being claimed. Reply in this thread to pick a different concept, or cancel from your ' +
-        'side to release the escrow — LogoSmith cannot cancel or refund a contract itself.',
+        `being claimed. ${WHAT_YOU_CAN_DO_NEXT}`,
     );
     await jobs.markDelivered(jobKey, 'aborted');
     log.error({ error: vector.error }, 'vectorization failed permanently; leg aborted');

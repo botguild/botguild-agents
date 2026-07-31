@@ -28,12 +28,27 @@ export const botProfile: BotConfig = {
   toolchain: ['ideogram-3.0', 'recraft-v3', 'llama-4-scout', 'claude-haiku-4-5', 'resvg-wasm'],
   // §9 wording: readback threshold, vector parse, byte-verified dimensions,
   // ZIP integrity. NEVER trademark, NEVER taste.
+  //
+  // THESE TERMS DESCRIBE WHAT THE BOT DOES, AND NOTHING ELSE. They used to
+  // promise that a failing artifact "is re-run free of charge, plus one
+  // revision round on the selected mark" — and no re-run and no revision path
+  // exists anywhere in this codebase (`grep -rn "revision"` returned only the
+  // promise itself). A warranty registered with the marketplace is a
+  // commitment, so it now states the three things that ARE implemented:
+  // pre-delivery gating, a permanent evidence record, and a dispute response
+  // built from that record. See the report accompanying this branch — building
+  // a real re-run/revision path is a product decision, not a copy fix, and
+  // reverting to the old wording without building it would be a false promise.
   warrantyTerms:
-    'For 14 days after delivery: any delivered concept whose lettering fails the stated OCR ' +
-    'readback threshold as delivered, a logo.svg that does not pass the true-vector parse, any ' +
-    'artifact at the wrong pixel dimensions, or a broken or incomplete ZIP is re-run free of ' +
-    'charge, plus one revision round on the selected mark. Trademark clearance is NOT performed ' +
-    'and NOT warranted.',
+    'Every check named here runs BEFORE delivery, and an artifact that fails one is not ' +
+    'shipped at all: the lettering of each delivered concept must read back against your brand ' +
+    'name at the stated OCR threshold, logo.svg must pass a true-vector parse, every image must ' +
+    'be at its exact contracted pixel dimensions, and the ZIP must be complete and readable. ' +
+    'For 14 days after delivery the evidence page, the JSON validation report and the per-image ' +
+    'license manifest remain available, recording every measurement behind those claims; if you ' +
+    'raise a dispute, LogoSmith files that complete record with the platform. LogoSmith does ' +
+    'not perform revisions or redesigns, and cannot cancel or refund a contract itself. ' +
+    'Trademark clearance is NOT performed and NOT warranted.',
 };
 
 // --- Gig scoring -------------------------------------------------------------

@@ -791,9 +791,66 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
     assert.equal(h.generated.length, 3 * (MAX_REGENS_PER_SLOT + 1));
     assert.equal(h.deliveries.length, 0, 'nothing is delivered');
     assert.equal(await h.selection.get(CONTRACT_ID), null, 'no selection is opened');
-    assert.match(h.messages[0]!, /cannot cancel or refund a contract itself/);
-    assert.match(h.messages[0]!, /please cancel this contract from your side/);
+    assert.match(h.messages[0]!, /cancel this contract from your side/);
+    assert.match(h.messages[0]!, /which LogoSmith cannot do itself/);
     assert.equal((await h.jobs.get(h.jobKey))?.outcome, 'aborted');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EVERY TERMINAL NOTE ON THE PAID PATH USED TO INSTRUCT AN ACTION THE CODE
+// COULD NOT HONOUR — "reply in this thread and we will re-run / rebuild it".
+// `markDelivered` is what removes a job from the parked sweep's reach and from
+// re-claim, and `resolveSelectionForContract` only acts on a contract still in
+// `concepts_delivered`, so a reply went nowhere. Four separate notes said it.
+// This is the same defect Task 22 fixed as a Critical for the refused-pick
+// note, and the rule is the same: either make the instruction work, or stop
+// making it.
+// ---------------------------------------------------------------------------
+describe('terminal notes only instruct actions the bot can honour', () => {
+  /** Every buyer-facing message from a paid-path run that ends terminally. */
+  async function terminalNotes(): Promise<string[]> {
+    const notes: string[] = [];
+
+    // 1. brief invalid (concept stage)
+    const invalidBrief = await setup({
+      description: 'no brief here at all',
+      extractedBrief: { ok: false, reason: 'this gig does not clearly name a brand' },
+    });
+    await runConceptStage(invalidBrief.config, message(invalidBrief.jobKey));
+    notes.push(...invalidBrief.messages);
+
+    // 2. §9 non-convergence
+    const noConvergence = await setup({ ocr: () => verdict(false) });
+    await runConceptStage(noConvergence.config, message(noConvergence.jobKey));
+    notes.push(...noConvergence.messages);
+
+    assert.ok(notes.length >= 2, 'the harness must actually have produced terminal notes');
+    return notes;
+  }
+
+  it('never promises a re-run, a rebuild or a revision it cannot perform', async () => {
+    for (const note of await terminalNotes()) {
+      for (const promise of [
+        /will re-run/i,
+        /will be rebuilt/i,
+        /re-run free of charge/i,
+        /revision round/i,
+        /reply (in this thread|here) and/i,
+      ]) {
+        assert.doesNotMatch(note, promise, `a terminal note promised: ${promise}`);
+      }
+    }
+  });
+
+  it('offers the three things that ARE implemented', async () => {
+    for (const note of await terminalNotes()) {
+      // re-post -> maybePropose picks it up; cancel -> the payer's own action;
+      // dispute -> assembleDisputeEvidence files the record.
+      assert.match(note, /post the gig again/i);
+      assert.match(note, /cancel this contract from your side/i);
+      assert.match(note, /raise a dispute/i);
+    }
   });
 });
 
