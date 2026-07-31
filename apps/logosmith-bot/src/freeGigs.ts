@@ -28,9 +28,9 @@
 
 import { MIN_SOURCE_PX, checkLogoUrl } from './brief.js';
 import { FREE_GIGS_PER_PAYER, FREE_GIG_WINDOW_DAYS, SEED_PRICE_USD } from './config.js';
-import { readPngDimensions, sanitizeSvg, type Dimensions } from './gates/index.js';
+import { checkTrueVector, readPngDimensions, sanitizeSvg, type Dimensions } from './gates/index.js';
 import type { QuotaStore } from './jobs.js';
-import type { FaviconSource } from './pack/faviconPack.js';
+import { decodeRasterSource, type FaviconSource } from './pack/faviconPack.js';
 import type { FetchLike } from './types.js';
 
 // --- Quota (FR-14) -----------------------------------------------------------
@@ -121,9 +121,19 @@ const XML_PREFIXES = ['<?xml', '<!doctype', '<!--', '<svg'];
  * are decompression bombs rather than logos — a flat 8000x8000 PNG is 243 KiB
  * on the wire and ~490 MiB decoded.
  *
- * THE HEADER IS AUTHORITATIVE FOR THIS CHECK, which is why it can run before
- * any decode: a PNG's IHDR and a JPEG's SOF frame header *are* the dimensions
- * the decoder allocates from. There is no way to declare 100x100 and decode to
+ * THE HEADER IS AUTHORITATIVE FOR THIS CHECK, which is what lets it run before
+ * any decode — but only because two things make it so, and an earlier version
+ * of this comment asserted it without either:
+ *
+ *   1. `readJpegDimensions` refuses a file carrying more than one frame header.
+ *      Returning the FIRST SOF is not authority: a real 3000x3000 frame with a
+ *      spliced 600x600 SOF0 in front of it would report 600x600 and then decode
+ *      to 25x the budget.
+ *   2. The decode below is held to the header's claim. If they disagree the
+ *      source is refused outright, so neither number has to be trusted alone.
+ *
+ * With those, a PNG's IHDR and a JPEG's single SOF *are* what the decoder
+ * allocates from, and there is no way to declare 100x100 and decode to
  * 8000x8000.
  */
 export const MAX_SOURCE_PIXELS = 6_000_000;
@@ -144,10 +154,23 @@ const STANDALONE_MARKERS = new Set([0x01, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0x
 /**
  * Read a JPEG's dimensions by walking its segment table to the frame header.
  *
- * Deliberately NOT "decode it and ask how big it is". That is what this
- * function replaced, and it made the JPEG path the WORSE of the two: a JPEG
- * bomb was fully decoded — and had already filled the isolate — before any
- * dimension was known to check. Parsing the header allocates nothing.
+ * Deliberately NOT "decode it and ask how big it is": that made the JPEG path
+ * the worse of the two, because a bomb was fully decoded — and had already
+ * filled the isolate — before any dimension was known to check it against.
+ * Parsing the header allocates nothing, which is what makes the budget check
+ * downstream able to run BEFORE a decoder ever sees these bytes.
+ *
+ * EXACTLY ONE FRAME HEADER, or nothing. Returning the FIRST SOF found is not
+ * enough to call this authoritative: a file carrying a real 3000x3000 frame
+ * plus a spliced 600x600 SOF0 would report whichever came first, and a header
+ * that can disagree with the payload cannot bound a decode. Every segment
+ * before the scan is therefore walked, and two frame headers is a refusal.
+ *
+ * The walk stops at SOS (0xDA). Past that lies entropy-coded data, where a
+ * `FF` byte is escaped rather than starting a marker — so continuing would be
+ * reading noise as structure. A conforming decoder stops looking for frame
+ * headers there too, which is precisely why stopping there makes "exactly one
+ * SOF" a statement about what the decoder will see.
  *
  * Returns null for anything it cannot walk cleanly, which the caller treats as
  * a refusal: an unreadable header is not permission to decode and find out.
@@ -155,6 +178,7 @@ const STANDALONE_MARKERS = new Set([0x01, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0x
 export function readJpegDimensions(jpeg: Uint8Array): Dimensions | null {
   if (jpeg.length < 4 || jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return null;
   const view = new DataView(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength);
+  let frame: Dimensions | null = null;
   let offset = 2;
   while (offset + 1 < jpeg.length) {
     if (jpeg[offset] !== 0xff) return null; // desynchronized: refuse
@@ -162,7 +186,8 @@ export function readJpegDimensions(jpeg: Uint8Array): Dimensions | null {
     let marker = jpeg[offset + 1]!;
     offset += 2;
     while (marker === 0xff && offset < jpeg.length) marker = jpeg[offset++]!;
-    if (marker === 0xd9) return null; // EOI before any frame header
+    if (marker === 0xd9) break; // EOI
+    if (marker === 0xda) break; // SOS: entropy data follows, stop scanning
     if (STANDALONE_MARKERS.has(marker)) continue;
     if (offset + 1 >= jpeg.length) return null;
     const length = view.getUint16(offset, false); // includes its own 2 bytes
@@ -170,13 +195,15 @@ export function readJpegDimensions(jpeg: Uint8Array): Dimensions | null {
     if (SOF_MARKERS.has(marker)) {
       // SOFn payload: 1 byte sample precision, 2 bytes height, 2 bytes width.
       if (length < 7) return null;
+      if (frame !== null) return null; // a second frame header: refuse
       const height = view.getUint16(offset + 3, false);
       const width = view.getUint16(offset + 5, false);
-      return width > 0 && height > 0 ? { width, height } : null;
+      if (width === 0 || height === 0) return null;
+      frame = { width, height };
     }
     offset += length;
   }
-  return null;
+  return frame;
 }
 
 type SniffedKind = 'png' | 'jpeg' | 'svg' | null;
@@ -312,6 +339,37 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
     if (!svg.includes('<svg')) {
       return { ok: false, reason: 'that URL returned XML that contains no <svg> element' };
     }
+
+    // WILL IT ACTUALLY DRAW? Two constructs render as NOTHING in this Worker,
+    // and both produce a pack whose every gate passes over six blank icons —
+    // the worst failure mode available, because it is indistinguishable from
+    // success right up to the buyer opening the ZIP.
+    //
+    // The census comes from the true-vector gate rather than a fresh regex, but
+    // the gate itself is deliberately NOT applied: `checkTrueVector` also
+    // demands a viewBox and outlined paths, which are contract terms for the
+    // PAID deliverable, not admission criteria for a buyer's existing logo.
+    const census = checkTrueVector(svg).census;
+    if (census.image > 0) {
+      return {
+        ok: false,
+        reason:
+          'that SVG is a wrapper around a bitmap rather than a real vector — it contains ' +
+          `${census.image} embedded <image> element(s), and LogoSmith's renderer does not draw ` +
+          'those, so every icon would come out blank. Post the bitmap itself (PNG or JPEG, ' +
+          `longest edge at least ${MIN_SOURCE_PX}px) and it will be used directly`,
+      };
+    }
+    if (census.text > 0) {
+      return {
+        ok: false,
+        reason:
+          `that SVG draws its lettering with ${census.text} live <text> element(s) rather than ` +
+          'outlined paths. LogoSmith renders without font files, so the text would vanish and ' +
+          'the icons would come out blank or partial. Re-export it with the text converted to ' +
+          'outlines (most editors call this "convert to path" or "outline stroke")',
+      };
+    }
     return { ok: true, source: { kind: 'svg', svg } };
   }
 
@@ -337,8 +395,40 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
         `your logo is ${size.width}x${size.height}px (${(pixels / 1_000_000).toFixed(1)} ` +
         `megapixels), and LogoSmith accepts up to ${MAX_SOURCE_PIXELS / 1_000_000} megapixels — ` +
         'an image that large costs more memory to open than a favicon job is allowed. Re-export ' +
-        'it smaller (2048x2048 is far more than enough for every icon in the pack), or post an ' +
-        'SVG, which has no such limit',
+        'it smaller: 2048x2048 is far more than enough for every icon in the pack. (A real ' +
+        'vector SVG works too — but wrapping this same bitmap inside an SVG will not, and ' +
+        'LogoSmith refuses those rather than shipping you blank icons.)',
+    };
+  }
+
+  // PROVE IT DECODES, now that the decode is bounded by the check above.
+  //
+  // A walkable header says nothing about the entropy-coded payload behind it.
+  // An ordinary truncated JPEG — a cut upload, a CDN that ended the response
+  // early — walks perfectly and then traps the decoder. Finding that out HERE
+  // costs a refusal with a reason; finding it out inside `buildFaviconPack`
+  // costs a wasm panic escaping into the queue consumer, which logs it as
+  // transient, retries, and dead-letters it having already spent the buyer's
+  // allowance and told them nothing at all.
+  const decoded = await decodeRasterSource(bytes);
+  if (decoded === null) {
+    return {
+      ok: false,
+      reason:
+        `that URL returned a ${kind.toUpperCase()} whose image data could not be decoded — the ` +
+        'file header is readable but the image itself is incomplete or corrupt, which usually ' +
+        'means the upload or the download was cut short. Re-upload it and post the link again',
+    };
+  }
+  // The header claimed a size; the decoder found one. They must agree, or the
+  // number every guard above reasoned about was not the number that matters.
+  if (decoded.width !== size.width || decoded.height !== size.height) {
+    return {
+      ok: false,
+      reason:
+        `that URL returned a ${kind.toUpperCase()} whose header claims ${size.width}x` +
+        `${size.height}px but whose image data is ${decoded.width}x${decoded.height}px. ` +
+        'LogoSmith will not work from a file that disagrees with itself',
     };
   }
 
@@ -354,8 +444,8 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
       reason:
         `your logo is ${size.width}x${size.height}px, and its longest edge must be at least ` +
         `${MIN_SOURCE_PX}px — the pack includes a ${MIN_SOURCE_PX}px icon, and LogoSmith will ` +
-        'not upscale artwork and call the result a deliverable. Re-post with a larger export ' +
-        '(or an SVG, which has no minimum)',
+        'not upscale artwork and call the result a deliverable. Re-post with a larger export, ' +
+        'or a real vector SVG, which has no minimum',
     };
   }
 

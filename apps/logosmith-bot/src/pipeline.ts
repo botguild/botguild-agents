@@ -1536,12 +1536,27 @@ async function consumeFreeGigQuota(
 /**
  * The refusal a job gets when `quota.consume` declines it — i.e. when the payer
  * reached the cap between the advisory check and the point of no return, which
- * is exactly the concurrent-farming case. Rebuilt from a fresh count so the
- * number quoted is the number that refused it.
+ * is exactly the concurrent-farming case.
+ *
+ * IT CANNOT REUSE `checkFreeGigQuota`'s MESSAGE. That message ends "Nothing has
+ * been generated and nothing has been charged", which is true where it is used
+ * — at the entry check, before any work — and FALSE here on the taster path,
+ * which reaches this line immediately after paying for a klein generation.
+ * Shipping the entry copy here would restore, inside the fix for that exact
+ * class of bug, the same false sentence Task 22's give-up note was corrected
+ * for. So the wording is built locally, and it says what actually happened.
+ *
+ * The count is re-read so the number quoted is the number that refused it.
  */
 async function refuseAtPointOfNoReturn(
   config: PipelineConfig,
-  args: { jobKey: string; contractId: string; payerId: string },
+  args: {
+    jobKey: string;
+    contractId: string;
+    payerId: string;
+    /** What this job had already spent by the time it lost the race. */
+    generatedImages: number;
+  },
 ): Promise<StageOutcome> {
   const decision = await checkFreeGigQuota(config.quota, args.payerId);
   await config.jobs.recordGateAudit({
@@ -1549,15 +1564,31 @@ async function refuseAtPointOfNoReturn(
     contractId: args.contractId,
     gate: 'free-gig-quota',
     result: 'refused-at-consume',
-    detail: { payerId: args.payerId, used: decision.used },
+    detail: {
+      payerId: args.payerId,
+      used: decision.used,
+      generatedImages: args.generatedImages,
+    },
   });
+  const spent =
+    args.generatedImages > 0
+      ? `LogoSmith had already generated ${args.generatedImages === 1 ? 'a sample image' : `${args.generatedImages} sample images`} ` +
+        'for this job by then, at LogoSmith’s own cost — you have not been charged for ' +
+        'anything, and nothing is being delivered.'
+      : 'Nothing has been generated and nothing has been charged.';
   await config.client.sendMessage(
     args.contractId,
-    decision.allowed
-      ? 'LogoSmith cannot take this free job: another of your free jobs claimed the last ' +
-          'available slot while this one was starting. Nothing has been delivered. The ' +
-          'allowance frees up as your earlier free jobs age out of the rolling window.'
-      : decision.message,
+    [
+      'LogoSmith cannot complete this free job: your free-job allowance ran out while this one ' +
+        'was already running — another of your free jobs claimed the last available slot.',
+      '',
+      spent,
+      '',
+      `Free jobs are capped at ${FREE_GIGS_PER_PAYER} per payer per rolling ` +
+        `${FREE_GIG_WINDOW_DAYS} days (this account now has ${decision.used} on record). The ` +
+        `allowance frees up as those jobs age out, or the $${SEED_PRICE_USD} brand-pack gig runs ` +
+        'now with no such cap. Post either and LogoSmith will pick it up automatically.',
+    ].join('\n'),
   );
   await config.jobs.markDelivered(args.jobKey, 'rejected');
   return { outcome: 'aborted' };
@@ -1758,7 +1789,13 @@ async function runFaviconGig(
     kind: 'favicon',
   });
   if (!granted) {
-    return refuseAtPointOfNoReturn(config, { jobKey, contractId, payerId: contract.payerId });
+    // The favicon gig calls no image vendor at all, so nothing was generated.
+    return refuseAtPointOfNoReturn(config, {
+      jobKey,
+      contractId,
+      payerId: contract.payerId,
+      generatedImages: 0,
+    });
   }
   const checkpoint: JobCheckpoint = job.checkpoint ?? { slots: [], spendUsd: 0 };
   await jobs.saveCheckpoint(jobKey, checkpoint);
@@ -1949,7 +1986,13 @@ async function runTasterGig(
       kind: 'taster',
     });
     if (!granted) {
-      return refuseAtPointOfNoReturn(config, { jobKey, contractId, payerId: contract.payerId });
+      // The vendor was already paid for `slot.attempts` image(s) above — say so.
+      return refuseAtPointOfNoReturn(config, {
+        jobKey,
+        contractId,
+        payerId: contract.payerId,
+        generatedImages: slot.attempts,
+      });
     }
 
     const png = result.concept.png;

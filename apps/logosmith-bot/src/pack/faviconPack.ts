@@ -52,6 +52,7 @@ import {
   checkIco,
   checkZipCompleteness,
   readPngDimensions,
+  type Dimensions,
   type DimensionsResult,
   type IcoGateResult,
   type ZipGateResult,
@@ -123,13 +124,48 @@ let photonModule: Promise<typeof import('@cf-wasm/photon')> | undefined;
 const loadPhoton = (): Promise<typeof import('@cf-wasm/photon')> =>
   (photonModule ??= import('@cf-wasm/photon'));
 
-// NOTE: this module deliberately exposes no "decode it to learn its size"
-// helper. It had one, and it made the JPEG path the worse of the two: a
-// decompression bomb was fully decoded — filling the isolate — before any
-// dimension existed to check it against. Dimensions are now read from the PNG
-// IHDR and the JPEG SOF header in freeGigs.ts, BEFORE anything reaches a
-// decoder, and `buildFaviconPack` is only ever handed a source already proven
-// to be within the pixel budget.
+/**
+ * Prove these bytes actually decode, and report what they decode TO.
+ *
+ * This is not "read the size" — that is `readPngDimensions`/`readJpegDimensions`
+ * in freeGigs.ts, which allocate nothing and must run FIRST so this decode is
+ * bounded before it starts. This answers the different question those cannot:
+ * does the entropy-coded payload behind that header survive a decoder?
+ *
+ * IT EXISTS BECAUSE ITS ABSENCE WAS A CRASH. An ordinary truncated JPEG — a cut
+ * upload, a CDN that ended the response early, no craft required — has a
+ * perfectly walkable header and traps photon with `RuntimeError: unreachable`
+ * on decode. Unwrapped, that trap escapes the queue consumer, which logs it as
+ * a transient error and retries; it is not transient, so it re-throws to the
+ * DLQ having already consumed the buyer's allowance and told them nothing.
+ * Catching it here turns a wasm panic into a refusal with a reason — the exact
+ * property an earlier version of this module documented and a later one
+ * deleted without reading the docstring that explained it.
+ *
+ * Verified: a trap does NOT poison the module. Decodes and resizes after one
+ * succeed normally, so a refused job costs the isolate nothing.
+ *
+ * Returns the decoded dimensions so the caller can hold the payload to its own
+ * header's claim, rather than trusting either alone.
+ */
+export async function decodeRasterSource(bytes: Uint8Array): Promise<Dimensions | null> {
+  const photon = await loadPhoton();
+  let image: InstanceType<(typeof photon)['PhotonImage']>;
+  try {
+    image = photon.PhotonImage.new_from_byteslice(bytes);
+  } catch {
+    return null;
+  }
+  try {
+    const width = image.get_width();
+    const height = image.get_height();
+    return width > 0 && height > 0 ? { width, height } : null;
+  } catch {
+    return null;
+  } finally {
+    image.free();
+  }
+}
 
 /**
  * Centre `width`x`height` RGBA pixels on a transparent `size`x`size` canvas.

@@ -23,7 +23,7 @@ import {
   type SourceLogoResult,
 } from './freeGigs.js';
 import type { GenerateResult, Generator } from './generate.js';
-import { readPngDimensions, type OcrGate, type OcrOutcome } from './gates/index.js';
+import { readPngDimensions, sanitizeSvg, type OcrGate, type OcrOutcome } from './gates/index.js';
 import {
   buildJobKey,
   createConceptStore,
@@ -80,11 +80,20 @@ const MARK_SVGS: Record<string, string> = {
   ),
 };
 
+/** 2:3, so a 2000 px wide render is exactly 2000x3000 = MAX_SOURCE_PIXELS. */
+const TALL_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" width="200" height="300">' +
+  '<path d="M10 10 H190 V290 H10 Z" fill="#0F3D3E"/></svg>';
+
 const fixtures: Record<string, Uint8Array> = {};
 
 before(async () => {
   fixtures['png512'] = await renderSvgToPng(SQUARE_SVG, 512, sources);
   fixtures['png256'] = await renderSvgToPng(SQUARE_SVG, 256, sources);
+  // Real, decodable rasters at the pixel budget's boundary and at the largest
+  // size the paid pack itself renders.
+  fixtures['png2048'] = await renderSvgToPng(SQUARE_SVG, 2048, sources);
+  fixtures['png2000x3000'] = await renderSvgToPng(TALL_SVG, 2000, sources);
   for (const [name, svg] of Object.entries(MARK_SVGS)) {
     fixtures[name] = await renderSvgToPng(svg, 256, sources);
   }
@@ -316,16 +325,21 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
     assert.match(reason(result), /16000x16000px/);
   });
 
-  it('accepts a source at the budget and refuses one just over it', async () => {
+  it('accepts a REAL source at the budget and refuses one just over it', async () => {
     // The boundary itself, so the ceiling is a real threshold rather than a
     // constant nothing is compared against. 2000x3000 = 6.0 Mpx exactly.
-    const atBudget = 2000 * 3000;
-    assert.equal(atBudget, MAX_SOURCE_PIXELS);
+    //
+    // The accepted side uses a genuinely decodable fixture, not a header: since
+    // the validating decode landed, a bare header is refused for a DIFFERENT
+    // reason, and a test that only ever fed headers could no longer tell a
+    // working budget from a broken one.
+    assert.equal(2000 * 3000, MAX_SOURCE_PIXELS);
     const ok = await fetchSourceLogo({
-      fetchImpl: respondWith(pngDeclaring(2000, 3000)),
+      fetchImpl: respondWith(fixtures['png2000x3000']!),
       url: LOGO_URL,
     });
     assert.equal(ok.ok, true, 'a source exactly at the budget must be admitted');
+    assert.deepEqual(readPngDimensions(fixtures['png2000x3000']!), { width: 2000, height: 3000 });
 
     const over = await fetchSourceLogo({
       fetchImpl: respondWith(pngDeclaring(2001, 3000)),
@@ -339,7 +353,7 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
     // construction, so it is asserted rather than assumed.
     assert.ok(2048 * 2048 <= MAX_SOURCE_PIXELS);
     const result = await fetchSourceLogo({
-      fetchImpl: respondWith(pngDeclaring(2048, 2048)),
+      fetchImpl: respondWith(fixtures['png2048']!),
       url: LOGO_URL,
     });
     assert.equal(result.ok, true);
@@ -470,6 +484,139 @@ describe('fetchSourceLogo — §12 refusals', () => {
       ),
     ];
     assert.equal(new Set(reasons).size, reasons.length, JSON.stringify(reasons));
+  });
+});
+
+describe('fetchSourceLogo — a walkable header is not a decodable image', () => {
+  it('refuses a truncated JPEG with a buyer-facing reason instead of trapping the decoder', async () => {
+    const photon = await import('@cf-wasm/photon');
+    const image = photon.PhotonImage.new_from_byteslice(fixtures['png512']!);
+    const jpeg = new Uint8Array(image.get_bytes_jpeg(90));
+    image.free();
+    const truncated = jpeg.subarray(0, Math.floor(jpeg.length * 0.4));
+
+    // Preconditions. This is an ORDINARY damaged file — a cut upload, a CDN
+    // that ended the response early — and every earlier guard waves it through:
+    // it sniffs as a JPEG, its header walks cleanly, and the size it declares
+    // is inside both the floor and the budget. Only a decode can tell.
+    assert.deepEqual([...truncated.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+    assert.deepEqual(readJpegDimensions(truncated), { width: 512, height: 512 });
+    assert.throws(
+      () => photon.PhotonImage.new_from_byteslice(truncated),
+      /unreachable/,
+      'the fixture must actually trap the decoder, or this test proves nothing',
+    );
+
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(truncated),
+      url: LOGO_URL,
+    });
+    const text = reason(result);
+    assert.match(text, /could not be decoded/);
+    assert.match(text, /incomplete or corrupt/);
+    assert.match(text, /Re-upload/);
+  });
+
+  it('refuses a PNG that is only a header', async () => {
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(pngDeclaring(1024, 1024)),
+      url: LOGO_URL,
+    });
+    assert.match(reason(result), /could not be decoded/);
+  });
+
+  it('leaves the decoder usable after a trap, so one bad job cannot poison the isolate', async () => {
+    const photon = await import('@cf-wasm/photon');
+    const image = photon.PhotonImage.new_from_byteslice(fixtures['png512']!);
+    const truncated = new Uint8Array(image.get_bytes_jpeg(90)).subarray(0, 400);
+    image.free();
+    await fetchSourceLogo({ fetchImpl: respondWith(truncated), url: LOGO_URL });
+
+    const after = await fetchSourceLogo({
+      fetchImpl: respondWith(fixtures['png512']!),
+      url: LOGO_URL,
+    });
+    assert.equal(after.ok, true, 'the next job must still work');
+  });
+
+  it('refuses a JPEG carrying two frame headers rather than believing the first', async () => {
+    // The decoy: a real 3000x3000 frame with a small SOF spliced in front of
+    // it. Trusting the FIRST SOF would budget for 0.36 Mpx and then decode 9.
+    const decoy = new Uint8Array([
+      ...jpegDeclaring(600, 600).subarray(0, jpegDeclaring(600, 600).length - 2),
+      ...jpegDeclaring(3000, 3000).subarray(2),
+    ]);
+    assert.equal(readJpegDimensions(decoy), null, 'two frame headers must not resolve to one size');
+    const result = await fetchSourceLogo({ fetchImpl: respondWith(decoy), url: LOGO_URL });
+    assert.match(reason(result), /header could not be read/);
+  });
+
+  it('refuses a source whose header and image data disagree', async () => {
+    // Belt and braces for the property the comment now claims: even if some
+    // future header parser could be talked into the wrong number, the decoded
+    // truth is checked against it. Built by splicing a real 512 px PNG's body
+    // onto an IHDR that declares 1024.
+    const real = fixtures['png512']!;
+    const lying = Uint8Array.from(real);
+    new DataView(lying.buffer).setUint32(16, 1024);
+    new DataView(lying.buffer).setUint32(20, 1024);
+    assert.deepEqual(readPngDimensions(lying), { width: 1024, height: 1024 });
+
+    const result = await fetchSourceLogo({ fetchImpl: respondWith(lying), url: LOGO_URL });
+    // photon rejects the corrupted IHDR CRC outright, so this lands on the
+    // undecodable branch — either refusal is correct, and both are refusals.
+    assert.equal(result.ok, false);
+    assert.match(reason(result), /could not be decoded|disagrees with itself/);
+  });
+});
+
+describe('fetchSourceLogo — an SVG that cannot draw is refused, not delivered blank', () => {
+  const wrapperSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">' +
+    '<image width="512" height="512" href="data:image/png;base64,AAAA"/></svg>';
+
+  it('refuses an SVG that just wraps a bitmap', async () => {
+    // THE SILENT FAILURE THIS CLOSES: resvg renders a top-level <image> but
+    // does not resolve one nested inside a sub-tree, and the square wrapper
+    // nests it — so this input used to produce six blank icons with every gate
+    // passing, which is indistinguishable from success until the buyer opens
+    // the ZIP. sanitizeSvg does not strip <image>, and the one gate that counts
+    // it (checkTrueVector) is deliberately not applied to a buyer's own logo.
+    assert.ok(sanitizeSvg(wrapperSvg).includes('<image'), 'sanitize must not be the guard here');
+
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(new TextEncoder().encode(wrapperSvg)),
+      url: 'https://cdn.example.com/logo.svg',
+    });
+    const text = reason(result);
+    assert.match(text, /wrapper around a bitmap/);
+    assert.match(text, /blank/);
+    assert.match(text, /Post the bitmap itself/);
+  });
+
+  it('refuses an SVG whose lettering is live text rather than outlines', async () => {
+    // Same failure shape, different cause: nothing loads fonts in this Worker,
+    // so <text> renders as nothing at all.
+    const textSvg =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">' +
+      '<text x="10" y="50" font-size="40">Harbor</text></svg>';
+    const result = await fetchSourceLogo({
+      fetchImpl: respondWith(new TextEncoder().encode(textSvg)),
+      url: 'https://cdn.example.com/logo.svg',
+    });
+    assert.match(reason(result), /live <text> element/);
+    assert.match(reason(result), /outlines/);
+  });
+
+  it('does not steer an over-budget raster towards the wrapped-bitmap trap', async () => {
+    // The interaction that made this a funnel: the >6 Mpx refusal used to end
+    // "or post an SVG, which has no such limit", pointing the buyer straight at
+    // the input that silently produces blank icons and spends their allowance.
+    const over = reason(
+      await fetchSourceLogo({ fetchImpl: respondWith(pngDeclaring(8000, 8000)), url: LOGO_URL }),
+    );
+    assert.equal(/SVG, which has no such limit/.test(over), false, over);
+    assert.match(over, /wrapping this same bitmap inside an SVG will not/);
   });
 });
 
@@ -775,6 +922,49 @@ describe('runSingleStage — the US-2 favicon gig', () => {
     assert.equal(h.deliveries.length, 0);
   });
 
+  it('refuses an undecodable logo cleanly, with no allowance spent and the job resolved', async () => {
+    // C4 end to end. Before the validating decode existed this input walked its
+    // header, consumed the allowance, and then trapped photon inside
+    // buildFaviconPack — a wasm panic escaping the queue consumer, which logged
+    // it as transient and retried until the DLQ. The buyer was told nothing,
+    // the job row never resolved, and one of their three allowances was gone.
+    const photon = await import('@cf-wasm/photon');
+    const image = photon.PhotonImage.new_from_byteslice(fixtures['png512']!);
+    const truncated = new Uint8Array(image.get_bytes_jpeg(90)).subarray(0, 1200);
+    image.free();
+    assert.deepEqual(readJpegDimensions(truncated), { width: 512, height: 512 }, 'header walks');
+
+    const h = await setupFree({
+      logoResponse: () => new Response(truncated as unknown as BodyInit),
+    });
+    const result = await runSingleStage(h.config, h.message);
+
+    assert.deepEqual(result, { outcome: 'aborted' }, 'must not throw into the queue');
+    assert.equal(await usage(h), 0, 'an undecodable upload must not cost an allowance');
+    assert.equal(await h.quota.holdsAllowance(CONTRACT_ID), false);
+    const job = (await h.jobs.get(h.jobKey))!;
+    assert.equal(job.outcome, 'rejected', 'the job must reach a terminal state');
+    assert.equal(job.status, 'delivered');
+    assert.equal(h.messages.length, 1, 'and the buyer must be told');
+    assert.match(h.messages[0]!, /could not be decoded/);
+    assert.match(h.messages[0]!, /not been counted against your free-job allowance/);
+  });
+
+  it('refuses a wrapped-bitmap SVG rather than delivering blank icons', async () => {
+    // C5 end to end: the gates all pass over six empty PNGs, so nothing
+    // downstream can catch this — only refusing at intake can.
+    const wrapper =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">' +
+      `<image width="512" height="512" href="data:image/png;base64,AAAA"/></svg>`;
+    const h = await setupFree({
+      logoResponse: () => new Response(new TextEncoder().encode(wrapper) as unknown as BodyInit),
+    });
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+    assert.equal(h.deliveries.length, 0);
+    assert.equal(await usage(h), 0);
+    assert.match(h.messages[0]!, /wrapper around a bitmap/);
+  });
+
   it('consumes exactly one allowance across a redelivered message', async () => {
     const h = await setupFree();
     assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
@@ -1026,6 +1216,42 @@ describe('runSingleStage — the quota holds under concurrency (the farming atta
     const refused = harnesses.filter((h) => h.deliveries.length === 0);
     assert.equal(refused.length, concurrency - FREE_GIGS_PER_PAYER);
     for (const h of refused) assert.ok(h.generated <= 1, 'at most one generation per losing job');
+  });
+
+  it('tells a loser the truth about what was already generated for it', async () => {
+    // The refusal at the point of no return sits IMMEDIATELY AFTER a paid klein
+    // call on the taster path. Reusing the entry check's copy there would ship
+    // "Nothing has been generated and nothing has been charged" to a buyer for
+    // whom the first clause is false — the same falsified sentence Task 22's
+    // give-up note was corrected for, reappearing inside the fix for it.
+    //
+    // The race is forced deterministically rather than run for real: the payer
+    // is under the cap when the ADVISORY entry check reads (so the job starts
+    // and generates), and at the cap by the time `consume` decides. Racing two
+    // real jobs would reproduce it only sometimes, and a test that sometimes
+    // exercises the branch is a test that sometimes proves nothing.
+    const h = await setupFree({ description: TASTER_DESCRIPTION });
+    const real = h.config.quota;
+    (h.config as { quota: QuotaStore }).quota = {
+      countRecent: async () => 0, // entry check: plenty of room
+      holdsAllowance: (contractId) => real.holdsAllowance(contractId),
+      consume: async () => false, // ...and the last slot went while we generated
+    };
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+    assert.equal(h.generated, 1, 'the klein call must have happened before the refusal');
+    assert.equal(h.deliveries.length, 0, 'and nothing may be delivered');
+
+    const note = h.messages[0]!;
+    assert.equal(
+      /Nothing has been generated/i.test(note),
+      false,
+      `a job that generated an image must not claim otherwise: ${note}`,
+    );
+    assert.match(note, /already generated a sample image/);
+    assert.match(note, /you have not been charged/i);
+    assert.match(note, /allowance ran out while this one was already running/);
+    assert.equal(/escrow/i.test(note), false);
   });
 });
 

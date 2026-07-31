@@ -378,6 +378,28 @@ describe('QuotaStore', () => {
     assert.equal(await quota.countRecent('p1', 30), 1);
   });
 
+  it('makes one-row-per-contract a schema constraint, not just a subquery', async () => {
+    // `consume`'s NOT EXISTS clause is what keeps a retry from double-charging,
+    // and until the 0003 migration it was the ONLY thing doing so. Bypassing
+    // the store entirely must now be impossible, so the property survives a
+    // refactor that loses the clause.
+    const quota = createQuotaStore(db);
+    assert.equal(
+      await quota.consume('p1', 'favicon', 'c-unique', { windowDays: 30, maxPerPayer: 3 }),
+      true,
+    );
+    await assert.rejects(
+      db
+        .prepare(
+          'INSERT INTO free_gig_usage (payer_id, kind, contract_id, created_at) VALUES (?, ?, ?, ?)',
+        )
+        .bind('p1', 'favicon', 'c-unique', new Date().toISOString())
+        .run(),
+      /UNIQUE constraint failed/i,
+    );
+    assert.equal(await quota.countRecent('p1', 30), 1);
+  });
+
   it('keeps granting a contract that already holds a slot even once the payer is at the cap', async () => {
     // The C2 property, at the store level: an allowance belongs to the job that
     // took it. Without this a parked-and-resumed job is refused by its own row.
