@@ -99,6 +99,27 @@ export function isLatinScript(text: string): boolean {
   return /^[\p{Script=Latin}\p{Nd}\p{P}\p{Zs}\p{M}+&@#$%^*<>=|~`]+$/u.test(text);
 }
 
+/**
+ * Does this brand name have anything an OCR readback could ever match?
+ *
+ * COUPLED TO `gates/ocr.ts`'s `normalizeForMatch`, WHICH THIS MODULE CANNOT
+ * IMPORT (it would close a cycle through config.ts — see `MIN_SOURCE_PX`). The
+ * relationship is asserted as a property in brief.test.ts rather than left to
+ * this comment: every name `parseLogoBrief` accepts must have a non-empty
+ * normalized form.
+ *
+ * WHY IT EXISTS. `isLatinScript` admits `\p{P}` and assorted symbols, so `&&&`
+ * was a valid brand name. `normalizeForMatch` deletes all punctuation, so it
+ * normalized to `""`; a vision model reporting no legible lettering also
+ * transcribes to `""`; and the two empties scored a perfect 1. The headline
+ * gate of this product returned PASS on an image nobody verified, and the M1
+ * note, the progress page, `report.json` and the dispute document all repeated
+ * that number as a machine verification. Refusing at intake is the cheap end of
+ * the fix — a name with no letter or digit cannot be rendered as lettering and
+ * then read back, so there is no job here to take.
+ */
+const hasReadableLettering = (text: string): boolean => /[\p{L}\p{Nd}]/u.test(text);
+
 /** Parse + completeness-check the paid logo gig's brief. */
 export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
   const fenced = extractFencedJson(description);
@@ -114,6 +135,14 @@ export function parseLogoBrief(description: string): BriefResult<LogoBrief> {
   const brandName = raw['brandName'].trim();
   if (!isLatinScript(brandName)) {
     return { ok: false, reason: 'brandName is not Latin script (out of v1 scope)' };
+  }
+  if (!hasReadableLettering(brandName)) {
+    return {
+      ok: false,
+      reason:
+        'brandName contains no letters or digits, so there is nothing for the lettering-readback ' +
+        'gate to verify',
+    };
   }
 
   const palette = boundedStringArray(raw['palettePreference'], 'palettePreference');

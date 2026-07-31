@@ -41,8 +41,59 @@ describe('similarity', () => {
   });
 
   it('handles empty input without dividing by zero', () => {
-    assert.equal(similarity('', ''), 1);
     assert.equal(similarity('abc', ''), 0);
+    assert.equal(similarity('', 'abc'), 0);
+  });
+
+  // THIS TEST USED TO ASSERT `similarity('', '') === 1` — it pinned the defect
+  // below as correct behaviour. Two empties are not a match; they are an
+  // absence of evidence, and answering 1 made the headline gate of this
+  // product vacuously satisfiable.
+  it('CRITICAL: two empty strings score 0, because nothing was compared', () => {
+    assert.equal(similarity('', ''), 0);
+  });
+});
+
+describe('OcrGate — the readback cannot be vacuously satisfied', () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  /** Canary SATISFIED (the image really arrived); model reports no lettering. */
+  const blankReadback = createOcrGate({
+    ai: {
+      run: async () => ({
+        response: '{"text":"   ","unsafe":false}',
+        usage: { prompt_tokens: 2497 },
+      }),
+    },
+  });
+
+  it('CRITICAL: a punctuation-only brand name no longer scores a perfect match', async () => {
+    // `isLatinScript` admits \p{P}, so "&&&" was a valid brand name;
+    // `normalizeForMatch` deletes all punctuation, so it normalized to "";
+    // a model reporting no legible lettering transcribes to "" too — and the
+    // two empties matched perfectly. The gate returned
+    // { transcription: "   ", score: 1, pass: true } with the canary happy,
+    // and the M1 note, the progress page, report.json, the warranty terms and
+    // the dispute document all republished that as a machine verification.
+    for (const brandName of ['&&&', '---', '...', '&']) {
+      // Fixture precondition, inline: these ARE the degenerate normalized form
+      // the bug needed. If normalizeForMatch ever stops emptying them this
+      // test must fail loudly rather than quietly stop testing anything.
+      assert.equal(normalizeForMatch(brandName), '', brandName);
+      const outcome = await blankReadback.check(png, brandName);
+      assert.equal(outcome.status, 'ok');
+      assert.ok(outcome.status === 'ok');
+      assert.equal(outcome.verdict.score, 0, brandName);
+      assert.equal(outcome.verdict.pass, false, brandName);
+    }
+  });
+
+  it('CONTROL: a real brand name always failed the same blank readback', async () => {
+    // Proves the probes above differ from a working case only in the brand
+    // name's normalized form.
+    const outcome = await blankReadback.check(png, 'Acme Corp');
+    assert.ok(outcome.status === 'ok');
+    assert.equal(outcome.verdict.score, 0);
+    assert.equal(outcome.verdict.pass, false);
   });
 });
 

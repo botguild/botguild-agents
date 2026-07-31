@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkLogoUrl, isLatinScript, parseFaviconBrief, parseLogoBrief } from './brief.js';
+import { normalizeForMatch, similarity } from './gates/ocr.js';
 import { logoBriefFreeText } from './types.js';
 
 const fence = (json: unknown): string =>
@@ -219,5 +220,74 @@ describe('logoBriefFreeText', () => {
       'Acme',
       'tools',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE COUPLING BETWEEN INTAKE AND THE READBACK GATE, ASSERTED RATHER THAN
+// COMMENTED.
+//
+// brief.ts cannot import `normalizeForMatch` — that would close a cycle through
+// config.ts — so `hasReadableLettering` states the rule in brief.ts's own
+// vocabulary. Two rules in two modules is exactly the drift this branch keeps
+// paying for, so the relationship is a test: anything intake ACCEPTS must have
+// something for the readback gate to compare, and `similarity` must refuse to
+// verdict when it does not.
+//
+// The bug this closes needed no attacker: `isLatinScript` admits \p{P}, so
+// "&&&" was a valid brand name, `normalizeForMatch` emptied it, a model
+// reporting no legible lettering emptied too, and `similarity('','')` was 1.
+// With the prompt_tokens canary satisfied the gate returned PASS (1.00) — and
+// the M1 note, progress page, report.json, warranty terms and dispute document
+// all republished that as a machine verification that never happened.
+// ---------------------------------------------------------------------------
+describe('brand-name intake feeds the lettering gate something to verify', () => {
+  const NAMES = [
+    '&&&',
+    '---',
+    '...',
+    '&',
+    '#',
+    '   -   ',
+    '!!!',
+    '@#$%^*',
+    '<>=|~`',
+    "'''",
+    'Acme Corp',
+    'Harbor & Vine',
+    'Café 42',
+    "O'Brien-Smith",
+    'X',
+    '7',
+  ];
+
+  it('never accepts a brand name whose normalized form is empty', () => {
+    let accepted = 0;
+    for (const brandName of NAMES) {
+      const result = parseLogoBrief(fence({ brandName, industry: 'boutique inn' }));
+      if (!result.ok) continue;
+      accepted += 1;
+      assert.notEqual(
+        normalizeForMatch(result.brief.brandName),
+        '',
+        `intake accepted ${JSON.stringify(brandName)}, which the readback gate cannot verify`,
+      );
+    }
+    // Not a vacuous sweep: real names must still get through.
+    assert.ok(accepted >= 6, `expected the legitimate names to be accepted, got ${accepted}`);
+  });
+
+  it('refuses the punctuation-only names by name, with an actionable reason', () => {
+    for (const brandName of ['&&&', '---', '...', '&']) {
+      const result = parseLogoBrief(fence({ brandName, industry: 'boutique inn' }));
+      assert.ok(!result.ok, brandName);
+      assert.match(result.reason, /no letters or digits/);
+    }
+  });
+
+  it('and similarity refuses to verdict on an empty reference either way', () => {
+    // The second, independent guard: intake is not the only caller, and
+    // "nothing to compare against" must never read as a perfect match.
+    assert.equal(similarity(normalizeForMatch('   '), normalizeForMatch('&&&')), 0);
   });
 });

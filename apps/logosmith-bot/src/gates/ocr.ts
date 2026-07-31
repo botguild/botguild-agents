@@ -54,11 +54,32 @@ function levenshtein(a: string, b: string): number {
   return previous[b.length]!;
 }
 
-/** Normalized similarity ratio in [0, 1] over already-normalized strings. */
+/**
+ * Normalized similarity ratio in [0, 1] over already-normalized strings.
+ *
+ * AN EMPTY SIDE SCORES 0, NOT 1, AND THAT IS THE WHOLE GATE.
+ *
+ * This function used to answer `1` when BOTH sides were empty, which made the
+ * lettering readback vacuously satisfiable. `isLatinScript` admits `\p{P}` and
+ * assorted symbols, so `&&&` was a valid brand name; `normalizeForMatch` drops
+ * all punctuation, so it normalized to `""`; a model reporting no legible
+ * lettering at all transcribed to `""` as well — and the two empties matched
+ * perfectly. With the `prompt_tokens` canary SATISFIED (the image really did
+ * arrive), the gate returned `{ transcription: "   ", score: 1, pass: true }`.
+ *
+ * Everything downstream then asserts a verification that did not happen: the
+ * M1 note, the progress page's "Lettering readback: PASS (1.00)",
+ * `report.json`, the warranty terms and the dispute document. A false claim in
+ * an evidence document, reached with no attacker at all.
+ *
+ * Intake refuses such a brand name outright (`parseLogoBrief`), so this is the
+ * second of two independent guards. It is not redundant: this is the one that
+ * holds if any other caller ever hands the gate an unrenderable reference, and
+ * "nothing to compare against" is an absence of evidence, never a pass.
+ */
 export function similarity(a: string, b: string): number {
-  const longest = Math.max(a.length, b.length);
-  if (longest === 0) return 1;
-  return 1 - levenshtein(a, b) / longest;
+  if (a.length === 0 || b.length === 0) return 0;
+  return 1 - levenshtein(a, b) / Math.max(a.length, b.length);
 }
 
 const VISION_PROMPT =
