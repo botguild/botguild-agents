@@ -1005,6 +1005,41 @@ describe('runConceptStage — vendor and gate outages park rather than burn', ()
     assert.equal(h.deliveries.length, 0);
   });
 
+  it('credits a PAID vendor failure to the ledger BEFORE it parks', async () => {
+    // The park loop's only bound. A retryable failure consumes no FR-5 attempt
+    // (Task 18 Ruling 1), so `attempts` stays 0 forever — and a failure that
+    // happened after the vendor billed us (a dead asset CDN link, an asset
+    // that is not a PNG) spends real money on every one of the cron's
+    // fifteen-minute re-enqueues. If that spend is not persisted here,
+    // `decideSlotAction`'s `spendUsd >= MAX_SPEND_USD` and `sweepParkedJobs`'
+    // spend bound are BOTH looking at $0.00 while the vendor bill climbs.
+    const h = await setup({
+      generate: () => ({
+        ok: false,
+        retryable: true,
+        error: 'asset fetch returned 404',
+        costUsd: IMAGE_COST_USD.ideogram,
+      }),
+    });
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'parked' });
+
+    const job = await h.jobs.get(h.jobKey);
+    assert.equal(job?.status, 'parked');
+    assert.equal(job?.parkReason, 'vendor_outage');
+    // Still no attempt consumed — that ruling is unchanged and is exactly why
+    // the ledger has to carry the weight.
+    assert.equal(job?.checkpoint?.slots[0]?.attempts, 0);
+    // ...and the dollars ARE recorded, on the persisted row the sweep reads.
+    assert.equal(job?.checkpoint?.spendUsd, IMAGE_COST_USD.ideogram);
+    assert.equal(job?.spentUsd, IMAGE_COST_USD.ideogram);
+
+    // Each cron cycle adds one more billed image, so the ledger climbs rather
+    // than sitting at zero: this is the accumulation the spend bound needs.
+    await h.jobs.unpark(h.jobKey);
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'parked' });
+    assert.equal((await h.jobs.get(h.jobKey))?.spentUsd, IMAGE_COST_USD.ideogram * 2);
+  });
+
   it('exhausts a slot immediately when the vendor refuses the request outright', async () => {
     const h = await setup({
       generate: (axisId) =>

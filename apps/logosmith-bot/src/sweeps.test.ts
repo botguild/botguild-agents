@@ -28,7 +28,12 @@ import {
   type SelectionStore,
 } from './jobs.js';
 import { findSelection, parseSelection } from './threads.js';
-import { PARKED_GIVE_UP_HOURS, SELECTION_TIMEOUT_HOURS, STUCK_CLAIM_MINUTES } from './config.js';
+import {
+  MAX_SPEND_USD,
+  PARKED_GIVE_UP_HOURS,
+  SELECTION_TIMEOUT_HOURS,
+  STUCK_CLAIM_MINUTES,
+} from './config.js';
 import {
   decideDefaultSelection,
   maybePropose,
@@ -1013,6 +1018,75 @@ describe('parked-job sweep', () => {
     await runFifteenMinuteSweep(h.services);
     assert.equal(h.messagesSent.length, 1);
     assert.deepEqual(h.queueSent, []);
+  });
+
+  it('gives up on a job that has spent PAST the cap, long before the clock would', async () => {
+    // THE SECOND BOUND, and the one the clock cannot supply. A retryable
+    // failure consumes no FR-5 attempt, so a vendor that bills and then fails
+    // (a dead asset link, an unreadable 200) is re-enqueued every fifteen
+    // minutes and buys another image every time. At six hours that is
+    // twenty-four of them. This job is only twenty minutes into its spell —
+    // well inside the age bound — and must still be stopped.
+    const h = await makeHarness();
+    const firstParkAt = new Date(BASE.getTime() - 20 * MINUTE);
+    const jobKey = await seedParked(h, {
+      contractId: 'c-burn',
+      stage: 'concepts',
+      reason: 'vendor_outage',
+      claimedAt: new Date(BASE.getTime() - 25 * MINUTE),
+      firstParkAt,
+    });
+    // Fixture preconditions, inline: the age bound is NOT what fires here.
+    assert.ok(BASE.getTime() - firstParkAt.getTime() < PARKED_GIVE_UP_HOURS * HOUR);
+    await h.jobs.saveCheckpoint(jobKey, { slots: [], spendUsd: MAX_SPEND_USD + 0.06 });
+    const parked = await h.jobs.get(jobKey);
+    assert.ok(parked!.spentUsd > MAX_SPEND_USD);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(h.queueSent, [], 'a job over the cap must not be bought another attempt');
+    const after = await h.jobs.get(jobKey);
+    assert.equal(after?.status, 'delivered');
+    assert.equal(after?.outcome, 'aborted');
+
+    assert.equal(h.messagesSent.length, 1);
+    // The note quotes the two real numbers and claims nothing about duration —
+    // a twenty-minute-old job is not "blocked for over 6 hours".
+    assert.match(h.messagesSent[0].body, /\$0\.66 of its own vendor budget/);
+    assert.match(h.messagesSent[0].body, new RegExp(`\\$${MAX_SPEND_USD.toFixed(2)} per-job cap`));
+    assert.doesNotMatch(h.messagesSent[0].body, /blocked since/);
+    assert.doesNotMatch(h.messagesSent[0].body, /hours/);
+
+    const trail = await h.jobs.listGateAudit(jobKey, 'parked-give-up');
+    assert.equal(trail.length, 1);
+    const detail = trail[0].detail as { bound: string; spentUsd: number; blockedHours: null };
+    assert.equal(detail.bound, 'spend');
+    assert.equal(detail.spentUsd, MAX_SPEND_USD + 0.06);
+    assert.equal(detail.blockedHours, null, 'no duration claim the row cannot substantiate');
+  });
+
+  it('keeps re-enqueueing a job that spent its full allowance but no more', async () => {
+    // `>` not `>=`, and this is the case that decides it. Today's worst
+    // LEGITIMATE stage-1 burn lands EXACTLY on MAX_SPEND_USD (config.ts's
+    // zero-slack comment), so a job that used its whole contracted
+    // regeneration budget and then hit one transient OCR outage sits at the
+    // cap with paid bytes safe in R2 — and the next sweep re-gates them for
+    // free and delivers. A `>=` bound would abort that job instead.
+    const h = await makeHarness();
+    const jobKey = await seedParked(h, {
+      contractId: 'c-atcap',
+      stage: 'concepts',
+      reason: 'ocr_outage',
+      claimedAt: new Date(BASE.getTime() - 40 * MINUTE),
+      firstParkAt: new Date(BASE.getTime() - 10 * MINUTE),
+    });
+    await h.jobs.saveCheckpoint(jobKey, { slots: [], spendUsd: MAX_SPEND_USD });
+    assert.equal((await h.jobs.get(jobKey))?.spentUsd, MAX_SPEND_USD);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(h.queueSent, [{ contractId: 'c-atcap', jobKey, stage: 'concepts' }]);
+    assert.deepEqual(h.messagesSent, []);
   });
 
   it('survives a full day of unpark/re-park cycles without resetting the clock', async () => {

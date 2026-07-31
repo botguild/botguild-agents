@@ -200,21 +200,37 @@ export type StageOutcome = { outcome: 'delivered' | 'partial' | 'aborted' | 'par
 /**
  * The FR-5 cap policy. `attempts` counts COMPLETED generation attempts for the
  * slot (0 = never generated), so regenerations used = attempts - 1, and the
- * PRD's "<= 2 regenerations per slot" allows exactly 3 attempts. The
- * orchestrator increments `attempts` after EVERY generation call, pass or fail.
+ * PRD's "<= 2 regenerations per slot" allows exactly 3 attempts.
+ *
+ * `attempts` IS INCREMENTED ONLY BY A GENERATION THAT PRODUCED AN IMAGE. A
+ * retryable vendor failure parks for the cron and consumes no attempt (Task 18
+ * Ruling 1), so that a 45-minute outage cannot burn a paid job's regeneration
+ * budget on 503s. An earlier version of this comment claimed the orchestrator
+ * increments after EVERY call, pass or fail; it does not, and that mistake is
+ * exactly what made the paragraph below false.
  *
  * Spend is checked FIRST and against the accumulated checkpoint total, so a job
  * resumed by a queue retry decides against the remaining budget rather than
- * starting a fresh $2.50.
+ * starting a fresh one.
  *
  * NOTE ON `MAX_SPEND_USD`: it is a stop-AFTER threshold, not a ceiling. The
  * generation that crosses the line completes and is paid for — we only decline
- * to start the next one — so realized spend can exceed the cap by at most one
- * generation (worst case ~$3.00 against a $2.50 cap at the $0.50 fake-vendor
- * costs the tests use; ~$2.58 at real Recraft pricing). That is the intended
- * policy: a price is not knowable until the vendor has been called. The
- * overshoot is bounded by exactly one image, and the delivery note quotes both
- * the cap and the realized figure so the buyer sees the true number.
+ * to start the next one — so realized spend exceeds the cap by at most one
+ * generation PER INVOCATION.
+ *
+ * THAT BOUND IS NOT SELF-EVIDENT AND WAS ONCE FALSE, so here is what makes it
+ * hold. Because a retryable failure consumes no attempt, `attempts` cannot
+ * bound the park → unpark → regenerate → park loop; `spendUsd` is the only
+ * thing that can. So EVERY paid failure must reach this ledger: the vendor
+ * adapters attach `costUsd` to failures that happened after the vendor was
+ * billed (`GenerateResult`/`VectorizeResult`), the orchestrator credits and
+ * PERSISTS it before it parks, and `sweepParkedJobs` gives up on a job whose
+ * realized spend has passed the cap. Without all three, a dead asset CDN link
+ * on an otherwise-healthy vendor bought one image every fifteen minutes for six
+ * hours while this ledger reported $0.00.
+ *
+ * The delivery note quotes both the cap and the realized figure, so the buyer
+ * sees the true number either way.
  */
 export function decideSlotAction(state: ConceptState, spendUsd: number): SlotAction {
   if (spendUsd >= MAX_SPEND_USD) return { action: 'stop', reason: 'spend-cap' };
@@ -832,19 +848,31 @@ export async function runConceptStage(
     } else {
       const result = await services.generator.generate(pending.axis, pending.axis.prompt);
       if (!result.ok) {
+        // A FAILED CALL IS NOT NECESSARILY A FREE ONE. Anything that goes wrong
+        // after the vendor returned 200 — no asset url, a dead CDN link, an
+        // asset that is not a PNG — was BILLED, and the adapter says so via
+        // `costUsd`. Credit it and PERSIST it here, before the park below:
+        // parking is what hands this slot back to the cron, and because a
+        // retryable failure consumes no FR-5 attempt, `spendUsd` is the only
+        // thing bounding the loop it hands it to.
+        const billedUsd = result.costUsd ?? 0;
+        if (billedUsd > 0) {
+          checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + billedUsd);
+          await jobs.saveCheckpoint(jobKey, checkpoint);
+        }
         await jobs.recordGateAudit({
           jobKey,
           contractId,
           slot: slotNo,
           gate: 'generation',
           result: result.retryable ? 'unavailable' : 'error',
-          detail: { vendor: pending.axis.vendor, error: result.error },
+          detail: { vendor: pending.axis.vendor, error: result.error, costUsd: billedUsd },
         });
         if (result.retryable) {
-          // A vendor outage produced no image and cost nothing, so it consumes
-          // no FR-5 attempt: the slot has still never generated. Park for the
-          // cron rather than throwing — the queue's 3 retries are reserved for
-          // infra faults raised outside these handled paths (FR-2 pattern).
+          // The slot has still never generated, so this consumes no FR-5
+          // attempt (Task 18 Ruling 1). Park for the cron rather than throwing
+          // — the queue's 3 retries are reserved for infra faults raised
+          // outside these handled paths (FR-2 pattern).
           pending.failReason = result.error;
           await jobs.saveCheckpoint(jobKey, checkpoint);
           await jobs.park(jobKey, 'vendor_outage');
@@ -1301,11 +1329,17 @@ export async function runVectorStage(
     nativeSvg,
   });
 
-  if (vector.ok && vector.costUsd > 0) {
+  // A FAILED CONVERSION IS NOT NECESSARILY A FREE ONE: a 200 whose body cannot
+  // be read, or whose SVG fails the true-vector self-check, was still billed
+  // (`VectorizeResult.costUsd`). Credited on both branches so the retryable
+  // one — which parks, and which the cron re-enqueues every fifteen minutes —
+  // cannot spend invisibly.
+  const vectorCostUsd = vector.costUsd ?? 0;
+  if (vectorCostUsd > 0) {
     // FIRST, before the audit insert, the font call, ten wasm renders, three R2
     // puts and a REST delivery — every one of which can throw. The vendor has
     // been paid; the ledger records it before anything else is attempted.
-    checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + vector.costUsd);
+    checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + vectorCostUsd);
     await jobs.saveCheckpoint(jobKey, checkpoint);
   }
 
@@ -1317,7 +1351,7 @@ export async function runVectorStage(
     result: vector.ok ? vector.source : vector.retryable ? 'unavailable' : 'error',
     detail: vector.ok
       ? { source: vector.source, costUsd: vector.costUsd }
-      : { error: vector.error, retryable: vector.retryable },
+      : { error: vector.error, retryable: vector.retryable, costUsd: vectorCostUsd },
   });
 
   if (!vector.ok) {
@@ -2016,13 +2050,22 @@ async function runTasterGig(
 
     const result = await services.generator.generate(slot.axis, slot.axis.prompt);
     if (!result.ok) {
+      // Credited and persisted before the park, exactly as the paid stage does
+      // and for the same reason: a post-200 failure was billed, and a retryable
+      // failure consumes no attempt, so `spendUsd` is the only bound on the
+      // park loop this is about to enter.
+      const billedUsd = result.costUsd ?? 0;
+      if (billedUsd > 0) {
+        checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + billedUsd);
+        await jobs.saveCheckpoint(jobKey, checkpoint);
+      }
       await jobs.recordGateAudit({
         jobKey,
         contractId,
         slot: 1,
         gate: 'generation',
         result: result.retryable ? 'unavailable' : 'error',
-        detail: { vendor: slot.axis.vendor, error: result.error },
+        detail: { vendor: slot.axis.vendor, error: result.error, costUsd: billedUsd },
       });
       if (result.retryable) {
         slot.failReason = result.error;

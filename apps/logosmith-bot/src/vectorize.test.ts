@@ -300,3 +300,69 @@ describe('createVectorizer — external references (critical, see gates/vector.t
     assert.match(result.error, /external reference/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The same "a failure is not a free failure" contract generate.ts carries, one
+// layer out. A vectorizer.ai call that returns 200 has RUN AND BEEN BILLED; a
+// body that cannot be read, or an SVG that fails its own self-check, does not
+// undo that. Stage 2's ledger — and, via `sweepParkedJobs`, the bound on the
+// park loop the retryable branch feeds — sees only what is reported here.
+// ---------------------------------------------------------------------------
+describe('createVectorizer — paid failures are visible to the spend ledger', () => {
+  it('bills a 200 whose body cannot be read', async () => {
+    const vectorizer = createVectorizer({
+      fetchImpl: async () =>
+        ({
+          ok: true,
+          status: 200,
+          text: async () => {
+            throw new Error('connection reset while streaming the body');
+          },
+        }) as unknown as Response,
+      vectorizerToken: 't',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(!result.ok && result.retryable);
+    assert.equal(result.costUsd, IMAGE_COST_USD.vectorizer);
+  });
+
+  it('bills a 200 whose SVG fails the true-vector self-check', async () => {
+    const vectorizer = createVectorizer({
+      fetchImpl: async () =>
+        new Response('<svg viewBox="0 0 10 10"><image href="data:image/png;base64,AAA"/></svg>', {
+          status: 200,
+        }),
+      vectorizerToken: 't',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(!result.ok && !result.retryable);
+    assert.equal(result.costUsd, IMAGE_COST_USD.vectorizer);
+  });
+
+  it('leaves costUsd ABSENT for every failure that never reached the vendor', async () => {
+    const rejected = await createVectorizer({
+      fetchImpl: async () => new Response('nope', { status: 402 }),
+      vectorizerToken: 't',
+    }).toVector({ png: PNG });
+    assert.ok(!rejected.ok);
+    assert.equal(rejected.costUsd, undefined);
+
+    const dropped = await createVectorizer({
+      fetchImpl: async () => {
+        throw new Error('socket hang up');
+      },
+      vectorizerToken: 't',
+    }).toVector({ png: PNG });
+    assert.ok(!dropped.ok);
+    assert.equal(dropped.costUsd, undefined);
+
+    // The Recraft short-circuit never touches the network, so ITS failures
+    // really are free — this is the case `costUsd: 0` would have blurred.
+    const native = await createVectorizer({
+      fetchImpl: unreachableFetch,
+      vectorizerToken: 't',
+    }).toVector({ png: PNG, nativeSvg: '<svg viewBox="0 0 10 10"><image href="#x"/></svg>' });
+    assert.ok(!native.ok);
+    assert.equal(native.costUsd, undefined);
+  });
+});

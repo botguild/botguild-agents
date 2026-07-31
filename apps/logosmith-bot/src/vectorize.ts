@@ -112,7 +112,23 @@ export interface Vectorizer {
 
 export type VectorizeResult =
   | { ok: true; svg: string; source: 'recraft-native' | 'vectorizer'; costUsd: number }
-  | { ok: false; retryable: boolean; error: string };
+  | {
+      ok: false;
+      retryable: boolean;
+      error: string;
+      /**
+       * What Vectorizer.ai charged for a call that still failed — the same
+       * contract `GenerateResult.costUsd` documents, one layer out. A response
+       * that arrives `HTTP 200` and then fails (`response.text()` throwing on a
+       * truncated body, or an SVG that fails the true-vector self-check) was
+       * PAID FOR. Present on exactly those branches, absent otherwise, and the
+       * caller must credit it to the ledger before it parks.
+       *
+       * The Recraft-native short-circuit never touches the network, so its
+       * failures carry nothing: they really are free.
+       */
+      costUsd?: number;
+    };
 
 export function createVectorizer(deps: {
   fetchImpl: FetchLike;
@@ -191,15 +207,23 @@ export function createVectorizer(deps: {
         };
       }
 
+      // PAST THIS LINE THE VENDOR HAS BEEN BILLED: the trace ran and returned
+      // 200. Both failures below are PAID failures and say so, because the
+      // FR-5 ledger is the only bound on the park loop they feed (a retryable
+      // failure deliberately consumes no attempt — Task 18 Ruling 1).
+      const billed = IMAGE_COST_USD.vectorizer;
+
       let svgText: string;
       try {
         svgText = await response.text();
       } catch (err) {
-        return { ok: false, retryable: true, error: errorMessage(err) };
+        return { ok: false, retryable: true, error: errorMessage(err), costUsd: billed };
       }
 
       const processed = finalizeVector(svgText);
-      if (!processed.ok) return { ok: false, retryable: false, error: processed.error };
+      if (!processed.ok) {
+        return { ok: false, retryable: false, error: processed.error, costUsd: billed };
+      }
       return {
         ok: true,
         svg: processed.svg,

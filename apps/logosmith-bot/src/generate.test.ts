@@ -282,3 +282,133 @@ describe('generate', () => {
     assert.ok(!result.ok && result.retryable);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A FAILURE IS NOT AUTOMATICALLY A FREE FAILURE.
+//
+// Every branch below sits AFTER the vendor returned 200, i.e. after it ran the
+// generation and billed for it. Because a retryable failure deliberately
+// consumes no FR-5 attempt (Task 18 Ruling 1), `spendUsd` is the ONLY thing
+// that can bound the park → unpark → regenerate → park loop these failures
+// feed — and it can only bound spend it is told about. A missing `costUsd`
+// here is 25 billed images reported to the buyer as $0.00.
+//
+// The pre-200 branches are asserted alongside, because `costUsd: 0` and
+// `costUsd: undefined` mean different things and the difference is the point.
+// ---------------------------------------------------------------------------
+describe('generate — paid failures are visible to the spend ledger', () => {
+  const ideogramOk = (url: string) => async () =>
+    new Response(JSON.stringify({ created: 'ts', data: [{ url }] }), {
+      status: 200,
+      headers: { 'x-request-id': 'req-paid' },
+    });
+  const recraftOk = (url: string) => async () =>
+    new Response(JSON.stringify({ id: 'rc-paid', data: [{ url }] }), { status: 200 });
+
+  const make = (handlers: Record<string, () => Promise<Response>>, ai = noAi) =>
+    createGenerator({
+      fetchImpl: fetchStub(handlers),
+      ai,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+
+  it('bills an Ideogram response that carries no image url', async () => {
+    const generator = createGenerator({
+      fetchImpl: fetchStub({
+        'ideogram.ai': async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+      }),
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const result = await generator.generate(ideogramAxis, 'p');
+    assert.ok(!result.ok);
+    assert.equal(result.costUsd, IMAGE_COST_USD.ideogram);
+  });
+
+  it('bills an Ideogram generation whose asset link is dead', async () => {
+    // The realistic shape: Ideogram's `data[0].url` is signed with a 24 h
+    // expiry, so a slow queue, a DLQ replay or a CDN blip lands exactly here —
+    // with the image already generated and paid for.
+    const result = await make({
+      'ideogram.ai': ideogramOk('https://cdn/x.png'),
+      cdn: async () => new Response('gone', { status: 404 }),
+    }).generate(ideogramAxis, 'p');
+    assert.ok(!result.ok && result.retryable);
+    assert.equal(result.costUsd, IMAGE_COST_USD.ideogram);
+  });
+
+  it('bills an Ideogram asset that is not a PNG', async () => {
+    const result = await make({
+      'ideogram.ai': ideogramOk('https://cdn/x.png'),
+      cdn: async () => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 }),
+    }).generate(ideogramAxis, 'p');
+    assert.ok(!result.ok);
+    assert.equal(result.costUsd, IMAGE_COST_USD.ideogram);
+  });
+
+  it('bills a Recraft response with no image url, a dead link, and an unusable asset', async () => {
+    const noUrl = await make({
+      'recraft.ai': async () => new Response(JSON.stringify({ id: 'rc' }), { status: 200 }),
+    }).generate(recraftAxis, 'p');
+    const deadLink = await make({
+      'recraft.ai': recraftOk('https://cdn/x.png'),
+      cdn: async () => new Response('gone', { status: 410 }),
+    }).generate(recraftAxis, 'p');
+    const notAnImage = await make({
+      'recraft.ai': recraftOk('https://cdn/x.bin'),
+      cdn: async () => new Response('not an image', { status: 200 }),
+    }).generate(recraftAxis, 'p');
+
+    for (const result of [noUrl, deadLink, notAnImage]) {
+      assert.ok(!result.ok);
+      assert.equal(result.costUsd, IMAGE_COST_USD.recraft);
+    }
+  });
+
+  it('bills a Workers AI run that came back without a usable image', async () => {
+    const noImage = await make({}, { run: async () => ({}) as Record<string, unknown> }).generate(
+      fluxAxis,
+      'p',
+    );
+    const notBase64 = await make({}, { run: async () => ({ image: '!!!not base64!!!' }) }).generate(
+      fluxAxis,
+      'p',
+    );
+    const notPng = await make(
+      {
+        // no fetch handlers: flux never touches fetch
+      },
+      { run: async () => ({ image: Buffer.from([1, 2, 3, 4]).toString('base64') }) },
+    ).generate(fluxAxis, 'p');
+
+    for (const result of [noImage, notBase64, notPng]) {
+      assert.ok(!result.ok);
+      assert.equal(result.costUsd, IMAGE_COST_USD.flux);
+    }
+  });
+
+  it('leaves costUsd ABSENT when the vendor was never billed', async () => {
+    // A non-200 status and a transport throw both mean the generation never
+    // ran. `undefined` rather than 0, so the caller can tell "free failure"
+    // from "billed $0.00" — they are different facts.
+    const rejected = await make({
+      'ideogram.ai': async () => new Response('no', { status: 400 }),
+    }).generate(ideogramAxis, 'p');
+    assert.ok(!rejected.ok);
+    assert.equal(rejected.costUsd, undefined);
+
+    const generator = createGenerator({
+      fetchImpl: async () => {
+        throw new Error('socket hang up');
+      },
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const dropped = await generator.generate(ideogramAxis, 'p');
+    assert.ok(!dropped.ok);
+    assert.equal(dropped.costUsd, undefined);
+  });
+});

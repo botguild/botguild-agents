@@ -36,6 +36,7 @@ import {
 } from '@botguild/agent-core-workers';
 import { parseFaviconBrief, resolveBrief } from './brief.js';
 import {
+  MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
   STUCK_CLAIM_MINUTES,
@@ -551,28 +552,46 @@ async function pollSelections(s: SweepServices): Promise<void> {
 // --- Parked jobs --------------------------------------------------------------
 
 /**
+ * Why a parked job is being given up on. Two independent bounds, and the note
+ * has to say which one fired because they are different facts about the job.
+ */
+export type GiveUpReason =
+  /** `parked_since` is older than PARKED_GIVE_UP_HOURS. */
+  | { kind: 'age'; blockedSinceMs: number }
+  /** Realized vendor spend has passed MAX_SPEND_USD (see `sweepParkedJobs`). */
+  | { kind: 'spend' };
+
+/**
  * The give-up note.
  *
- * EVERY DURATION CLAIM HERE IS SUBSTANTIATED BY `parked_since`, and no more
- * than that. It says work has been blocked since a recorded instant, and that
- * the job is blocked on a named vendor RIGHT NOW (`park_reason`). It does NOT
- * claim that vendor was continuously unavailable for the whole span — the row
- * cannot prove that, and an earlier draft asserted it anyway.
+ * EVERY CLAIM HERE IS SUBSTANTIATED BY A PERSISTED COLUMN, and no more than
+ * that. The age branch says work has been blocked since a recorded instant
+ * (`parked_since`) and that the job is blocked on a named vendor RIGHT NOW
+ * (`park_reason`); it does NOT claim that vendor was continuously unavailable
+ * for the whole span — the row cannot prove that, and an earlier draft asserted
+ * it anyway. The spend branch quotes `spent_usd` and the cap, both real
+ * numbers, and claims nothing about duration.
  *
  * The closing paragraph is per stage, because the remedy differs: M2 leaves the
  * buyer holding delivered concepts, and a free-funnel job (`single`, PRD
  * US-2/US-3) has no escrow to release, so telling those buyers to cancel to
  * release one would be nonsense.
  */
-function buildGiveUpNote(job: JobRow, blockedSinceMs: number, nowMs: number): string {
+function buildGiveUpNote(job: JobRow, reason: GiveUpReason, nowMs: number): string {
   const vendor = vendorFor(job.parkReason);
-  const hours = Math.floor((nowMs - blockedSinceMs) / (60 * 60 * 1000));
   const blocked =
-    `Work on this contract has been blocked since ${new Date(blockedSinceMs).toISOString()} — ` +
-    `over ${hours} hours — and LogoSmith has been retrying automatically every fifteen minutes ` +
-    `that whole time. It is currently waiting on ${vendor}, which is still not responding. ` +
-    `Rather than hold this contract open past its delivery window without a word, LogoSmith is ` +
-    `stopping here.`;
+    reason.kind === 'age'
+      ? `Work on this contract has been blocked since ` +
+        `${new Date(reason.blockedSinceMs).toISOString()} — over ` +
+        `${Math.floor((nowMs - reason.blockedSinceMs) / (60 * 60 * 1000))} hours — and LogoSmith ` +
+        `has been retrying automatically every fifteen minutes that whole time. It is currently ` +
+        `waiting on ${vendor}, which is still not responding. Rather than hold this contract ` +
+        `open past its delivery window without a word, LogoSmith is stopping here.`
+      : `Work on this contract has failed and been retried repeatedly, and those retries have ` +
+        `now cost LogoSmith $${job.spentUsd.toFixed(2)} of its own vendor budget against a ` +
+        `$${MAX_SPEND_USD.toFixed(2)} per-job cap — without producing anything deliverable. It ` +
+        `is currently blocked on ${vendor}. Rather than keep buying attempts for a job that is ` +
+        `not converging, LogoSmith is stopping here. You have not been charged for any of it.`;
 
   if (job.stage === 'vector') {
     return [
@@ -629,22 +648,25 @@ function buildGiveUpNote(job: JobRow, blockedSinceMs: number, nowMs: number): st
 async function giveUpOnParkedJob(
   s: SweepServices,
   job: JobRow,
-  blockedSinceMs: number,
+  reason: GiveUpReason,
 ): Promise<void> {
   const nowMs = clockOf(s)().getTime();
-  await s.client.sendMessage(job.contractId, buildGiveUpNote(job, blockedSinceMs, nowMs));
+  await s.client.sendMessage(job.contractId, buildGiveUpNote(job, reason, nowMs));
   await s.jobs.recordGateAudit({
     jobKey: job.jobKey,
     contractId: job.contractId,
     gate: 'parked-give-up',
     result: 'aborted',
     detail: {
+      bound: reason.kind,
       parkReason: job.parkReason,
       stage: job.stage,
       parkedSince: job.parkedSince,
-      blockedHours: (nowMs - blockedSinceMs) / (60 * 60 * 1000),
+      blockedHours:
+        reason.kind === 'age' ? (nowMs - reason.blockedSinceMs) / (60 * 60 * 1000) : null,
       giveUpAfterHours: PARKED_GIVE_UP_HOURS,
       spentUsd: job.spentUsd,
+      maxSpendUsd: MAX_SPEND_USD,
     },
   });
   await s.jobs.markDelivered(job.jobKey, 'aborted');
@@ -653,10 +675,12 @@ async function giveUpOnParkedJob(
       jobKey: job.jobKey,
       contractId: job.contractId,
       stage: job.stage,
+      bound: reason.kind,
       parkReason: job.parkReason,
       parkedSince: job.parkedSince,
+      spentUsd: job.spentUsd,
     },
-    'parked job exceeded the give-up bound; buyer notified and job aborted',
+    'parked job exceeded a give-up bound; buyer notified and job aborted',
   );
 }
 
@@ -679,6 +703,25 @@ async function giveUpOnParkedJob(
  * unable to finish". A parked row without one predates the column: it is
  * re-enqueued as normal and acquires one at its next park, so the bound
  * self-heals rather than guessing.
+ *
+ * THE CLOCK IS NOT THE ONLY BOUND, BECAUSE MONEY IS THE OTHER AXIS. A retryable
+ * vendor failure consumes no FR-5 attempt (Task 18 Ruling 1), so `attempts`
+ * cannot stop this loop — and a failure that happened AFTER the vendor billed
+ * us (a dead asset link, an unreadable 200) spends real money every cycle.
+ * Six hours at the fifteen-minute cadence is twenty-four of those. So a job
+ * whose REALIZED spend has passed `MAX_SPEND_USD` is given up on immediately,
+ * whatever the clock says.
+ *
+ * `>` NOT `>=`, AND THAT IS LOAD-BEARING. `decideSlotAction` stops at
+ * `>= MAX_SPEND_USD`, and today's worst legitimate stage-1 burn lands EXACTLY
+ * on the cap (config.ts's MAX_SPEND_USD comment: zero slack by design). A `>=`
+ * here would abort a job that had merely used its full, contracted
+ * regeneration allowance and then hit one transient OCR outage — a job with
+ * paid bytes safe in R2 that the very next sweep would have re-gated for free
+ * and delivered. `>` fires only once a park loop has actually spent PAST the
+ * cap, which nothing but a billed failure can do, and it bounds that overshoot
+ * at one generation because the paid-failure path parks and returns
+ * immediately.
  */
 async function sweepParkedJobs(s: SweepServices): Promise<void> {
   const giveUpBefore = clockOf(s)().getTime() - PARKED_GIVE_UP_HOURS * 60 * 60 * 1000;
@@ -692,7 +735,11 @@ async function sweepParkedJobs(s: SweepServices): Promise<void> {
     try {
       const parkedSince = parseInstant(job.parkedSince);
       if (Number.isFinite(parkedSince) && parkedSince < giveUpBefore) {
-        await giveUpOnParkedJob(s, job, parkedSince);
+        await giveUpOnParkedJob(s, job, { kind: 'age', blockedSinceMs: parkedSince });
+        continue;
+      }
+      if (job.spentUsd > MAX_SPEND_USD) {
+        await giveUpOnParkedJob(s, job, { kind: 'spend' });
         continue;
       }
       await s.jobs.unpark(job.jobKey);
