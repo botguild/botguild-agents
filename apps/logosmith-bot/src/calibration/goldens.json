@@ -1,0 +1,66 @@
+[
+  { "name": "Nova", "note": "plain, short, simple baseline" },
+  { "name": "Marlowe & Finch", "note": "ampersand joining two capitalized surnames" },
+  {
+    "name": "X",
+    "note": "single character — hard case: for length-1 strings the Levenshtein ratio is all-or-nothing, no partial credit is possible"
+  },
+  { "name": "Q", "note": "single character, distinct glyph shape from X" },
+  {
+    "name": "ACME",
+    "note": "all-caps, 4 letters — the same placeholder name used in gates/ocr.test.ts"
+  },
+  { "name": "ZENITH Ironworks", "note": "all-caps first word paired with a lowercase second word" },
+  { "name": "Café Núñez", "note": "diacritics é, ú, ñ — must fold under NFKD before matching" },
+  { "name": "Château Bleu", "note": "diacritic â, a different accent pattern than Café Núñez" },
+  { "name": "Oak-Ridge Provisions", "note": "hyphenated compound word" },
+  {
+    "name": "Trans-Atlantic Freight Co.",
+    "note": "hyphen plus an abbreviation period, ornate multi-word"
+  },
+  { "name": "Zzyzx Traders", "note": "repeated letters (zz) and an unusual leading cluster" },
+  { "name": "Bubblegum Alley", "note": "repeated letters (bb, ll) inside a common word" },
+  {
+    "name": "Mississippi Mercantile",
+    "note": "heavily repeated letters (ss, ss, pp) — classic Levenshtein stress case"
+  },
+  { "name": "Loop Coop", "note": "repeated 'oo' digraph in both words" },
+  { "name": "Willow & Wren", "note": "ampersand, plain nature words" },
+  { "name": "Salt & Cedar Supply", "note": "ampersand, three-word variant" },
+  { "name": "Ridgeline", "note": "plain single word" },
+  { "name": "Norwood Analytics", "note": "plain two-word, corporate-sounding" },
+  { "name": "The Gilded Quill", "note": "ornate, includes a leading article" },
+  { "name": "Velvet & Ash Studio", "note": "ampersand, ornate/moody styling" },
+  {
+    "name": "Windermere Provisions Co.",
+    "note": "long ornate multi-word name with an abbreviation"
+  },
+  { "name": "Sable & Thorne", "note": "ampersand, ornate two-surname style" },
+  { "name": "Lumenhart Collective", "note": "invented compound word, ornate single-word core" },
+  {
+    "name": "Harbor & Vine",
+    "note": "shared with gates/ocr.test.ts's fixtures — a known-quantity baseline for cross-checking gate behaviour"
+  },
+  {
+    "name": "Ñandú Studio",
+    "note": "leading diacritic (Ñ) — tests normalization at the start of a string"
+  },
+  { "name": "Brønby Fisheries", "note": "Nordic diacritic (ø) inside a compound trade name" },
+  {
+    "name": "7th Street Roasters",
+    "note": "leading digit — normalizeForMatch does NOT fold digits, so this must survive unchanged through matching"
+  },
+  { "name": "Route 9 Diner", "note": "embedded digit mid-name" },
+  { "name": "APEX METALWORKS", "note": "fully all-caps, two words, industrial styling" },
+  {
+    "name": "Northbridge & Fenwick Trading Co.",
+    "note": "long, ornate, ampersand plus abbreviation — the most ornate end of the spread"
+  },
+  { "name": "Kip & Ko", "note": "short ampersand name, both sides under 4 letters" },
+  { "name": "Ebb & Flow Goods", "note": "ampersand with plain, minimal styling on each side" },
+  {
+    "name": "Ooo La Studio",
+    "note": "triple repeated letter ('Ooo') at the very start of the name — an extreme repeated-letter case"
+  },
+  { "name": "Fizz", "note": "double letter ('zz') inside a very short plain word" }
+]
