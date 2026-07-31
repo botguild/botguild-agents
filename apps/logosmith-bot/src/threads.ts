@@ -337,3 +337,55 @@ export function findSelection(messages: ThreadMessage[], botId: string): number 
   }
   return null;
 }
+
+/** What a scoped scan of a thread found. See `findSelectionIn`. */
+export interface ScopedSelection {
+  /** The first parseable buyer reply naming a concept in `allowed`, else null. */
+  selected: number | null;
+  /**
+   * The first parseable buyer reply naming a concept NOT in `allowed`, else
+   * null. Reported so the caller can tell the buyer their pick cannot be built;
+   * it is never a winner.
+   */
+  unavailable: number | null;
+}
+
+/**
+ * `findSelection`, scoped to the concepts that were actually delivered.
+ *
+ * WHY THIS EXISTS. `findSelection` returns the first parseable buyer reply
+ * whatever slot it names, and a caller that then refuses an undelivered slot is
+ * stuck on it forever: every later sweep re-reads the same first reply and
+ * never reaches the correction. On a `partial` Milestone 1 that is an ordinary
+ * sequence, not an exotic one — the delivery note names the missing slot by
+ * number and the progress page renders a card for it — so a buyer told "reply
+ * with one of these" would type a correction that could never take effect.
+ * This function scans past a pick that cannot be built and keeps looking.
+ *
+ * THIS DOES NOT WEAKEN THE FIRST-WINS RULE. `findSelection` takes the first
+ * reply to stay consistent with `SelectionStore.select`, which is itself
+ * first-write-wins, so that a buyer cannot re-point a job already in flight. A
+ * pick outside `allowed` is REFUSED — it writes nothing, starts nothing, and
+ * changes no persisted state — so skipping it cannot re-point anything. Two
+ * replies that both name delivered concepts still resolve to the first, exactly
+ * as before.
+ *
+ * `allowed` empty means nothing is selectable, and every reply is reported as
+ * `unavailable`. Bot-authored messages are excluded before parsing, for the
+ * reasons in `findSelection`'s doc comment.
+ */
+export function findSelectionIn(
+  messages: ThreadMessage[],
+  botId: string,
+  allowed: ReadonlySet<number>,
+): ScopedSelection {
+  let unavailable: number | null = null;
+  for (const message of messages) {
+    if (message.senderId === botId) continue;
+    const slot = parseSelection(message.body ?? '');
+    if (slot === null) continue;
+    if (allowed.has(slot)) return { selected: slot, unavailable };
+    unavailable ??= slot;
+  }
+  return { selected: null, unavailable };
+}

@@ -1,0 +1,15 @@
+-- When a job FIRST parked and has not reached a terminal state since.
+--
+-- The 15-minute cron's give-up bound needs to know how long a job has been
+-- failing, and no existing column answers that. `updated_at` is reset by every
+-- unpark, so on a park -> unpark -> fail -> park loop it never accumulates past
+-- one cron interval. `created_at` is stable but measures age-since-claim, so a
+-- job whose Queue send was lost sits idle for a day, parks once on a transient
+-- blip, and would be aborted immediately with a note claiming a six-hour outage
+-- that never happened.
+--
+-- Written by `park()` only when it is still NULL (so a re-park inside the same
+-- failing spell does not restart the clock) and cleared by `markDelivered()`
+-- (so a job that recovers and completes leaves nothing stale behind). It is
+-- only meaningful while `status = 'parked'`.
+ALTER TABLE jobs ADD COLUMN parked_since TEXT;

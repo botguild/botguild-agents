@@ -28,7 +28,7 @@ import {
   type SelectionStore,
 } from './jobs.js';
 import { findSelection, parseSelection } from './threads.js';
-import { SELECTION_TIMEOUT_HOURS, STUCK_CLAIM_MINUTES } from './config.js';
+import { PARKED_GIVE_UP_HOURS, SELECTION_TIMEOUT_HOURS, STUCK_CLAIM_MINUTES } from './config.js';
 import {
   decideDefaultSelection,
   maybePropose,
@@ -43,9 +43,6 @@ const logger = createConsoleLogger({ service: 'test', botId: 'bot-logosmith', le
 const BOT_ID = 'bot-logosmith';
 const API_URL = 'https://api.example.com';
 const BUYER = 'handler-buyer';
-
-/** The give-up bound asserted here, kept in one place. Mirrors sweeps.ts. */
-const GIVE_UP_HOURS = 6;
 
 const HOUR = 60 * 60 * 1000;
 const MINUTE = 60 * 1000;
@@ -648,6 +645,122 @@ describe('selection poll', () => {
     assert.equal((await h.selection.get('c-wrong'))?.winnerSlot, 2);
     assert.equal((await h.selection.get('c-wrong'))?.source, 'default');
   });
+
+  it('honours the correction after a refused pick, instead of fixating on it', async () => {
+    // The whole point of scoping the scan: we TELL the buyer to reply with one
+    // of the delivered concepts, so that reply has to work. Taking the first
+    // parseable reply regardless means every later sweep re-reads the refused
+    // one and the correction is ignored forever.
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-fix',
+      delivered: [1, 2],
+      scores: { 1: 0.87, 2: 0.93, 3: 0.99 },
+      m1At,
+    });
+    h.threads.set('c-fix', [
+      buyerSays('m1', 'concept 3', new Date(m1At.getTime() + MINUTE)),
+      buyerSays('m2', 'concept 2', new Date(m1At.getTime() + 5 * MINUTE)),
+    ]);
+    // Fixture preconditions: both replies parse, and the refused one is FIRST.
+    assert.equal(parseSelection('concept 3'), 3);
+    assert.equal(parseSelection('concept 2'), 2);
+
+    await runFifteenMinuteSweep(h.services);
+
+    const persisted = await h.selection.get('c-fix');
+    assert.equal(persisted?.state, 'winner_selected');
+    assert.equal(persisted?.winnerSlot, 2);
+    assert.equal(persisted?.source, 'buyer', 'the correction is the buyer’s choice, not a default');
+    assert.deepEqual(h.queueSent, [
+      { contractId: 'c-fix', jobKey: await buildJobKey('c-fix', 'vector'), stage: 'vector' },
+    ]);
+    // The refused pick is still explained — scanning past it must not silence
+    // the note that told them to correct it.
+    assert.equal(h.messagesSent.length, 1);
+    assert.match(h.messagesSent[0].body, /concept 3 was not part of the Milestone 1 delivery/);
+  });
+
+  it('still takes the FIRST of two deliverable picks (first-wins is unchanged)', async () => {
+    // The rule findSelectionIn must not have weakened: skipping a REFUSED pick
+    // is safe because it writes nothing, but two picks that could each be built
+    // still resolve to the earlier one — consistent with select()'s own
+    // first-write-wins, so a buyer cannot re-point a job already in flight.
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-first',
+      delivered: [1, 2, 3],
+      scores: { 1: 0.87, 2: 0.93, 3: 0.99 },
+      m1At,
+    });
+    h.threads.set('c-first', [
+      buyerSays('m1', 'concept 1', new Date(m1At.getTime() + MINUTE)),
+      buyerSays('m2', 'concept 3', new Date(m1At.getTime() + 5 * MINUTE)),
+    ]);
+    // Fixture preconditions: BOTH parse and BOTH are deliverable, so ordering is
+    // the only thing deciding the outcome.
+    assert.equal(parseSelection('concept 1'), 1);
+    assert.equal(parseSelection('concept 3'), 3);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal((await h.selection.get('c-first'))?.winnerSlot, 1);
+    assert.equal((await h.selection.get('c-first'))?.source, 'buyer');
+    assert.deepEqual(h.messagesSent, []);
+  });
+
+  it('asks the buyer for help when it cannot prove what M1 delivered', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    // A selection row with no stage-1 checkpoint behind it: nothing is provably
+    // deliverable, so no pick can be honoured and nothing can be ranked.
+    await h.at(m1At, () => h.selection.open('c-blind'));
+    h.threads.set('c-blind', [buyerSays('m1', 'concept 2', new Date(m1At.getTime() + MINUTE))]);
+    assert.equal(await h.jobs.get(await buildJobKey('c-blind', 'concepts')), null);
+
+    await runFifteenMinuteSweep(h.services);
+
+    // Refusing to select is right; going quiet on a funded contract is not.
+    assert.equal((await h.selection.get('c-blind'))?.state, 'concepts_delivered');
+    assert.deepEqual(h.queueSent, []);
+    assert.equal(h.messagesSent.length, 1);
+    assert.match(h.messagesSent[0].body, /needs a hand with this contract/);
+    assert.match(h.messagesSent[0].body, /Reply in this thread naming the concept you want/);
+
+    // Once, not once every fifteen minutes — and still once past the timeout.
+    await runFifteenMinuteSweep(h.services);
+    h.clock.value = new Date(m1At.getTime() + (SELECTION_TIMEOUT_HOURS + 1) * HOUR);
+    await runFifteenMinuteSweep(h.services);
+    assert.equal(h.messagesSent.length, 1);
+    assert.equal((await h.selection.get('c-blind'))?.state, 'concepts_delivered');
+  });
+
+  it('does not treat a digits-only timestamp as later than M1', async () => {
+    // `Date.parse('12345')` is the YEAR 12345, so a lenient parse would sort a
+    // pre-M1 reply AFTER the delivery and select it — inverting the slice.
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-epoch',
+      delivered: [1, 2, 3],
+      scores: { 1: 0.86, 2: 0.88, 3: 0.9 },
+      m1At,
+    });
+    h.threads.set('c-epoch', [
+      { id: 'm1', sender_id: BUYER, sender_bot_id: null, content: '2', created_at: '12345' },
+    ]);
+    // Fixture preconditions: the reply parses, and a bare Date.parse really
+    // does read that timestamp as being far in the future.
+    assert.equal(parseSelection('2'), 2);
+    assert.ok(Date.parse('12345') > m1At.getTime());
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal((await h.selection.get('c-epoch'))?.state, 'concepts_delivered');
+    assert.deepEqual(h.queueSent, []);
+  });
 });
 
 // ===============================================================================
@@ -720,30 +833,46 @@ describe('resolveSelectionForContract (force)', () => {
 // Parked jobs
 // ===============================================================================
 
-/** Claim a job at `claimedAt`, then park it at `parkedAt`. */
+/**
+ * Claim a job, park it, and optionally put it through one unpark -> re-park
+ * cycle — which is what the cron does to every parked job it re-enqueues, and
+ * therefore the state any give-up clock has to survive.
+ */
 async function seedParked(
   h: Harness,
-  args: { contractId: string; stage: JobStage; reason: string; claimedAt: Date; parkedAt: Date },
+  args: {
+    contractId: string;
+    stage: JobStage;
+    reason: string;
+    claimedAt: Date;
+    firstParkAt: Date;
+    reparkAt?: Date;
+  },
 ): Promise<string> {
   const jobKey = await buildJobKey(args.contractId, args.stage);
   await h.at(args.claimedAt, () => h.jobs.claim(jobKey, args.contractId, args.stage));
-  await h.at(args.parkedAt, () => h.jobs.park(jobKey, args.reason));
+  await h.at(args.firstParkAt, () => h.jobs.park(jobKey, args.reason));
+  if (args.reparkAt) {
+    await h.at(args.reparkAt, async () => {
+      await h.jobs.unpark(jobKey);
+      await h.jobs.park(jobKey, args.reason);
+    });
+  }
   return jobKey;
 }
 
 describe('parked-job sweep', () => {
   it('unparks and re-enqueues a job that is still within the give-up bound', async () => {
     const h = await makeHarness();
-    const claimedAt = new Date(BASE.getTime() - 5 * HOUR);
+    const firstParkAt = new Date(BASE.getTime() - 20 * MINUTE);
     const jobKey = await seedParked(h, {
       contractId: 'c-parked',
       stage: 'concepts',
       reason: 'vendor_outage',
-      claimedAt,
-      parkedAt: new Date(BASE.getTime() - 20 * MINUTE),
+      claimedAt: new Date(BASE.getTime() - 5 * HOUR),
+      firstParkAt,
     });
-    // Fixture precondition: this job is genuinely inside the bound.
-    assert.ok(BASE.getTime() - claimedAt.getTime() < GIVE_UP_HOURS * HOUR);
+    assert.ok(BASE.getTime() - firstParkAt.getTime() < PARKED_GIVE_UP_HOURS * HOUR);
 
     await runFifteenMinuteSweep(h.services);
 
@@ -751,6 +880,10 @@ describe('parked-job sweep', () => {
     const after = await h.jobs.get(jobKey);
     assert.equal(after?.status, 'claimed');
     assert.equal(after?.parkReason, null);
+    // unpark() must NOT clear parked_since: the failing spell is not over
+    // because the cron re-enqueued the job, and clearing it here would reset
+    // the bound on every single cron tick.
+    assert.equal(after?.parkedSince, firstParkAt.toISOString());
     assert.deepEqual(h.messagesSent, []);
   });
 
@@ -761,7 +894,7 @@ describe('parked-job sweep', () => {
       stage: 'vector',
       reason: 'vectorizer_outage',
       claimedAt: new Date(BASE.getTime() - 30 * MINUTE),
-      parkedAt: new Date(BASE.getTime() - 20 * MINUTE),
+      firstParkAt: new Date(BASE.getTime() - 20 * MINUTE),
     });
 
     await runFifteenMinuteSweep(h.services);
@@ -769,23 +902,55 @@ describe('parked-job sweep', () => {
     assert.deepEqual(h.queueSent, [{ contractId: 'c-v', jobKey, stage: 'vector' }]);
   });
 
-  it('gives up on a job parked past the bound: tells the buyer, then aborts it', async () => {
+  it('does not abort a job that only just parked, however old its claim is', async () => {
+    // The reviewer's scenario, and the reason `created_at` is the wrong clock:
+    // a lost Queue send leaves the job claimed for a day, the daily sweep
+    // recovers it, and it parks for the FIRST time on a transient blip. Reading
+    // age-since-claim aborts it on the next sweep — converting a recoverable
+    // blip into a dead contract, and saying so in a note that is false twice
+    // over.
     const h = await makeHarness();
-    // THE CLOCKS ARE THE POINT. created_at is 6h05m old — past the bound — while
-    // updated_at is 0 seconds old, because the park that produced it happened
-    // this instant (exactly what a park -> unpark -> fail -> park loop looks
-    // like at every cron tick). An implementation reading updated_at re-enqueues
-    // this job forever and fails this test.
-    const claimedAt = new Date(BASE.getTime() - (GIVE_UP_HOURS * HOUR + 5 * MINUTE));
+    const claimedAt = new Date(BASE.getTime() - 24 * HOUR);
+    const firstParkAt = new Date(BASE.getTime() - 10 * MINUTE);
+    const jobKey = await seedParked(h, {
+      contractId: 'c-lostsend',
+      stage: 'concepts',
+      reason: 'ocr_outage',
+      claimedAt,
+      firstParkAt,
+    });
+    // Fixture preconditions, inline and in both directions.
+    assert.ok(BASE.getTime() - claimedAt.getTime() > PARKED_GIVE_UP_HOURS * HOUR);
+    assert.ok(BASE.getTime() - firstParkAt.getTime() < PARKED_GIVE_UP_HOURS * HOUR);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(h.queueSent, [{ contractId: 'c-lostsend', jobKey, stage: 'concepts' }]);
+    assert.deepEqual(h.messagesSent, [], 'a job blocked for ten minutes must not be aborted');
+    assert.equal((await h.jobs.get(jobKey))?.status, 'claimed');
+  });
+
+  it('gives up on a job blocked past the bound: tells the buyer, then aborts it', async () => {
+    const h = await makeHarness();
+    // THE THREE CLOCKS ARE THE POINT, and only one of them is right:
+    //   parked_since  6h05m old  -> past the bound, give up            (correct)
+    //   updated_at    0m old     -> a re-park happened this instant    (too new)
+    //   created_at    7h old     -> also past the bound, but see the test above
+    // The re-park is what a park -> unpark -> fail -> park loop does at every
+    // cron tick; an implementation reading updated_at re-enqueues this job
+    // forever.
+    const firstParkAt = new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + 5 * MINUTE));
     const jobKey = await seedParked(h, {
       contractId: 'c-dead',
       stage: 'concepts',
       reason: 'vendor_outage',
-      claimedAt,
-      parkedAt: BASE,
+      claimedAt: new Date(BASE.getTime() - 7 * HOUR),
+      firstParkAt,
+      reparkAt: BASE,
     });
     const parked = await h.jobs.get(jobKey);
-    assert.ok(BASE.getTime() - Date.parse(parked!.createdAt) > GIVE_UP_HOURS * HOUR);
+    assert.equal(parked?.parkedSince, firstParkAt.toISOString());
+    assert.ok(BASE.getTime() - Date.parse(parked!.parkedSince!) > PARKED_GIVE_UP_HOURS * HOUR);
     assert.equal(Date.parse(parked!.updatedAt), BASE.getTime());
 
     await runFifteenMinuteSweep(h.services);
@@ -800,16 +965,66 @@ describe('parked-job sweep', () => {
     assert.match(h.messagesSent[0].body, /could not deliver this contract/);
     assert.match(h.messagesSent[0].body, /image-generation vendor/);
     assert.match(h.messagesSent[0].body, /cannot cancel or refund a contract itself/);
+    // Every duration claim is substantiated: the note quotes the recorded
+    // blocked-since instant and the elapsed hours, and does NOT assert the
+    // vendor was continuously unavailable for a span the row cannot prove.
+    assert.match(h.messagesSent[0].body, /blocked since 2026-07-30T\d\d:\d\d/);
+    assert.match(h.messagesSent[0].body, /over 6 hours/);
+    assert.doesNotMatch(h.messagesSent[0].body, /unavailable continuously/);
 
     const trail = await h.jobs.listGateAudit(jobKey, 'parked-give-up');
     assert.equal(trail.length, 1);
     assert.equal(trail[0].result, 'aborted');
-    assert.equal((trail[0].detail as { parkReason: string }).parkReason, 'vendor_outage');
+    const detail = trail[0].detail as { parkReason: string; parkedSince: string };
+    assert.equal(detail.parkReason, 'vendor_outage');
+    assert.equal(detail.parkedSince, firstParkAt.toISOString());
 
     // Terminal: the next sweep does not see it at all.
     await runFifteenMinuteSweep(h.services);
     assert.equal(h.messagesSent.length, 1);
     assert.deepEqual(h.queueSent, []);
+  });
+
+  it('survives a full day of unpark/re-park cycles without resetting the clock', async () => {
+    // Twenty-four cron ticks — the exact loop the bound exists to stop. If any
+    // of them restarted the clock, this job would never be given up on.
+    const h = await makeHarness();
+    const firstParkAt = new Date(BASE.getTime() - 6 * HOUR - 15 * MINUTE);
+    const jobKey = await buildJobKey('c-loop', 'concepts');
+    await h.at(new Date(firstParkAt.getTime() - MINUTE), () =>
+      h.jobs.claim(jobKey, 'c-loop', 'concepts'),
+    );
+    await h.at(firstParkAt, () => h.jobs.park(jobKey, 'vendor_outage'));
+    for (let tick = 1; tick <= 24; tick++) {
+      await h.at(new Date(firstParkAt.getTime() + tick * 15 * MINUTE), async () => {
+        await h.jobs.unpark(jobKey);
+        await h.jobs.park(jobKey, 'vendor_outage');
+      });
+    }
+    const parked = await h.jobs.get(jobKey);
+    assert.equal(parked?.parkedSince, firstParkAt.toISOString());
+    assert.equal(Date.parse(parked!.updatedAt), firstParkAt.getTime() + 24 * 15 * MINUTE);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal((await h.jobs.get(jobKey))?.outcome, 'aborted');
+    assert.equal(h.messagesSent.length, 1);
+  });
+
+  it('clears the blocked-since clock when a job recovers and completes', async () => {
+    const h = await makeHarness();
+    const jobKey = await seedParked(h, {
+      contractId: 'c-recovered',
+      stage: 'concepts',
+      reason: 'ocr_outage',
+      claimedAt: new Date(BASE.getTime() - 3 * HOUR),
+      firstParkAt: new Date(BASE.getTime() - 2 * HOUR),
+    });
+    await h.jobs.unpark(jobKey);
+    await h.jobs.markDelivered(jobKey, 'delivered');
+    // Nothing stale survives a terminal state: a later, unrelated park starts a
+    // fresh clock rather than inheriting hours the job already recovered from.
+    assert.equal((await h.jobs.get(jobKey))?.parkedSince, null);
   });
 
   it('tells a stage-2 give-up that Milestone 1 still stands', async () => {
@@ -818,8 +1033,8 @@ describe('parked-job sweep', () => {
       contractId: 'c-dead2',
       stage: 'vector',
       reason: 'vectorizer_outage',
-      claimedAt: new Date(BASE.getTime() - (GIVE_UP_HOURS * HOUR + MINUTE)),
-      parkedAt: BASE,
+      claimedAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + 2 * MINUTE)),
+      firstParkAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + MINUTE)),
     });
 
     await runFifteenMinuteSweep(h.services);
@@ -829,21 +1044,40 @@ describe('parked-job sweep', () => {
     assert.match(h.messagesSent[0].body, /vectorization vendor/);
   });
 
+  it('never tells a free-gig buyer to cancel an escrow that does not exist', async () => {
+    const h = await makeHarness();
+    await seedParked(h, {
+      contractId: 'c-free',
+      stage: 'single',
+      reason: 'vendor_outage',
+      claimedAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + 2 * MINUTE)),
+      firstParkAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + MINUTE)),
+    });
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal(h.messagesSent.length, 1);
+    assert.doesNotMatch(h.messagesSent[0].body, /escrow/i);
+    assert.doesNotMatch(h.messagesSent[0].body, /cancel this contract from your side/i);
+    assert.match(h.messagesSent[0].body, /nothing has been charged/i);
+    assert.match(h.messagesSent[0].body, /nothing for you to cancel/i);
+  });
+
   it('never leaks an unrecognized park reason into the buyer-facing note', async () => {
     const h = await makeHarness();
     await seedParked(h, {
       contractId: 'c-odd',
       stage: 'concepts',
       reason: '__proto__',
-      claimedAt: new Date(BASE.getTime() - (GIVE_UP_HOURS * HOUR + MINUTE)),
-      parkedAt: BASE,
+      claimedAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + 2 * MINUTE)),
+      firstParkAt: new Date(BASE.getTime() - (PARKED_GIVE_UP_HOURS * HOUR + MINUTE)),
     });
 
     await runFifteenMinuteSweep(h.services);
 
     assert.equal(h.messagesSent.length, 1);
     assert.doesNotMatch(h.messagesSent[0].body, /__proto__|\[object/);
-    assert.match(h.messagesSent[0].body, /A vendor LogoSmith depends on for this job/);
+    assert.match(h.messagesSent[0].body, /a vendor LogoSmith depends on for this job/i);
   });
 });
 
@@ -966,7 +1200,7 @@ describe('15-minute sweep step isolation', () => {
       stage: 'concepts',
       reason: 'ocr_outage',
       claimedAt: new Date(BASE.getTime() - 20 * MINUTE),
-      parkedAt: new Date(BASE.getTime() - 10 * MINUTE),
+      firstParkAt: new Date(BASE.getTime() - 10 * MINUTE),
     });
 
     // Must not reject: a scheduled handler that throws loses every step after

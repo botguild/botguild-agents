@@ -154,6 +154,32 @@ export const MODERATION_ATTEMPTS_BEFORE_NOTICE = 3;
 /** `claimed` jobs older than this with no checkpoint are re-enqueued (§12). */
 export const STUCK_CLAIM_MINUTES = 30;
 
+/**
+ * How long a job may sit parked before LogoSmith gives up on it, tells the
+ * buyer, and moves it to a terminal state.
+ *
+ * WHY THIS EXISTS. A retryable vendor failure parks WITHOUT consuming an FR-5
+ * regeneration attempt, so that a 45-minute outage cannot burn a paid job's
+ * regeneration budget on a 503 that generated nothing. That leaves parking
+ * itself unbounded: a permanently dead vendor would loop park → unpark → fail →
+ * park forever — no spend, but the job never delivers, never refunds, and never
+ * tells the buyer. This is the independent bound.
+ *
+ * WHY SIX HOURS. The milestone promises one business day. A job parked six
+ * hours has burned a quarter of that with zero progress, after roughly
+ * twenty-four automatic retries at the 15-minute cron cadence. Every transient
+ * outage in this vendor set resolves well inside that window; past it a
+ * permanent cause — a revoked key, a withdrawn model, a suspended account — is
+ * far likelier than a recovering one, and continuing to wait in silence is
+ * worse for the buyer than an honest stop. Six hours also leaves roughly
+ * eighteen hours of the SLA for the buyer to cancel or re-brief INSIDE the
+ * promised window, rather than discovering the failure after it was missed.
+ *
+ * Measured against `jobs.parked_since` — the start of the current failing
+ * spell. See migrations/0002_parked_since.sql for why no other column works.
+ */
+export const PARKED_GIVE_UP_HOURS = 6;
+
 /** Hours after M1 delivery before the default-selection rule fires (FR-9). */
 export const SELECTION_TIMEOUT_HOURS = 72;
 

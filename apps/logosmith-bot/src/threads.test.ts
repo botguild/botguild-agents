@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createThreadReader, findSelection, parseSelection } from './threads.js';
+import { createThreadReader, findSelection, findSelectionIn, parseSelection } from './threads.js';
 import type { ThreadMessage } from './threads.js';
 import type { FetchLike } from './types.js';
 
@@ -574,5 +574,84 @@ describe('createThreadReader', () => {
 
     assert.equal(messages[0]?.body, null);
     assert.equal(findSelection(messages, 'bot-logosmith'), 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findSelectionIn — the delivered-scoped scan (Task 22)
+// ---------------------------------------------------------------------------
+
+describe('findSelectionIn', () => {
+  const buyer = (id: string, body: string): ThreadMessage => ({
+    id,
+    senderId: 'handler-buyer',
+    body,
+    createdAt: '2026-07-30T00:00:00Z',
+  });
+
+  it('scans PAST a pick that cannot be built and takes the next usable one', () => {
+    // The defect this exists to fix: on a partial M1 the buyer names the
+    // undelivered slot, is told to correct it, and corrects it. Returning the
+    // first parseable reply regardless would fixate on the refused one forever.
+    const messages = [buyer('m1', 'concept 3'), buyer('m2', 'concept 2')];
+    // Fixture preconditions: both parse, and the unusable one is FIRST.
+    assert.equal(parseSelection('concept 3'), 3);
+    assert.equal(parseSelection('concept 2'), 2);
+    assert.equal(findSelection(messages, 'bot-logosmith'), 3);
+
+    assert.deepEqual(findSelectionIn(messages, 'bot-logosmith', new Set([1, 2])), {
+      selected: 2,
+      unavailable: 3,
+    });
+  });
+
+  it('still takes the FIRST reply when both picks are deliverable', () => {
+    // First-wins is unchanged for anything that could actually be built — it is
+    // what keeps a buyer from re-pointing a job already in flight.
+    const messages = [buyer('m1', 'concept 1'), buyer('m2', 'concept 3')];
+    assert.deepEqual(findSelectionIn(messages, 'bot-logosmith', new Set([1, 2, 3])), {
+      selected: 1,
+      unavailable: null,
+    });
+  });
+
+  it('reports the FIRST unusable pick, not the last', () => {
+    const messages = [buyer('m1', 'concept 3'), buyer('m2', 'concept 4'), buyer('m3', '2')];
+    // 'concept 4' is out of range and never parses at all, so it is invisible
+    // here — the reported one is the first that PARSED but was undeliverable.
+    assert.equal(parseSelection('concept 4'), null);
+    assert.deepEqual(findSelectionIn(messages, 'bot-logosmith', new Set([1, 2])), {
+      selected: 2,
+      unavailable: 3,
+    });
+  });
+
+  it('selects nothing when the allowed set is empty', () => {
+    const messages = [buyer('m1', 'concept 2')];
+    assert.deepEqual(findSelectionIn(messages, 'bot-logosmith', new Set()), {
+      selected: null,
+      unavailable: 2,
+    });
+  });
+
+  it('never reads the bot’s own message as a pick', () => {
+    const messages: ThreadMessage[] = [
+      { id: 'm1', senderId: 'bot-logosmith', body: 'concept 1', createdAt: '2026-07-30T00:00:00Z' },
+      buyer('m2', 'concept 2'),
+    ];
+    // Fixture precondition: the bot's text WOULD parse — authorship is the only
+    // thing excluding it.
+    assert.equal(parseSelection('concept 1'), 1);
+    assert.deepEqual(findSelectionIn(messages, 'bot-logosmith', new Set([1, 2])), {
+      selected: 2,
+      unavailable: null,
+    });
+  });
+
+  it('reports nothing for a thread with no parseable reply', () => {
+    assert.deepEqual(
+      findSelectionIn([buyer('m1', 'looks great, thanks!')], 'bot-logosmith', new Set([1, 2])),
+      { selected: null, unavailable: null },
+    );
   });
 });

@@ -51,6 +51,13 @@ export interface JobRow {
   payerId: string | null;
   briefJson: string | null;
   parkReason: string | null;
+  /**
+   * When this job FIRST parked and has not reached a terminal state since — the
+   * only clock that measures "how long has this been failing". Set by `park()`
+   * when still null, cleared by `markDelivered()`. Meaningful only while
+   * `status === 'parked'`; see migrations/0002_parked_since.sql.
+   */
+  parkedSince: string | null;
   moderationAttempts: number;
   checkpoint: JobCheckpoint | null;
   spentUsd: number;
@@ -71,6 +78,7 @@ interface RawJobRow {
   payer_id: string | null;
   brief_json: string | null;
   park_reason: string | null;
+  parked_since: string | null;
   moderation_attempts: number;
   checkpoint_json: string | null;
   spent_usd: number;
@@ -91,6 +99,7 @@ const toJobRow = (raw: RawJobRow): JobRow => ({
   payerId: raw.payer_id,
   briefJson: raw.brief_json,
   parkReason: raw.park_reason,
+  parkedSince: raw.parked_since,
   moderationAttempts: raw.moderation_attempts,
   checkpoint: raw.checkpoint_json ? (JSON.parse(raw.checkpoint_json) as JobCheckpoint) : null,
   spentUsd: raw.spent_usd,
@@ -280,9 +289,16 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
     },
 
     async park(jobKey, reason) {
+      // COALESCE, not a read-then-write: `parked_since` marks the START of the
+      // current failing spell, so a re-park (the cron unparks, the consumer
+      // fails again, we land back here) must NOT restart the clock. Doing it in
+      // one statement also means two concurrent parks cannot race the check.
+      const ts = touch();
       await db
-        .prepare('UPDATE jobs SET status = ?, park_reason = ?, updated_at = ? WHERE job_key = ?')
-        .bind('parked', reason, touch(), jobKey)
+        .prepare(
+          'UPDATE jobs SET status = ?, park_reason = ?, parked_since = COALESCE(parked_since, ?), updated_at = ? WHERE job_key = ?',
+        )
+        .bind('parked', reason, ts, ts, jobKey)
         .run();
     },
 
@@ -306,10 +322,14 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
     },
 
     async markDelivered(jobKey, outcome) {
+      // Clearing `parked_since` here — and ONLY here — is what makes it mean
+      // "still failing". `unpark()` deliberately leaves it alone, because the
+      // failing spell is not over merely because the cron re-enqueued the job;
+      // reaching a terminal state is the only thing that ends it.
       const ts = touch();
       await db
         .prepare(
-          'UPDATE jobs SET status = ?, outcome = ?, delivered_at = ?, updated_at = ? WHERE job_key = ?',
+          'UPDATE jobs SET status = ?, outcome = ?, delivered_at = ?, parked_since = NULL, updated_at = ? WHERE job_key = ?',
         )
         .bind('delivered', outcome, ts, ts, jobKey)
         .run();

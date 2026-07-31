@@ -35,6 +35,7 @@ import {
   type SeenStore,
 } from '@botguild/agent-core-workers';
 import {
+  PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
   STUCK_CLAIM_MINUTES,
   pricingCalc,
@@ -49,7 +50,7 @@ import {
   type JobStore,
   type SelectionStore,
 } from './jobs.js';
-import { createThreadReader, findSelection } from './threads.js';
+import { createThreadReader, findSelectionIn } from './threads.js';
 import type { FetchLike, JobMessage, SelectionSource } from './types.js';
 
 /** Structural queue seam — env.JOBS (`Queue<JobMessage>`) satisfies this shape. */
@@ -102,30 +103,24 @@ const SELECTION_TIMEOUT_MS = SELECTION_TIMEOUT_HOURS * 60 * 60 * 1000;
 const SELECTION_GATE = 'selection';
 /** The `result` marking the one-time "you picked a concept we never sent" note. */
 const UNSELECTABLE_RESULT = 'unselectable-pick';
+/** The `result` marking the one-time "we cannot tell what M1 delivered" note. */
+const UNRESOLVABLE_RESULT = 'no-selectable-concept';
 
 /**
- * How long a job may sit parked before LogoSmith gives up on it, tells the
- * buyer, and moves it to a terminal state.
+ * An ISO-8601 instant as epoch millis, or NaN for anything else.
  *
- * WHY THIS EXISTS. A retryable vendor failure parks WITHOUT consuming an FR-5
- * regeneration attempt (pipeline.ts) — correct, because a 45-minute outage must
- * not burn a paid job's regeneration budget on a 503 that generated nothing and
- * spent nothing. But that leaves parking itself unbounded: a permanently dead
- * vendor loops park → unpark → fail → park forever. No spend, but the job never
- * delivers, never refunds, and never tells the buyer. This is the independent
- * bound.
- *
- * WHY SIX HOURS. The milestone promises one business day. A job parked six
- * hours has burned a quarter of that with zero progress, after roughly
- * twenty-four automatic retries at the 15-minute cron cadence. Every transient
- * outage in this vendor set resolves well inside that window; past it a
- * permanent cause — a revoked key, a withdrawn model, a suspended account — is
- * far likelier than a recovering one, and continuing to wait in silence is
- * worse for the buyer than an honest stop. Six hours also leaves roughly
- * eighteen hours of the SLA for the buyer to cancel or re-brief INSIDE the
- * promised window, rather than discovering the failure after it was missed.
+ * `Date.parse` alone is far too lenient for a security-shaped comparison: it
+ * reads the bare string `'12345'` as the YEAR 12345, so a pre-M1 reply carrying
+ * a digits-only timestamp would sort AFTER the M1 delivery and be selected —
+ * inverting the exact guard the slice below exists to provide. Requiring a
+ * literal `T` keeps epoch-millis and year-only forms out. Not reachable against
+ * today's platform, which sends ISO strings, but the failure mode is silent and
+ * the cost of the check is nothing.
  */
-const PARKED_GIVE_UP_HOURS = 6;
+function parseInstant(value: unknown): number {
+  if (typeof value !== 'string' || !value.includes('T')) return NaN;
+  return Date.parse(value);
+}
 
 /**
  * Buyer-facing names for the vendor behind each park reason. An allow-list with
@@ -261,13 +256,11 @@ async function noteUnselectablePick(
   args: { contractId: string; conceptsJobKey: string; picked: number; delivered: Set<number> },
 ): Promise<void> {
   const { contractId, conceptsJobKey, picked, delivered } = args;
+  // Non-empty by the caller's invariant: `resolveSelectionForContract` returns
+  // early on an empty delivered set (via noteSelectionUnresolvable), so there
+  // is always at least one concept to name here.
   const choices = [...delivered].sort((a, b) => a - b);
   const log = deps.logger.child({ contractId });
-
-  if (choices.length === 0) {
-    log.error({ picked }, 'buyer picked a slot but no delivered set is provable; no note sent');
-    return;
-  }
 
   const trail = await deps.jobs.listGateAudit(conceptsJobKey, SELECTION_GATE);
   if (trail.some((entry) => entry.result === UNSELECTABLE_RESULT)) return;
@@ -282,6 +275,47 @@ async function noteUnselectablePick(
     detail: { picked, deliveredSlots: choices },
   });
   log.warn({ picked, deliveredSlots: choices }, 'buyer picked an undelivered concept; buyer told');
+}
+
+/**
+ * Tell the buyer, exactly once, that LogoSmith cannot determine which concepts
+ * Milestone 1 delivered and therefore cannot resolve a winner on its own.
+ *
+ * The alternative — the shape this replaced — was to log an error and return,
+ * which leaves a FUNDED contract sitting at `concepts_delivered` forever with
+ * the buyer never hearing anything at all. Refusing to select is right; going
+ * silent is not. Deduped through the same FR-17 selection trail as the
+ * unselectable-pick note, since the cron reaches this branch every fifteen
+ * minutes for as long as the contract waits.
+ */
+async function noteSelectionUnresolvable(
+  deps: SelectionResolutionDeps,
+  args: { contractId: string; conceptsJobKey: string },
+): Promise<void> {
+  const { contractId, conceptsJobKey } = args;
+  const trail = await deps.jobs.listGateAudit(conceptsJobKey, SELECTION_GATE);
+  if (trail.some((entry) => entry.result === UNRESOLVABLE_RESULT)) return;
+
+  await deps.client.sendMessage(
+    contractId,
+    [
+      'LogoSmith needs a hand with this contract.',
+      '',
+      'The record of which concepts were delivered for Milestone 1 is incomplete on our side, ' +
+        'so LogoSmith will not pick a winner by itself — choosing one it cannot prove you were ' +
+        'shown is not something it is willing to do with your logo.',
+      '',
+      'Reply in this thread naming the concept you want (for example `concept 1`) and the brand ' +
+        'pack will be built from it. If you would rather not continue, LogoSmith cannot cancel ' +
+        'or refund a contract itself — please cancel from your side to release the escrow.',
+    ].join('\n'),
+  );
+  await deps.jobs.recordGateAudit({
+    jobKey: conceptsJobKey,
+    contractId,
+    gate: SELECTION_GATE,
+    result: UNRESOLVABLE_RESULT,
+  });
 }
 
 /**
@@ -319,6 +353,16 @@ export async function resolveSelectionForContract(
   const conceptsJobKey = await buildJobKey(contractId, 'concepts');
   const delivered = deliveredSlots(await jobs.get(conceptsJobKey));
 
+  // Nothing is provably deliverable, so no pick can be honoured and the default
+  // rule has nothing to rank. Refusing to select is right — but going silent on
+  // a funded contract is not, and this branch would otherwise stall it forever
+  // with only a log line. Tell the buyer once and leave the row awaiting.
+  if (delivered.size === 0) {
+    log.error('no delivered concept set is provable for this contract; selection cannot resolve');
+    await noteSelectionUnresolvable(deps, { contractId, conceptsJobKey });
+    return;
+  }
+
   const reader = createThreadReader({
     apiUrl: deps.apiUrl,
     apiKey: deps.apiKey,
@@ -336,32 +380,46 @@ export async function resolveSelectionForContract(
   // a delivery that had not been posted yet.
   //
   // Strictly after, not at-or-after: a message sharing a millisecond with the
-  // row's own creation is far likelier to be pre-M1 chatter. An unparseable
-  // `createdAt` yields NaN and every NaN comparison is false, so a message with
-  // no usable timestamp is excluded rather than trusted.
-  const m1At = Date.parse(row.m1DeliveredAt);
-  const picked = findSelection(
-    messages.filter((message) => Date.parse(message.createdAt) > m1At),
-    botId,
-  );
+  // row's own creation is far likelier to be pre-M1 chatter. An untimestamped
+  // or non-ISO `createdAt` yields NaN and every NaN comparison is false, so a
+  // message with no usable timestamp is excluded rather than trusted.
+  const m1At = parseInstant(row.m1DeliveredAt);
+  const scoped = messages.filter((message) => parseInstant(message.createdAt) > m1At);
+
+  // Scoped to the delivered set, so a pick that CANNOT be built is stepped over
+  // rather than fixated on. Taking the first parseable reply regardless would
+  // mean a buyer who names an undelivered concept, is told to correct it, and
+  // does exactly that gets their correction ignored forever — every later sweep
+  // re-reads the refused reply and never reaches the correction. Two replies
+  // that both name DELIVERED concepts still resolve to the first (findSelectionIn).
+  const { selected: picked, unavailable } = findSelectionIn(scoped, botId, delivered);
+
+  // A parsed pick naming a concept M1 never carried is the same hazard as the
+  // default rule's, arriving through the buyer's door: a distinctness-demoted
+  // slot keeps `ocr_pass = 1`, so stage 2's own `winner.ocrPass` guard would
+  // wave it straight through and ship a pack built from a concept the buyer was
+  // never shown. It is refused — and explained.
+  //
+  // Explained even when a LATER reply was usable: a buyer whose first message
+  // did nothing at all is owed the reason, and skipping the note whenever the
+  // scan happened to recover would make the explanation depend on cron timing.
+  // The dedupe keeps it to one message either way.
+  if (unavailable !== null) {
+    await noteUnselectablePick(deps, {
+      contractId,
+      conceptsJobKey,
+      picked: unavailable,
+      delivered,
+    });
+  }
 
   let winner: number;
   let source: SelectionSource;
 
-  if (picked !== null && delivered.has(picked)) {
+  if (picked !== null) {
     winner = picked;
     source = 'buyer';
   } else {
-    // A parsed pick naming a concept M1 never carried is the same hazard as the
-    // default rule's, arriving through the buyer's door: a distinctness-demoted
-    // slot keeps `ocr_pass = 1`, so stage 2's own `winner.ocrPass` guard would
-    // wave it straight through and ship a pack built from a concept the buyer
-    // was never shown. Refuse it, tell them once, and let the default rule
-    // decide at the timeout.
-    if (picked !== null) {
-      await noteUnselectablePick(deps, { contractId, conceptsJobKey, picked, delivered });
-    }
-
     const timedOut = Number.isFinite(m1At) && now.getTime() - m1At >= SELECTION_TIMEOUT_MS;
     if (opts.force !== true && !timedOut) {
       log.debug({ picked }, 'no usable buyer pick yet and still inside the selection window');
@@ -376,15 +434,15 @@ export async function resolveSelectionForContract(
     );
     const chosen = decideDefaultSelection(passing);
     if (chosen === null) {
-      // Unreachable through the pipeline: M1 aborts rather than delivering when
-      // fewer than two concepts pass, and `selection.open()` is only called on
-      // the delivery leg. Refuse rather than invent a winner — a contract stuck
-      // visibly at `concepts_delivered` with this line in the log is recoverable;
-      // a pack built from a concept nobody can prove was delivered is not.
+      // The delivered set is non-empty but no concept row backs it — the rows
+      // were lost or never written. Refuse rather than invent a winner, and
+      // tell the buyer, for the same reason as the empty-set branch above: a
+      // funded contract that goes quiet forever is the worse failure.
       log.error(
         { forced: opts.force === true, deliveredSlots: [...delivered] },
         'default selection found no delivered passing concept; leaving the contract awaiting',
       );
+      await noteSelectionUnresolvable(deps, { contractId, conceptsJobKey });
       return;
     }
     winner = chosen;
@@ -454,19 +512,35 @@ async function pollSelections(s: SweepServices): Promise<void> {
 
 // --- Parked jobs --------------------------------------------------------------
 
-function buildGiveUpNote(job: JobRow): string {
+/**
+ * The give-up note.
+ *
+ * EVERY DURATION CLAIM HERE IS SUBSTANTIATED BY `parked_since`, and no more
+ * than that. It says work has been blocked since a recorded instant, and that
+ * the job is blocked on a named vendor RIGHT NOW (`park_reason`). It does NOT
+ * claim that vendor was continuously unavailable for the whole span — the row
+ * cannot prove that, and an earlier draft asserted it anyway.
+ *
+ * The closing paragraph is per stage, because the remedy differs: M2 leaves the
+ * buyer holding delivered concepts, and a free-funnel job (`single`, PRD
+ * US-2/US-3) has no escrow to release, so telling those buyers to cancel to
+ * release one would be nonsense.
+ */
+function buildGiveUpNote(job: JobRow, blockedSinceMs: number, nowMs: number): string {
   const vendor = vendorFor(job.parkReason);
-  const outage =
-    `${vendor.charAt(0).toUpperCase()}${vendor.slice(1)} has been unavailable continuously ` +
-    `for more than ${PARKED_GIVE_UP_HOURS} hours, across automatic retries every fifteen ` +
-    `minutes. Rather than hold this contract open past its delivery window without a word, ` +
-    `LogoSmith is stopping here.`;
+  const hours = Math.floor((nowMs - blockedSinceMs) / (60 * 60 * 1000));
+  const blocked =
+    `Work on this contract has been blocked since ${new Date(blockedSinceMs).toISOString()} — ` +
+    `over ${hours} hours — and LogoSmith has been retrying automatically every fifteen minutes ` +
+    `that whole time. It is currently waiting on ${vendor}, which is still not responding. ` +
+    `Rather than hold this contract open past its delivery window without a word, LogoSmith is ` +
+    `stopping here.`;
 
   if (job.stage === 'vector') {
     return [
       'LogoSmith could not build the brand pack for this contract.',
       '',
-      outage,
+      blocked,
       '',
       'Your Milestone 1 concepts and their lettering-readback evidence are unaffected and ' +
         'remain delivered — only the Milestone 2 vector pack could not be produced. Nothing ' +
@@ -478,10 +552,22 @@ function buildGiveUpNote(job: JobRow): string {
     ].join('\n');
   }
 
+  if (job.stage === 'single') {
+    return [
+      'LogoSmith could not deliver this free job.',
+      '',
+      blocked,
+      '',
+      'Nothing has been delivered, and nothing has been charged — this was a free LogoSmith ' +
+        'job, so there is no payment and nothing for you to cancel. Once the vendor recovers, ' +
+        'posting the gig again is all it takes: LogoSmith bids on matching gigs automatically.',
+    ].join('\n');
+  }
+
   return [
     'LogoSmith could not deliver this contract.',
     '',
-    outage,
+    blocked,
     '',
     'Nothing has been delivered and no work product is being claimed.',
     '',
@@ -502,8 +588,13 @@ function buildGiveUpNote(job: JobRow): string {
  * is dead and never told anyone. As written, a failure at any point leaves the
  * job parked and retried next sweep; the worst case is one duplicate message.
  */
-async function giveUpOnParkedJob(s: SweepServices, job: JobRow): Promise<void> {
-  await s.client.sendMessage(job.contractId, buildGiveUpNote(job));
+async function giveUpOnParkedJob(
+  s: SweepServices,
+  job: JobRow,
+  blockedSinceMs: number,
+): Promise<void> {
+  const nowMs = clockOf(s)().getTime();
+  await s.client.sendMessage(job.contractId, buildGiveUpNote(job, blockedSinceMs, nowMs));
   await s.jobs.recordGateAudit({
     jobKey: job.jobKey,
     contractId: job.contractId,
@@ -512,7 +603,8 @@ async function giveUpOnParkedJob(s: SweepServices, job: JobRow): Promise<void> {
     detail: {
       parkReason: job.parkReason,
       stage: job.stage,
-      claimedAt: job.createdAt,
+      parkedSince: job.parkedSince,
+      blockedHours: (nowMs - blockedSinceMs) / (60 * 60 * 1000),
       giveUpAfterHours: PARKED_GIVE_UP_HOURS,
       spentUsd: job.spentUsd,
     },
@@ -524,7 +616,7 @@ async function giveUpOnParkedJob(s: SweepServices, job: JobRow): Promise<void> {
       contractId: job.contractId,
       stage: job.stage,
       parkReason: job.parkReason,
-      claimedAt: job.createdAt,
+      parkedSince: job.parkedSince,
     },
     'parked job exceeded the give-up bound; buyer notified and job aborted',
   );
@@ -534,19 +626,21 @@ async function giveUpOnParkedJob(s: SweepServices, job: JobRow): Promise<void> {
  * Re-enqueue every parked job, except the ones that have been failing long
  * enough to give up on.
  *
- * THE AGE IS MEASURED FROM `created_at`, NOT `updated_at`, AND THE DIFFERENCE
- * IS THE WHOLE POINT. `park()` touches `updated_at` — but so does `unpark()`,
- * and this loop unparks every job it re-enqueues. On a job looping
- * park → unpark → fail → park, `updated_at` therefore measures time since the
- * LAST failure, caps at roughly one cron interval, and never accumulates: it
- * cannot bound the loop it would exist to bound. `created_at` is written once
- * by `claim()`'s INSERT and appears in no UPDATE in jobs.ts, so it is the one
- * stable clock available. Because `job_key` is per `(contractId, stage)`, stage
- * 2's clock correctly starts at selection rather than at funding.
+ * THE CLOCK IS `parked_since`, AND NEITHER OF THE OBVIOUS ALTERNATIVES WORKS.
+ * `updated_at` is touched by `park()` — but also by `unpark()`, and this loop
+ * unparks every job it re-enqueues, so on a park → unpark → fail → park loop it
+ * measures time since the LAST failure, caps at roughly one cron interval, and
+ * never accumulates. `created_at` is stable, but it measures age-since-CLAIM: a
+ * job whose Queue send was lost sits idle for a day, is recovered by the daily
+ * sweep, parks once on a transient blip — and would be aborted on the very next
+ * sweep with a note claiming a six-hour outage that never happened. That turns
+ * a recoverable blip into an abort AND lies about why.
  *
- * The predicate is therefore "currently parked AND claimed more than
- * PARKED_GIVE_UP_HOURS ago" — a job that has failed to complete for that long
- * and is failing right now.
+ * `parked_since` is set at the first park of a failing spell and cleared only
+ * on a terminal state, so it measures exactly "how long has this job been
+ * unable to finish". A parked row without one predates the column: it is
+ * re-enqueued as normal and acquires one at its next park, so the bound
+ * self-heals rather than guessing.
  */
 async function sweepParkedJobs(s: SweepServices): Promise<void> {
   const giveUpBefore = clockOf(s)().getTime() - PARKED_GIVE_UP_HOURS * 60 * 60 * 1000;
@@ -558,9 +652,9 @@ async function sweepParkedJobs(s: SweepServices): Promise<void> {
       parkReason: job.parkReason,
     });
     try {
-      const claimedAt = Date.parse(job.createdAt);
-      if (Number.isFinite(claimedAt) && claimedAt < giveUpBefore) {
-        await giveUpOnParkedJob(s, job);
+      const parkedSince = parseInstant(job.parkedSince);
+      if (Number.isFinite(parkedSince) && parkedSince < giveUpBefore) {
+        await giveUpOnParkedJob(s, job, parkedSince);
         continue;
       }
       await s.jobs.unpark(job.jobKey);
@@ -636,11 +730,20 @@ export async function runDailySweep(s: SweepServices): Promise<void> {
   try {
     const cutoff = new Date(clockOf(s)().getTime() - STUCK_CLAIM_MINUTES * 60 * 1000);
     for (const job of await s.jobs.listStuckClaims(cutoff)) {
-      await s.queue.send({ contractId: job.contractId, jobKey: job.jobKey, stage: job.stage });
-      s.logger.warn(
-        { jobKey: job.jobKey, contractId: job.contractId, stage: job.stage },
-        'daily sweep: stuck claim re-enqueued',
-      );
+      // Per job, not per step: this sweep runs once a DAY, so one failing send
+      // must not cost every remaining stuck claim another twenty-four hours.
+      try {
+        await s.queue.send({ contractId: job.contractId, jobKey: job.jobKey, stage: job.stage });
+        s.logger.warn(
+          { jobKey: job.jobKey, contractId: job.contractId, stage: job.stage },
+          'daily sweep: stuck claim re-enqueued',
+        );
+      } catch (err) {
+        s.logger.error(
+          { err, jobKey: job.jobKey, contractId: job.contractId },
+          'daily sweep: re-enqueue failed for this stuck claim; retrying tomorrow',
+        );
+      }
     }
   } catch (err) {
     s.logger.error({ err }, 'daily sweep: stuck-claim recovery step failed; continuing');
