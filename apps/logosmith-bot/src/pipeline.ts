@@ -1,12 +1,18 @@
 // ---------------------------------------------------------------------------
-// Queue pipeline — stage 1: concepts → gates → capped regeneration → M1
-// (PRD §6 steps 3-6; FR-1/FR-2/FR-3/FR-4/FR-5/FR-6/FR-8/FR-17).
+// Queue pipeline — both paid stages of the $25 gig:
 //
-// The whole stage is written against structural seams handed in by index.ts —
-// `D1Like` stores, an R2 `DeliverableStore`, `FetchLike`, `AiLike` — so it runs
+//   stage 1 (`runConceptStage`): concepts → gates → capped regeneration → M1
+//                                (PRD §6 steps 3-6)
+//   stage 2 (`runVectorStage`):  winner → vector → pack → gates → report → M2
+//                                (PRD §6 steps 8-10)
+//
+// (FR-1/FR-2/FR-3/FR-4/FR-5/FR-6/FR-8/FR-10/FR-11/FR-12/FR-13/FR-17.)
+//
+// Both stages are written against structural seams handed in by index.ts —
+// `D1Like` stores, an R2 `DeliverableStore`, `FetchLike`, `AiLike` — so they run
 // unchanged under plain Node tests. Nothing here touches `env.*`.
 //
-// Three properties this module exists to guarantee:
+// Four properties this module exists to guarantee:
 //
 //   1. CAPS SURVIVE REDELIVERY. Every cap decision is made by `decideSlotAction`
 //      against the *persisted* checkpoint (`slots[].attempts`, `spendUsd`), not
@@ -18,13 +24,21 @@
 //      carry a 24 h signed `exp`, verified live 2026-07-30) and `generate.ts`
 //      holds the fetched bytes only in memory. Every concept is PUT to R2
 //      BEFORE any gate runs, and a resumed job re-gates those stored bytes
-//      rather than paying for a replacement image.
+//      rather than paying for a replacement image. Stage 2 reads the winner
+//      back out of R2 for the same reason.
 //
-//   3. WASM BUFFERS ARE FREED. Task 10 measured 129.5 MB against the 128 MB
+//   3. SPEND IS DURABLE BEFORE ANYTHING THAT CAN THROW. Both stages write the
+//      ledger to D1 the moment a vendor has been paid, not at the end of the
+//      work the payment bought — a throw in between would otherwise lose the
+//      dollars and let the queue retry buy the same thing twice.
+//
+//   4. WASM BUFFERS ARE FREED. Task 10 measured 129.5 MB against the 128 MB
 //      isolate ceiling from unfreed resvg handles. Every rasterize/decode here
 //      goes through `pack/render.ts`, whose `.free()`-in-`finally` discipline
 //      (inner RenderedImage before outer Resvg) is the fix; this module never
 //      constructs a `Resvg` of its own, so there is no second place to leak.
+//      Both stages carry a pipeline-level guard asserting free-count ==
+//      render-count, which is what catches a bare `new Resvg` reappearing here.
 // ---------------------------------------------------------------------------
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -50,11 +64,28 @@ import {
   toHex,
   type OcrGate,
 } from './gates/index.js';
-import type { ConceptStore, ConceptUpsert, JobRow, JobStore, QuotaStore } from './jobs.js';
+import {
+  buildJobKey,
+  type ConceptRow,
+  type ConceptStore,
+  type ConceptUpsert,
+  type JobRow,
+  type JobStore,
+  type QuotaStore,
+} from './jobs.js';
 import type { SelectionStore } from './jobs.js';
 import { createModerationClient, type ModerationClient } from './moderation.js';
+import { fetchFontPairing } from './pack/fonts.js';
+import { buildPack, type PackGateReport } from './pack/index.js';
 import { renderSvgToPixmap, renderSvgToPng } from './pack/render.js';
 import type { WasmSources } from './pack/wasm.js';
+import {
+  buildLicenseManifest,
+  buildValidationReport,
+  type LicenseRow,
+  type ReportImageModeration,
+} from './report.js';
+import { createVectorizer, type Vectorizer } from './vectorize.js';
 import type {
   AiLike,
   ConceptState,
@@ -65,6 +96,7 @@ import type {
   JobStage,
   LogoBrief,
   Pixmap,
+  SelectionSource,
 } from './types.js';
 
 /** R2 seam for the deliverable bytes (put) and stage-2 artifact read-back (get). */
@@ -97,6 +129,7 @@ export interface PipelineServices {
   ocrGate: OcrGate;
   moderation: ModerationClient;
   axisCompiler: AxisCompiler;
+  vectorizer: Vectorizer;
 }
 
 export interface PipelineConfig {
@@ -248,6 +281,12 @@ function resolveServices(config: PipelineConfig): PipelineServices {
           anthropic: new Anthropic({ apiKey: config.secrets.anthropicApiKey }),
         }).compile(brief),
     },
+    vectorizer:
+      overrides.vectorizer ??
+      createVectorizer({
+        fetchImpl: config.fetchImpl,
+        vectorizerToken: config.secrets.vectorizerToken,
+      }),
   };
 }
 
@@ -397,6 +436,123 @@ function buildAbortNote(input: {
       '(a shorter brand name reads back far more reliably), reply here and we will re-run it.',
   );
   return lines.join('\n');
+}
+
+// --- Stage 2 notes -------------------------------------------------------------
+
+/**
+ * The one thread note a Vectorizer.ai outage earns. Posted on the FIRST park
+ * only — the cron unparks and re-enqueues every 15 minutes, so a note per cycle
+ * would be a message every quarter-hour for the length of the outage. Same
+ * "tell them once" rule the FR-2 moderation notice follows.
+ */
+const VECTORIZER_OUTAGE_NOTE =
+  'Status update: your chosen concept is being converted to a true vector, and the conversion ' +
+  'service is currently unavailable. The job is queued and retries automatically — no action is ' +
+  'needed from you, nothing extra is being charged, and your concept is safe. LogoSmith will not ' +
+  'deliver a pack whose logo.svg is not a verified true vector, so it waits rather than ships ' +
+  'something weaker.';
+
+/** Buyer-facing one-liner per pack gate, used by both the M2 note and the abort note. */
+function gateLines(gates: PackGateReport): string[] {
+  const dimensionFails = gates.dimensions.filter((entry) => !entry.pass);
+  return [
+    `- True vector: ${gates.vector.pass ? 'PASS' : 'FAIL'} — ${gates.vector.census.path} path(s), ` +
+      `${gates.vector.census.shape} shape(s), ${gates.vector.census.image} embedded raster(s)` +
+      (gates.vector.pass ? '.' : ` — ${gates.vector.violations.join('; ')}.`),
+    `- Pixel dimensions: ${gates.dimensions.length - dimensionFails.length}/${gates.dimensions.length} ` +
+      `files match their contracted size exactly` +
+      (dimensionFails.length === 0
+        ? '.'
+        : ` — mismatched: ${dimensionFails
+            .map(
+              (entry) =>
+                `${entry.file} is ${entry.actual.width}x${entry.actual.height}, expected ` +
+                `${entry.expected.width}x${entry.expected.height}`,
+            )
+            .join('; ')}.`),
+    `- favicon.ico parse-back: ${gates.ico.pass ? `PASS — lists ${gates.ico.sizes.join(', ')}` : `FAIL — ${gates.ico.reason ?? 'unreadable'}`}.`,
+    `- ZIP completeness: ${gates.zip.pass ? `PASS — ${gates.zip.present.length} entries` : `FAIL — ${gates.zip.reasons.join('; ')}`}.`,
+  ];
+}
+
+interface M2NoteInput {
+  brief: LogoBrief;
+  winnerSlot: number;
+  winnerAxisId: string;
+  selectionSource: SelectionSource;
+  vectorSource: 'recraft-native' | 'vectorizer';
+  gates: PackGateReport;
+  packUrl: string;
+  reportUrl: string;
+  licensesUrl: string;
+  progressUrl: string;
+}
+
+/**
+ * The M2 delivery note (§6 step 10). The platform posts the first ~500
+ * characters verbatim into the thread, so the download link sits in the opening
+ * lines — the same truncation rule that puts the selection instruction at the
+ * top of the M1 note.
+ */
+function buildM2Note(input: M2NoteInput): string {
+  const { brief, gates } = input;
+  const chosen =
+    input.selectionSource === 'buyer'
+      ? 'you chose it in this thread'
+      : 'the default-selection rule chose it — the best lettering-readback score of the set';
+  return [
+    `LogoSmith — Milestone 2: the true-vector brand pack for "${brief.brandName}".`,
+    '',
+    `DOWNLOAD: ${input.packUrl}`,
+    '',
+    `Built from concept ${input.winnerSlot} (${input.winnerAxisId}) — ${chosen}.`,
+    '',
+    'What is in the ZIP: logo.svg (true vector), logo-mono.svg, colour masters at 1024 and 2048 px, ' +
+      'a 1024 px mono master, favicon.ico plus the 16/32/48/180/192/512 PNG set, site.webmanifest, ' +
+      'a drop-in HTML snippet, and brand.json with the extracted hex codes and an advisory ' +
+      'Google Fonts pairing.',
+    '',
+    'Machine-verified before delivery:',
+    ...gateLines(gates),
+    '',
+    input.vectorSource === 'recraft-native'
+      ? "The vector came straight from the generating vendor's own vector export and was re-checked " +
+        'here — no raster-to-vector tracing step was involved.'
+      : 'The winning concept was traced from raster to vector, then re-checked here.',
+    '',
+    `Full validation report: ${input.reportUrl}`,
+    `Per-image license manifest: ${input.licensesUrl}`,
+    `Evidence page: ${input.progressUrl}`,
+    '',
+    'Warranty (14 days): a logo.svg that does not pass the true-vector parse, any artifact at the ' +
+      'wrong pixel dimensions, or a broken or incomplete ZIP is re-run free of charge, plus one ' +
+      'revision round on this mark. The font pairing is advisory, not warranted. Trademark ' +
+      'clearance is NOT performed and NOT warranted.',
+  ].join('\n');
+}
+
+/** The §9 pack-gate abort note: nothing is delivered and nothing is claimed. */
+function buildPackFailureNote(
+  brief: LogoBrief,
+  gates: PackGateReport,
+  progressUrl: string,
+): string {
+  return [
+    `LogoSmith could not deliver Milestone 2 for "${brief.brandName}".`,
+    '',
+    'The assembled brand pack did not clear its own delivery gates, so nothing has been delivered ' +
+      'and no work product is being claimed. Shipping a pack that fails these checks is exactly ' +
+      'what the warranty exists to prevent, so it is not being shipped at all.',
+    '',
+    'Gate results:',
+    ...gateLines(gates),
+    '',
+    `Evidence page: ${progressUrl}`,
+    'Reply in this thread and the pack will be rebuilt from your chosen concept. LogoSmith cannot ' +
+      'cancel or refund a contract itself — if you would rather stop here, please cancel from your ' +
+      'side to release the escrow.',
+  ].join('\n');
 }
 
 // --- Stage 1 -----------------------------------------------------------------
@@ -820,6 +976,368 @@ export async function runConceptStage(
   return { outcome };
 }
 
+// --- Stage 2 -----------------------------------------------------------------
+
+/**
+ * PRD §6 steps 8-10: the buyer's chosen concept becomes a true vector, the
+ * vector becomes the full brand pack, the pack is gated, and M2 is delivered
+ * with the JSON validation report and the license manifest beside it.
+ *
+ * Three properties this half of the pipeline exists to guarantee:
+ *
+ *   1. THE RECRAFT SHORT-CIRCUIT IS FREE MONEY, SO IT IS READ, NEVER
+ *      RECOMPUTED. `concepts.native_svg_key` points at a sanitized vector
+ *      stage 1 already paid for and stored; handing it to `toVector` skips
+ *      Vectorizer.ai entirely (~$0.20 against a $1 anchor, the §13
+ *      single-vendor mitigation).
+ *
+ *   2. THE VECTORIZER SPEND IS DURABLE THE MOMENT IT IS INCURRED. Everything
+ *      after the conversion can throw — the pack renders ten rasters through
+ *      wasm, then three R2 puts and a REST delivery — so the ledger is written
+ *      before any of it. A queue retry must never re-buy a conversion the
+ *      ledger forgot.
+ *
+ *   3. A FAILING GATE NEVER SHIPS. `buildPack` re-runs the true-vector gate on
+ *      whatever it is handed (defence in depth: the SVG has already passed the
+ *      identical check inside `toVector`), and a pack whose dimension, ICO, or
+ *      ZIP gates fail takes the abort leg without calling `deliverMilestone`.
+ *
+ * NOTE ON `MAX_SPEND_USD`: the FR-5 cap governs concept GENERATION, and it is
+ * checked per generation inside stage 1 against stage 1's own ledger. It is
+ * deliberately NOT re-checked here. Stage 2 spends at most one ~$0.20
+ * conversion, on a contract the buyer has already funded and already picked a
+ * winner for; refusing to deliver the thing they paid for to save twenty cents
+ * against a $25 escrow would be the wrong trade in every direction. The report
+ * still shows both stages' spend summed, so the true figure is never hidden.
+ */
+export async function runVectorStage(
+  config: PipelineConfig,
+  message: JobMessage,
+): Promise<StageOutcome> {
+  const { jobs, concepts, selection, client, deliverables, logger } = config;
+  const { jobKey, contractId } = message;
+  const services = resolveServices(config);
+  const log = logger.child({ jobKey, contractId, stage: 'vector' });
+
+  const job = await jobs.get(jobKey);
+  // As in stage 1: the claim INSERT creates this row before the Queue send, so
+  // its absence is an infra fault rather than a pipeline decision.
+  if (!job) throw new Error(`no job row for ${jobKey}`);
+  if (job.status === 'delivered') {
+    log.info({ outcome: job.outcome }, 'stage already delivered; redelivery is a no-op');
+    return { outcome: toStageOutcome(job.outcome) };
+  }
+  const token = job.deliverableToken;
+  if (!token) throw new Error(`job ${jobKey} has no deliverable token`);
+
+  const progressUrl = `${config.publicBaseUrl}/p/${token}`;
+  const deliverableUrl = (file: string): string =>
+    `${config.publicBaseUrl}/deliverables/${token}/${file}`;
+
+  // The winner. Stage 2 is claimed by the selection resolver AFTER a winner is
+  // recorded, so a missing selection is an ordering fault — throw and let the
+  // queue's retries (then the DLQ alert) surface it, rather than inventing a
+  // winner or silently no-opping a contract the buyer has paid for.
+  const selectionRow = await selection.get(contractId);
+  if (!selectionRow || selectionRow.winnerSlot === null || selectionRow.source === null) {
+    throw new Error(`contract ${contractId} has no selected winner to build a pack from`);
+  }
+  const winnerSlot = selectionRow.winnerSlot;
+
+  const conceptRows = await concepts.list(contractId);
+  const winner = conceptRows.find((row) => row.slot === winnerSlot);
+  if (!winner) {
+    throw new Error(
+      `contract ${contractId} has no concept row for the selected slot ${winnerSlot}`,
+    );
+  }
+
+  const contract = await client.getContract(contractId);
+
+  // Stage 1's row is the brief of record: it holds the brief as last validated,
+  // INCLUDING any thread correction the 15-minute sweep applied before
+  // generation. Preferring it over the gig description means M2's brand name is
+  // the one the concepts were actually generated from, even if the gig text has
+  // since been edited. `resolveBrief` re-validates whatever it is handed
+  // through the same parser, so nothing bypasses the intake rules.
+  const conceptsJobKey = await buildJobKey(contractId, 'concepts');
+  const stageOne = await jobs.get(conceptsJobKey);
+  const briefResult = await resolveBrief(
+    config,
+    { ...job, briefJson: job.briefJson ?? stageOne?.briefJson ?? null },
+    contract,
+  );
+  if (!briefResult.ok) {
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      gate: 'brief',
+      result: 'invalid',
+      detail: { reason: briefResult.reason },
+    });
+    await client.sendMessage(
+      contractId,
+      'LogoSmith cannot build the brand pack: the logo brief for this contract no longer ' +
+        `validates — ${briefResult.reason}. Post a corrected brief in this thread and the pack ` +
+        'will be rebuilt from the concept you chose; nothing further has been generated and no ' +
+        'additional work is being claimed.',
+    );
+    await jobs.markDelivered(jobKey, 'aborted');
+    return { outcome: 'aborted' };
+  }
+  const brief = briefResult.brief;
+
+  // "Has this stage run before?" — the same signal `decideOnConflict` reads.
+  // Captured BEFORE the checkpoint below is written, and used for exactly one
+  // thing: posting the vendor-outage note once instead of once per cron cycle.
+  const firstRun = job.checkpoint === null;
+  await jobs.setInProgress(jobKey, {
+    kind: 'logo',
+    gigId: contract.gigId,
+    payerId: contract.payerId,
+    briefJson: JSON.stringify(brief),
+  });
+  const checkpoint: JobCheckpoint = job.checkpoint ?? { slots: [], spendUsd: job.spentUsd };
+  await jobs.saveCheckpoint(jobKey, checkpoint);
+
+  // --- Step 8: vectorize (FR-10) ---------------------------------------------
+  // Both artifacts are read back from R2 rather than regenerated: the bytes
+  // were paid for once and the vendor URLs they came from expired long ago.
+  const nativeSvgBytes = winner.nativeSvgKey ? await deliverables.get(winner.nativeSvgKey) : null;
+  if (winner.nativeSvgKey && !nativeSvgBytes) {
+    // Degrade, do not fail: the raster is still there, so this costs a
+    // Vectorizer.ai call rather than the job.
+    log.warn({ nativeSvgKey: winner.nativeSvgKey }, 'native SVG missing from R2; tracing instead');
+  }
+  const nativeSvg = nativeSvgBytes ? new TextDecoder().decode(nativeSvgBytes) : undefined;
+  const png = winner.r2Key ? await deliverables.get(winner.r2Key) : null;
+  if (!nativeSvg && !png) {
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      slot: winnerSlot,
+      gate: 'vectorize',
+      result: 'missing-source',
+      detail: { r2Key: winner.r2Key, nativeSvgKey: winner.nativeSvgKey },
+    });
+    await client.sendMessage(
+      contractId,
+      `LogoSmith cannot build the brand pack: the stored artwork for concept ${winnerSlot} is no ` +
+        'longer retrievable, so there is nothing to vectorize. Nothing has been delivered and no ' +
+        'additional work is being claimed. Reply in this thread and the concept round will be ' +
+        're-run free of charge under the warranty.',
+    );
+    await jobs.markDelivered(jobKey, 'aborted');
+    return { outcome: 'aborted' };
+  }
+
+  // `png` is only ever null when `nativeSvg` is present, and `toVector` hard
+  // short-circuits on `nativeSvg` before it reads `png` at all — the empty
+  // array is never looked at.
+  const vector = await services.vectorizer.toVector({
+    png: png ?? new Uint8Array(0),
+    nativeSvg,
+  });
+
+  if (vector.ok && vector.costUsd > 0) {
+    // FIRST, before the audit insert, the font call, ten wasm renders, three R2
+    // puts and a REST delivery — every one of which can throw. The vendor has
+    // been paid; the ledger records it before anything else is attempted.
+    checkpoint.spendUsd = roundUsd(checkpoint.spendUsd + vector.costUsd);
+    await jobs.saveCheckpoint(jobKey, checkpoint);
+  }
+
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    slot: winnerSlot,
+    gate: 'vectorize',
+    result: vector.ok ? vector.source : vector.retryable ? 'unavailable' : 'error',
+    detail: vector.ok
+      ? { source: vector.source, costUsd: vector.costUsd }
+      : { error: vector.error, retryable: vector.retryable },
+  });
+
+  if (!vector.ok) {
+    if (vector.retryable) {
+      await jobs.park(jobKey, 'vectorizer_outage');
+      if (firstRun) await client.sendMessage(contractId, VECTORIZER_OUTAGE_NOTE);
+      log.warn({ error: vector.error }, 'vectorization vendor unavailable; job parked');
+      return { outcome: 'parked' };
+    }
+    // Non-retryable here means content-level: SVGO could not parse what came
+    // back, or the result failed its own true-vector self-check. The identical
+    // bytes produce the identical failure on every retry, so parking would loop
+    // forever (see vectorize.ts's header) — this must abort.
+    await client.sendMessage(
+      contractId,
+      'LogoSmith cannot deliver Milestone 2: converting your chosen concept to a true vector ' +
+        `produced a file that does not pass the true-vector check — ${vector.error}. Rather than ` +
+        'ship an "SVG" that wraps a raster, nothing has been delivered and no work product is ' +
+        'being claimed. Reply in this thread to pick a different concept, or cancel from your ' +
+        'side to release the escrow — LogoSmith cannot cancel or refund a contract itself.',
+    );
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error({ error: vector.error }, 'vectorization failed permanently; leg aborted');
+    return { outcome: 'aborted' };
+  }
+
+  // --- Step 8 (cont.): the pack ----------------------------------------------
+  // Advisory and outage-proof by construction (FR-12): fetchFontPairing swallows
+  // every failure into its pinned fallback pairing, so a Google Fonts outage
+  // costs a recommendation, never the job.
+  const fonts = await fetchFontPairing({
+    fetchImpl: config.fetchImpl,
+    apiKey: config.secrets.googleFontsApiKey,
+  });
+
+  // Throws only if the true-vector gate fails — which `toVector` has already
+  // run on this exact string, so a throw here means a pure function disagreed
+  // with itself. That is a broken invariant, not a pipeline decision: let it
+  // reach the queue retry and the DLQ alert rather than swallowing it.
+  const pack = await buildPack({
+    svg: vector.svg,
+    brandName: brief.brandName,
+    sources: config.sources,
+    fonts,
+  });
+
+  // --- Step 9: pack gates ------------------------------------------------------
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'pack',
+    result: pack.gates.pass ? 'pass' : 'fail',
+    detail: pack.gates,
+  });
+  if (!pack.gates.pass) {
+    await client.sendMessage(contractId, buildPackFailureNote(brief, pack.gates, progressUrl));
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error({ gates: pack.gates }, 'pack gates failed; nothing delivered');
+    return { outcome: 'aborted' };
+  }
+
+  // --- Step 9 (cont.): report + license manifest (§8, FR-17) -------------------
+  // The unsafe-content flag is snapshotted per concept on stage 1's checkpoint
+  // and nowhere else — the `concepts` table keeps the readback verdict but not
+  // the safety flag — so the checkpoint is where §9's second moderation clause
+  // is evidenced from.
+  const visionChecks: ReportImageModeration[] = (stageOne?.checkpoint?.slots ?? []).flatMap(
+    (slot) =>
+      slot.ocr
+        ? [
+            {
+              slot: slot.slot,
+              model: slot.ocr.model,
+              unsafe: slot.ocr.unsafe,
+              checkedAt: slot.ocr.checkedAt,
+            },
+          ]
+        : [],
+  );
+
+  const report = buildValidationReport({
+    contractId,
+    brandName: brief.brandName,
+    generatedAt: new Date().toISOString(),
+    concepts: conceptRows,
+    visionChecks,
+    moderationOutageAttempts: stageOne?.moderationAttempts ?? 0,
+    winner: { slot: winnerSlot, source: selectionRow.source },
+    vectorization: {
+      source: vector.source,
+      vendor: vector.source === 'recraft-native' ? 'recraft' : 'vectorizer',
+      costUsd: vector.costUsd,
+    },
+    gates: pack.gates,
+    spend: {
+      conceptStageUsd: stageOne?.spentUsd ?? 0,
+      vectorStageUsd: checkpoint.spendUsd,
+    },
+    idempotencyKeys: { concepts: conceptsJobKey, vector: jobKey },
+  });
+  const licenses = buildLicenseManifest(licenseRows(conceptRows, vector.source));
+
+  // --- Step 10: M2 delivery ----------------------------------------------------
+  const encoder = new TextEncoder();
+  await deliverables.put(`${token}/pack.zip`, pack.zip, 'application/zip');
+  await deliverables.put(
+    `${token}/report.json`,
+    encoder.encode(JSON.stringify(report, null, 2)),
+    'application/json',
+  );
+  await deliverables.put(
+    `${token}/licenses.json`,
+    encoder.encode(JSON.stringify(licenses, null, 2)),
+    'application/json',
+  );
+
+  const milestoneId = milestoneIdForStage(contract, 'vector');
+  if (!milestoneId) throw new Error(`contract ${contractId} exposes no milestone to deliver`);
+
+  const packUrl = deliverableUrl('pack.zip');
+  const reportUrl = deliverableUrl('report.json');
+  const licensesUrl = deliverableUrl('licenses.json');
+  await client.deliverMilestone(contractId, milestoneId, {
+    note: buildM2Note({
+      brief,
+      winnerSlot,
+      winnerAxisId: winner.axisId,
+      selectionSource: selectionRow.source,
+      vectorSource: vector.source,
+      gates: pack.gates,
+      packUrl,
+      reportUrl,
+      licensesUrl,
+      progressUrl,
+    }),
+    attachments: [packUrl, reportUrl, licensesUrl, progressUrl],
+  });
+  await jobs.recordGateAudit({
+    jobKey,
+    contractId,
+    gate: 'm2-delivery',
+    result: 'delivered',
+    detail: {
+      milestoneId,
+      winnerSlot,
+      selectionSource: selectionRow.source,
+      vectorSource: vector.source,
+      spendUsd: checkpoint.spendUsd,
+    },
+  });
+  await selection.markPackDelivered(contractId);
+  await jobs.markDelivered(jobKey, 'delivered');
+  log.info({ winnerSlot, vectorSource: vector.source }, 'brand pack delivered');
+  return { outcome: 'delivered' };
+}
+
+/**
+ * §8's "per generated/converted image" license rows: every concept the buyer
+ * was shown (all of them were generated and paid for, not just the winner),
+ * plus the one conversion that produced the delivered `logo.svg`. Derived
+ * artifacts — the masters, the favicon set, the mono mark — are renders OF
+ * `logo.svg` rather than separately vendor-sourced images, so they inherit its
+ * provenance instead of getting duplicate rows.
+ */
+function licenseRows(
+  conceptRows: ConceptRow[],
+  vectorSource: 'recraft-native' | 'vectorizer',
+): LicenseRow[] {
+  return [
+    ...conceptRows.map((row) => ({
+      artifact: `concept-${row.slot}.png`,
+      vendor: row.vendor,
+      vendorRequestId: row.vendorRequestId,
+    })),
+    {
+      artifact: 'logo.svg',
+      vendor: vectorSource === 'recraft-native' ? 'recraft' : 'vectorizer',
+      vendorRequestId: null,
+    },
+  ];
+}
+
 /** Queue entry point — one stage per message (§7: pixmap work is memory-bound). */
 export async function processJobMessage(
   config: PipelineConfig,
@@ -835,8 +1353,14 @@ export async function processJobMessage(
       );
       return;
     }
-    case 'vector':
-      throw new Error('the vector stage is not implemented yet (Task 21)');
+    case 'vector': {
+      const result = await runVectorStage(config, message);
+      config.logger.info(
+        { ...message, ...result, durationMs: Date.now() - startedAt },
+        'vector stage finished',
+      );
+      return;
+    }
     case 'single':
       throw new Error('the free-gig single stage is not implemented yet (Task 23)');
     default: {

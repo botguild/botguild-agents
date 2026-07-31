@@ -35,10 +35,14 @@ import {
   milestoneIdForStage,
   processJobMessage,
   runConceptStage,
+  runVectorStage,
   type DeliverableStore,
   type PipelineConfig,
 } from './pipeline.js';
-import type { ConceptState, LogoBrief, StyleAxis } from './types.js';
+import { REQUIRED_ZIP_ENTRIES, unzipFiles } from './pack/zip.js';
+import type { ValidationReport, LicenseManifest } from './report.js';
+import type { Vectorizer } from './vectorize.js';
+import type { ConceptState, JobMessage, LogoBrief, SelectionSource, StyleAxis } from './types.js';
 
 const axis: StyleAxis = { id: 'wordmark', label: 'w', prompt: 'p', vendor: 'ideogram' };
 const state = (over: Partial<ConceptState> = {}): ConceptState => ({
@@ -253,6 +257,8 @@ interface Harness {
   messages: string[];
   /** Axis id per generator call, in call order. */
   generated: string[];
+  /** Every URL the pipeline handed to `fetchImpl`, in call order. */
+  fetches: string[];
   axisCompilations: () => number;
 }
 
@@ -263,6 +269,8 @@ interface SetupOptions {
   ocr?: (fixture: string, attempt: number) => OcrOutcome;
   moderation?: ModerationClient;
   description?: string;
+  /** Omitted ⇒ the REAL vectorizer, wired to the network-refusing fetchImpl. */
+  vectorizer?: Vectorizer;
 }
 
 const clearModeration: ModerationClient = {
@@ -346,6 +354,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
   } as unknown as AgentClient;
 
   const r2 = memoryR2();
+  const fetches: string[] = [];
   const config: PipelineConfig = {
     jobs,
     concepts,
@@ -363,7 +372,10 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
       vectorizerToken: 'test',
       googleFontsApiKey: 'test',
     },
-    fetchImpl: async () => {
+    // Records the URL before refusing, so a test can prove which vendors were
+    // NOT called — and, just as importantly, that the recorder itself works.
+    fetchImpl: async (url) => {
+      fetches.push(url);
       throw new Error('no test may reach the network');
     },
     publicBaseUrl: 'https://logosmith.example.com',
@@ -378,6 +390,11 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
           return AXES.map((a) => ({ ...a }));
         },
       },
+      // Deliberately left undefined unless a test asks for a fake: the real
+      // vectorizer then runs against the refusing fetchImpl above, so a
+      // Recraft-native short-circuit that failed to fire is a hard failure
+      // rather than a silently-mocked pass.
+      ...(options.vectorizer ? { vectorizer: options.vectorizer } : {}),
     },
   };
 
@@ -393,6 +410,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
     deliveries,
     messages,
     generated,
+    fetches,
     axisCompilations: () => axisCompilations,
   };
 }
@@ -994,6 +1012,421 @@ describe('runConceptStage — wasm buffers are released', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// runVectorStage integration harness
+//
+// Stage 2 fixtures are produced by RUNNING STAGE 1, not by hand-seeding D1 and
+// R2. Everything stage 2 reads — the concept rows, the r2 keys, the
+// native_svg_key pointer, the checkpoint's OCR verdicts, the spend ledger, the
+// selection row — is then exactly what the real stage writes, so a change to
+// stage 1's persistence shows up here as a failure instead of quietly leaving
+// these tests asserting against a shape that no longer exists.
+// ---------------------------------------------------------------------------
+
+/** The proven Recraft vector-native return: an empty PNG plus a native SVG. */
+const RECRAFT_NATIVE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+  '<path d="M10 10 H 90 V 90 H 10 Z" fill="#0F3D3E"/></svg>';
+
+const recraftEmblem = (axisId: string): GenerateResult =>
+  axisId === 'emblem'
+    ? {
+        ok: true,
+        costUsd: IMAGE_COST_USD.recraft,
+        concept: {
+          axisId,
+          vendor: 'recraft',
+          vendorRequestId: 'req-emblem',
+          png: new Uint8Array(0),
+          nativeSvg: RECRAFT_NATIVE_SVG,
+        },
+      }
+    : okConcept(axisId, MARKS[axisFixture(axisId)]!);
+
+/** A square true vector — a pack built from this clears every gate. */
+const TRACED_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+  '<path d="M12 12 H88 V88 H12 Z" fill="#123456"/>' +
+  '<circle cx="50" cy="50" r="18" fill="#E8C39E"/></svg>';
+
+/**
+ * A NON-SQUARE true vector. It passes `checkTrueVector` (real paths, valid
+ * viewBox) but every render comes out at the wrong aspect, so the dimension and
+ * ICO gates fail inside `buildPack` — the one realistic way to reach the
+ * gates-failed abort leg without faking `buildPack` itself.
+ */
+const WIDE_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">' +
+  '<path d="M10 10 H190 V90 H10 Z" fill="#0F3D3E"/></svg>';
+
+const fakeVectorizer = (result: Awaited<ReturnType<Vectorizer['toVector']>>): Vectorizer => ({
+  toVector: async () => result,
+});
+
+interface VectorHarness extends Harness {
+  vectorJobKey: string;
+  vectorToken: string;
+  vectorMessage: JobMessage;
+}
+
+async function setupVector(
+  options: SetupOptions & { winner?: number; source?: SelectionSource } = {},
+): Promise<VectorHarness> {
+  const h = await setup(options);
+  const stageOne = await runConceptStage(h.config, message(h.jobKey));
+  // Precondition, asserted inline: every stage-2 assertion below is about what
+  // happens to a fully delivered M1. If stage 1 ever stops delivering under
+  // these options, these tests must fail here rather than pass vacuously
+  // against an empty concept table.
+  assert.deepEqual(stageOne, { outcome: 'delivered' }, 'stage-2 fixtures start from a full M1');
+
+  const vectorJobKey = await buildJobKey(CONTRACT_ID, 'vector');
+  await h.jobs.claim(vectorJobKey, CONTRACT_ID, 'vector');
+  const vectorToken = (await h.jobs.get(vectorJobKey))!.deliverableToken!;
+  assert.notEqual(vectorToken, h.token, 'each stage gets its own capability token');
+  await h.selection.select(CONTRACT_ID, options.winner ?? 1, options.source ?? 'buyer');
+
+  return {
+    ...h,
+    vectorJobKey,
+    vectorToken,
+    vectorMessage: { contractId: CONTRACT_ID, jobKey: vectorJobKey, stage: 'vector' },
+  };
+}
+
+const readJson = <T>(h: VectorHarness, file: string): T =>
+  JSON.parse(new TextDecoder().decode(h.r2.objects.get(`${h.vectorToken}/${file}`)!.bytes)) as T;
+
+describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai', () => {
+  it('delivers the full pack, report, and licenses with zero vendor spend', async () => {
+    const h = await setupVector({ generate: recraftEmblem, winner: SLOT_OF['emblem']! });
+    // Precondition: the winner really is the Recraft slot with a stored native
+    // SVG. Without this, "never called Vectorizer.ai" could be true simply
+    // because stage 1 never wrote the pointer and the leg aborted early.
+    const winnerRow = (await h.concepts.list(CONTRACT_ID)).find(
+      (row) => row.slot === SLOT_OF['emblem'],
+    )!;
+    assert.equal(winnerRow.nativeSvgKey, `${h.token}/concept-3.svg`);
+    assert.ok(h.r2.objects.has(winnerRow.nativeSvgKey!));
+
+    const result = await runVectorStage(h.config, h.vectorMessage);
+    assert.deepEqual(result, { outcome: 'delivered' });
+
+    // The §13 mitigation, proved structurally: no fake vectorizer was injected,
+    // so the REAL one ran against a fetchImpl that refuses the network. The
+    // fonts call proves the recorder itself works — without it, "no
+    // vectorizer.ai call" would also be true of a broken recorder.
+    assert.ok(
+      h.fetches.some((url) => url.includes('googleapis.com/webfonts')),
+      'the advisory font call is recorded, so the recorder is live',
+    );
+    assert.equal(
+      h.fetches.filter((url) => url.includes('vectorizer.ai')).length,
+      0,
+      'a Recraft-native winner must not pay Vectorizer.ai',
+    );
+    assert.equal((await h.jobs.get(h.vectorJobKey))?.checkpoint?.spendUsd, 0);
+
+    // Artifacts land under stage 2's own token, with the content types the
+    // /deliverables route serves them as.
+    for (const [file, type] of [
+      ['pack.zip', 'application/zip'],
+      ['report.json', 'application/json'],
+      ['licenses.json', 'application/json'],
+    ] as const) {
+      const object = h.r2.objects.get(`${h.vectorToken}/${file}`);
+      assert.ok(object, `${file} is missing from R2`);
+      assert.equal(object.contentType, type);
+    }
+
+    const files = unzipFiles(h.r2.objects.get(`${h.vectorToken}/pack.zip`)!.bytes);
+    for (const name of REQUIRED_ZIP_ENTRIES)
+      assert.ok(name in files, `missing pack entry: ${name}`);
+
+    // FR-12 is advisory and must survive the vendor being unreachable: the
+    // refusing fetchImpl above means the pinned fallback pairing is what lands.
+    const brand = JSON.parse(new TextDecoder().decode(files['brand.json']!)) as {
+      fonts: { heading: { family: string } };
+    };
+    assert.equal(brand.fonts.heading.family, 'Inter', 'a fonts outage never fails the job');
+
+    assert.equal(h.deliveries.length, 2);
+    const m2 = h.deliveries[1]!;
+    assert.equal(m2.milestoneId, 'm2');
+    assert.deepEqual(m2.attachments, [
+      `https://logosmith.example.com/deliverables/${h.vectorToken}/pack.zip`,
+      `https://logosmith.example.com/deliverables/${h.vectorToken}/report.json`,
+      `https://logosmith.example.com/deliverables/${h.vectorToken}/licenses.json`,
+      `https://logosmith.example.com/p/${h.vectorToken}`,
+    ]);
+    assert.match(m2.note, /Harbor & Vine/);
+    assert.match(m2.note, /Trademark clearance is NOT performed/);
+    // The platform posts only the opening ~500 characters as the thread
+    // summary, so the download link cannot live below the fold.
+    assert.ok(m2.note.indexOf('DOWNLOAD:') < 200);
+
+    assert.equal((await h.selection.get(CONTRACT_ID))?.state, 'pack_delivered');
+    const job = await h.jobs.get(h.vectorJobKey);
+    assert.equal(job?.status, 'delivered');
+    assert.equal(job?.outcome, 'delivered');
+  });
+
+  it('writes a §8-complete validation report and license manifest beside the pack', async () => {
+    const h = await setupVector({ generate: recraftEmblem, winner: SLOT_OF['emblem']! });
+    await runVectorStage(h.config, h.vectorMessage);
+
+    const report = readJson<ValidationReport>(h, 'report.json');
+    assert.equal(report.contractId, CONTRACT_ID);
+    assert.equal(report.brandName, BRIEF.brandName);
+    assert.equal(report.gatesPass, true);
+    assert.equal(report.concepts.length, 3);
+    for (const concept of report.concepts) {
+      assert.ok(concept.phash, 'every concept carries its hash');
+      assert.ok(concept.ocr, 'and its readback snapshot');
+      assert.equal(concept.ocr!.pass, true);
+    }
+    assert.deepEqual(report.winner, {
+      slot: SLOT_OF['emblem'],
+      axisId: 'emblem',
+      selectionSource: 'buyer',
+    });
+    assert.deepEqual(report.vectorization, {
+      source: 'recraft-native',
+      vendor: 'recraft',
+      costUsd: 0,
+    });
+    assert.equal(report.svgGate.zeroRasterEmbedded, true);
+    assert.equal(report.svgGate.census.image, 0);
+    assert.equal(report.dimensions.length, 9, 'two masters, six favicons, and the mono master');
+    assert.ok(report.dimensions.every((entry) => entry.pass));
+    assert.deepEqual(report.ico.sizes, [16, 32, 48]);
+    assert.ok(report.zip.manifest.includes('logo.svg'));
+    assert.equal(report.moderation.images.length, 3, 'one unsafe-flag snapshot per concept');
+    assert.ok(report.moderation.images.every((image) => image.unsafe === false));
+    assert.equal(report.caps.conceptStageUsd, 2 * IMAGE_COST_USD.ideogram + IMAGE_COST_USD.recraft);
+    assert.equal(report.caps.vectorStageUsd, 0);
+    assert.deepEqual(report.idempotencyKeys, {
+      concepts: h.jobKey,
+      vector: h.vectorJobKey,
+    });
+    assert.equal(report.phashMatrix.distances[0]![1], report.phashMatrix.distances[1]![0]);
+
+    const licenses = readJson<LicenseManifest>(h, 'licenses.json');
+    assert.deepEqual(
+      licenses.entries.map((entry) => entry.artifact),
+      ['concept-1.png', 'concept-2.png', 'concept-3.png', 'logo.svg'],
+    );
+    assert.equal(licenses.entries[3]!.vendor, 'recraft', 'the conversion is credited to Recraft');
+    assert.equal(licenses.entries[0]!.vendorRequestId, 'req-wordmark');
+  });
+
+  it('treats a redelivered vector message as a no-op', async () => {
+    const h = await setupVector({ generate: recraftEmblem, winner: SLOT_OF['emblem']! });
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+    assert.equal(h.deliveries.length, 2, 'M1 and one M2 — the second run delivers nothing');
+  });
+});
+
+describe('runVectorStage — the traced path and its spend ledger', () => {
+  it('delivers a traced winner and books the conversion against the ledger', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({
+        ok: true,
+        svg: TRACED_SVG,
+        source: 'vectorizer',
+        costUsd: IMAGE_COST_USD.vectorizer,
+      }),
+    });
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+
+    const job = await h.jobs.get(h.vectorJobKey);
+    assert.equal(job?.checkpoint?.spendUsd, IMAGE_COST_USD.vectorizer);
+    assert.equal(job?.spentUsd, IMAGE_COST_USD.vectorizer);
+
+    const report = readJson<ValidationReport>(h, 'report.json');
+    assert.deepEqual(report.vectorization, {
+      source: 'vectorizer',
+      vendor: 'vectorizer',
+      costUsd: IMAGE_COST_USD.vectorizer,
+    });
+    assert.equal(report.caps.vectorStageUsd, IMAGE_COST_USD.vectorizer);
+    assert.equal(
+      report.caps.spentUsd,
+      3 * IMAGE_COST_USD.ideogram + IMAGE_COST_USD.vectorizer,
+      'the report shows both stages summed, not just this one',
+    );
+
+    const licenses = readJson<LicenseManifest>(h, 'licenses.json');
+    assert.equal(licenses.entries.at(-1)!.vendor, 'vectorizer');
+  });
+
+  // Regression guard, same shape as stage 1's. The vendor is paid the moment
+  // toVector returns; ten wasm renders and three R2 puts sit between that and
+  // the end of the stage. If the ledger is not persisted first, a failing R2
+  // write loses the dollars, the queue retries, and the conversion is bought
+  // twice.
+  it('persists the conversion spend before anything that can throw', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({
+        ok: true,
+        svg: TRACED_SVG,
+        source: 'vectorizer',
+        costUsd: IMAGE_COST_USD.vectorizer,
+      }),
+    });
+    h.r2.failPut = 'R2 put failed';
+
+    await assert.rejects(runVectorStage(h.config, h.vectorMessage), /R2 put failed/);
+
+    const job = await h.jobs.get(h.vectorJobKey);
+    assert.equal(job?.checkpoint?.spendUsd, IMAGE_COST_USD.vectorizer, 'the dollars are on record');
+    assert.equal(job?.spentUsd, IMAGE_COST_USD.vectorizer);
+    assert.equal(h.deliveries.length, 1, 'and nothing was delivered');
+  });
+});
+
+describe('runVectorStage — vendor and gate failures never deliver', () => {
+  it('parks on a retryable vectorizer outage and tells the buyer exactly once', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({
+        ok: false,
+        retryable: true,
+        error: 'vectorizer.ai returned 503',
+      }),
+    });
+
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'parked' });
+    const parked = await h.jobs.get(h.vectorJobKey);
+    assert.equal(parked?.status, 'parked');
+    assert.equal(parked?.parkReason, 'vectorizer_outage');
+    assert.equal(parked?.checkpoint?.spendUsd, 0, 'an outage produced nothing and cost nothing');
+    assert.equal(h.deliveries.length, 1, 'M1 only — nothing is delivered');
+    assert.equal(h.messages.length, 1);
+    assert.match(h.messages[0]!, /conversion service is currently unavailable/);
+
+    // The cron unparks and re-enqueues every 15 minutes; the buyer hears about
+    // it once, not once per cycle.
+    await h.jobs.unpark(h.vectorJobKey);
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'parked' });
+    assert.equal(h.messages.length, 1, 'exactly one notice, not one per cron cycle');
+  });
+
+  it('aborts rather than parks when the conversion fails permanently', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({
+        ok: false,
+        retryable: false,
+        error: 'true-vector self-check failed: contains 1 <image> element(s)',
+      }),
+    });
+
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'aborted' });
+    const job = await h.jobs.get(h.vectorJobKey);
+    assert.equal(job?.status, 'delivered', 'terminal, not parked — the retry can never succeed');
+    assert.equal(job?.outcome, 'aborted');
+    assert.equal(h.deliveries.length, 1);
+    assert.match(h.messages[0]!, /wraps a raster/);
+  });
+
+  it('takes the abort leg without delivering when the pack gates fail', async () => {
+    const h = await setupVector({
+      winner: 1,
+      // A true vector by the gate's own reckoning, but non-square: every render
+      // lands at the wrong aspect and the dimension + ICO gates fail.
+      vectorizer: fakeVectorizer({ ok: true, svg: WIDE_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'aborted' });
+    assert.equal(h.deliveries.length, 1, 'deliverMilestone is never called for M2');
+    assert.equal(
+      h.r2.objects.has(`${h.vectorToken}/pack.zip`),
+      false,
+      'and a failing pack is never even written to R2',
+    );
+    assert.equal((await h.selection.get(CONTRACT_ID))?.state, 'winner_selected');
+    assert.equal((await h.jobs.get(h.vectorJobKey))?.outcome, 'aborted');
+    assert.match(h.messages[0]!, /did not clear its own delivery gates/);
+    assert.match(h.messages[0]!, /logo-color-1024\.png is 1024x512, expected 1024x1024/);
+
+    const { results } = await h.db
+      .prepare("SELECT result FROM gate_audit WHERE gate = 'pack' AND job_key = ?")
+      .bind(h.vectorJobKey)
+      .all<{ result: string }>();
+    assert.deepEqual(
+      results.map((row) => row.result),
+      ['fail'],
+      'the failing pack is on the audit record',
+    );
+  });
+
+  it('aborts when the winning concept has gone missing from R2', async () => {
+    const h = await setupVector({ winner: 1 });
+    h.r2.objects.delete(`${h.token}/concept-1.png`);
+
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'aborted' });
+    assert.equal(h.deliveries.length, 1);
+    assert.match(h.messages[0]!, /no longer retrievable/);
+  });
+
+  it('throws rather than guessing when no winner has been selected', async () => {
+    const h = await setup();
+    await runConceptStage(h.config, message(h.jobKey));
+    const vectorJobKey = await buildJobKey(CONTRACT_ID, 'vector');
+    await h.jobs.claim(vectorJobKey, CONTRACT_ID, 'vector');
+
+    await assert.rejects(
+      runVectorStage(h.config, {
+        contractId: CONTRACT_ID,
+        jobKey: vectorJobKey,
+        stage: 'vector',
+      }),
+      /no selected winner/,
+    );
+  });
+});
+
+// The stage-1 guard's twin (see above). buildPack drives ten resvg renders —
+// two masters, six favicons, the mono pixmap, and the mono master — inside one
+// stage invocation, which is precisely the kind of loop that put Task 10 at
+// 129.5 MB against the 128 MB isolate ceiling. This fails if anyone adds a bare
+// `new Resvg` to the vector stage rather than going through pack/render.ts.
+describe('runVectorStage — wasm buffers are released', () => {
+  it('frees one Resvg and one RenderedImage for every render the pack triggers', async () => {
+    const sources = nodeWasmSources();
+    await ensureResvgReady(sources.resvg);
+    const probe = new Resvg(MARK_SVGS['leftHalf']!, { fitTo: { mode: 'width', value: 8 } });
+    const probeImage = probe.render();
+    const renderedImageProto = Object.getPrototypeOf(probeImage) as { free(): void };
+    probeImage.free();
+    probe.free();
+
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0 }),
+    });
+
+    const render = mock.method(Resvg.prototype, 'render');
+    const resvgFree = mock.method(Resvg.prototype, 'free');
+    const imageFree = mock.method(renderedImageProto, 'free');
+    try {
+      assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+      // 2 masters + 6 favicons + the mono pixmap + the mono master.
+      assert.equal(render.mock.callCount(), 10);
+      assert.equal(resvgFree.mock.callCount(), render.mock.callCount());
+      assert.equal(imageFree.mock.callCount(), render.mock.callCount());
+    } finally {
+      render.mock.restore();
+      resvgFree.mock.restore();
+      imageFree.mock.restore();
+    }
+  });
+});
+
 describe('processJobMessage', () => {
   it('routes a concepts message into the concept stage', async () => {
     const h = await setup();
@@ -1001,12 +1434,15 @@ describe('processJobMessage', () => {
     assert.equal(h.deliveries.length, 1);
   });
 
-  it('refuses the stages that later tasks own rather than silently no-opping', async () => {
+  it('routes a vector message into the vector stage', async () => {
+    const h = await setupVector({ generate: recraftEmblem, winner: SLOT_OF['emblem']! });
+    await processJobMessage(h.config, h.vectorMessage);
+    assert.equal(h.deliveries.length, 2, 'M1 from the fixture, then M2 from the routed message');
+    assert.equal(h.deliveries[1]!.milestoneId, 'm2');
+  });
+
+  it('refuses the stage a later task owns rather than silently no-opping', async () => {
     const h = await setup();
-    await assert.rejects(
-      processJobMessage(h.config, { contractId: CONTRACT_ID, jobKey: h.jobKey, stage: 'vector' }),
-      /Task 21/,
-    );
     await assert.rejects(
       processJobMessage(h.config, { contractId: CONTRACT_ID, jobKey: h.jobKey, stage: 'single' }),
       /Task 23/,
