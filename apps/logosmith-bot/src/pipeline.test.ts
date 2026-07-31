@@ -13,6 +13,7 @@ import {
   OCR_SIMILARITY_THRESHOLD,
   SCOUT_MODEL_ID,
 } from './config.js';
+import { assembleDisputeEvidence } from './disputes.js';
 import type { GenerateResult, Generator } from './generate.js';
 import { readPngDimensions, type OcrGate, type OcrOutcome } from './gates/index.js';
 import {
@@ -204,6 +205,8 @@ const okConcept = (
   axisId: string,
   png: Uint8Array,
   costUsd: number = IMAGE_COST_USD.ideogram,
+  /** Vendor RNG seed. Ideogram returns one; Recraft and FLUX do not. */
+  seed?: number,
 ): GenerateResult => ({
   ok: true,
   costUsd,
@@ -212,6 +215,7 @@ const okConcept = (
     vendor: AXES.find((a) => a.id === axisId)?.vendor ?? 'ideogram',
     vendorRequestId: `req-${axisId}`,
     png,
+    seed,
   },
 });
 
@@ -477,6 +481,55 @@ describe('runConceptStage — the §9 contractual outcomes', () => {
     assert.equal(job?.status, 'delivered');
     assert.equal(job?.outcome, 'delivered');
     assert.equal(job?.checkpoint?.spendUsd, 3 * IMAGE_COST_USD.ideogram);
+  });
+
+  // The seed is what makes a disputed concept REGENERATABLE, and the gate audit
+  // detail is the only place it is persisted (types.ts, `Concept.seed`). This
+  // asserts the whole path in one run: the vendor returns it, stage 1 writes it
+  // to D1, and the dispute response reads it back onto the right slot. Mixed on
+  // purpose — Ideogram issues a seed, Recraft (slot 3) does not — so a null
+  // reads as the vendor's silence, never as a lost value.
+  it('records the generation seed in the audit trail, where the dispute response reads it', async () => {
+    const SEEDS: Record<string, number> = { wordmark: 424242, lockup: 777001 };
+    assert.equal(AXES[2]!.vendor, 'recraft', 'slot 3 is the vendor that returns no seed');
+    assert.equal(SEEDS.emblem, undefined);
+
+    const h = await setup({
+      generate: (axisId) =>
+        okConcept(axisId, MARKS[axisFixture(axisId)]!, IMAGE_COST_USD.ideogram, SEEDS[axisId]),
+    });
+    assert.deepEqual(await runConceptStage(h.config, message(h.jobKey)), { outcome: 'delivered' });
+
+    // 1. It reached the audit detail, alongside the verdict it belongs to.
+    const ocrRows = await h.jobs.listGateAudit(h.jobKey, 'ocr');
+    assert.equal(ocrRows.length, 3, 'one readback row per slot');
+    assert.deepEqual(
+      ocrRows.map((row) => [row.slot, (row.detail as { seed?: number }).seed ?? null]),
+      [
+        [1, 424242],
+        [2, 777001],
+        [3, null],
+      ],
+    );
+
+    // 2. And it surfaces in the dispute response, matched to the right slot.
+    const evidence = await assembleDisputeEvidence(
+      {
+        jobs: h.jobs,
+        concepts: h.concepts,
+        selection: h.selection,
+        publicBaseUrl: 'https://logosmith.example.com',
+      },
+      CONTRACT_ID,
+    );
+    assert.deepEqual(
+      evidence.concepts.map((concept) => [concept.slot, concept.seed]),
+      [
+        [1, 424242],
+        [2, 777001],
+        [3, null],
+      ],
+    );
   });
 
   it('regenerates a failing slot twice, then delivers — attempts and spend both counted', async () => {

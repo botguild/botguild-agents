@@ -422,6 +422,106 @@ describe('assembleDisputeEvidence — vendor provenance', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The generation seed — the strongest answer to "this is not what I asked for",
+// because the image can be regenerated from it. It lives only in the gate audit
+// detail (types.ts, `Concept.seed`), so it has to be joined back to the concept
+// row it belongs to.
+// ---------------------------------------------------------------------------
+
+const OCR_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+
+/** An `ocr` audit detail shaped as pipeline.ts writes it. */
+const ocrDetail = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  model: OCR_MODEL,
+  transcription: 'Harbor & Vine',
+  score: 0.97,
+  pass: true,
+  unsafe: false,
+  checkedAt: '2026-07-30T12:00:00.000Z',
+  vendorRequestId: 'ideogram-req-1',
+  ...over,
+});
+
+/** One stored concept plus the audit rows that gated it, assembled. */
+async function withTrail(
+  rows: Array<{ slot?: number; gate?: string; detail: unknown }>,
+  stored: ConceptUpsert = CONCEPTS[0]!,
+): Promise<DisputeEvidence> {
+  const db = createMemoryD1();
+  await applyMigrations(db);
+  const jobs = createJobStore(db, () => NOW);
+  const concepts = createConceptStore(db, () => NOW);
+  const selection = createSelectionStore(db, () => NOW);
+  const conceptsKey = await buildJobKey(CONTRACT, 'concepts');
+  await concepts.upsert(stored);
+  for (const row of rows) {
+    await jobs.recordGateAudit({
+      jobKey: conceptsKey,
+      contractId: CONTRACT,
+      slot: row.slot ?? stored.slot,
+      gate: row.gate ?? 'ocr',
+      result: 'pass',
+      detail: row.detail,
+    });
+  }
+  return assembleDisputeEvidence(
+    { jobs, concepts, selection, publicBaseUrl: BASE_URL, now: () => NOW },
+    CONTRACT,
+  );
+}
+
+describe('assembleDisputeEvidence — the generation seed', () => {
+  it('reports the seed recorded alongside the verdict the concept row stores', async () => {
+    // Precondition: the audit detail really does describe the stored row.
+    assert.equal(CONCEPTS[0]!.ocrScore, 0.97);
+    assert.equal(CONCEPTS[0]!.ocrTranscription, 'Harbor & Vine');
+    const evidence = await withTrail([{ detail: ocrDetail({ seed: 424242 }) }]);
+    assert.equal(evidence.concepts[0]!.seed, 424242);
+  });
+
+  it('picks the seed of the attempt that was KEPT, not the newest one', async () => {
+    // The free taster keeps its BEST-scoring attempt rather than its last, so
+    // "the newest ocr row for this slot" would name a seed the delivered image
+    // was never generated from.
+    const evidence = await withTrail([
+      { detail: ocrDetail({ seed: 111111 }) },
+      { detail: ocrDetail({ seed: 999999, transcription: 'Harbcr & Vine', score: 0.42 }) },
+    ]);
+    assert.equal(evidence.concepts[0]!.seed, 111111);
+  });
+
+  it('reports no seed when the vendor returned none', async () => {
+    const evidence = await withTrail([{ detail: ocrDetail() }]);
+    assert.equal(evidence.concepts[0]!.seed, null);
+    assert.equal(evidence.concepts[0]!.ocr?.score, 0.97, 'the verdict is still reported');
+  });
+
+  it('refuses to name a seed when two matching rows disagree', async () => {
+    const evidence = await withTrail([
+      { detail: ocrDetail({ seed: 111111 }) },
+      { detail: ocrDetail({ seed: 222222 }) },
+    ]);
+    assert.equal(evidence.concepts[0]!.seed, null, 'a maybe-wrong seed is worse than none');
+  });
+
+  it('ignores a seed that is not a number', async () => {
+    const evidence = await withTrail([{ detail: ocrDetail({ seed: '424242' }) }]);
+    assert.equal(evidence.concepts[0]!.seed, null);
+  });
+
+  it("never attaches another slot's seed", async () => {
+    const evidence = await withTrail([{ slot: 2, detail: ocrDetail({ seed: 424242 }) }]);
+    assert.equal(evidence.concepts[0]!.slot, 1);
+    assert.equal(evidence.concepts[0]!.seed, null);
+  });
+
+  it('ignores a seed on a row from a different gate', async () => {
+    const evidence = await withTrail([{ gate: 'phash', detail: ocrDetail({ seed: 424242 }) }]);
+    assert.equal(evidence.concepts[0]!.seed, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The winner (FR-9) — "you sent me the wrong concept"
 // ---------------------------------------------------------------------------
 

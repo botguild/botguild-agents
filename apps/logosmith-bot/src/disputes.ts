@@ -93,6 +93,14 @@ export interface DisputeConcept {
    * the milestone delivery note, and the same token `evidenceUrls` links.
    */
   r2Key: string | null;
+  /**
+   * The vendor RNG seed this image was generated from, recovered from the gate
+   * audit row that recorded its verdict — the strongest answer to "this is not
+   * what I asked for", because the image can be regenerated from it. `null`
+   * means the vendor returned no seed (only Ideogram does), not that
+   * provenance is missing — the same reading as a null `vendorRequestId`.
+   */
+  seed: number | null;
   phash: string | null;
   attemptsUsed: number;
   /** The stored lettering-readback snapshot. `null` when the slot never
@@ -168,7 +176,8 @@ export interface DisputeResponder {
 const EVIDENCE_NOTE =
   'Assembled from LogoSmith’s own records for this contract, written while the work ran: ' +
   '`concepts` (one row per generated image, with the vendor request id and the lettering ' +
-  'readback verdict as the gate recorded it), `selection` (the winner and how it was chosen), ' +
+  'readback verdict as the gate recorded it, and the generation seed recovered from the audit ' +
+  'row that recorded that verdict), `selection` (the winner and how it was chosen), ' +
   '`jobs` (the per-stage idempotency claims and vendor spend), and `gate_audit` (the ' +
   'append-only gate decision trail, listed here in insert order across every stage). Nothing ' +
   'is recomputed at dispute time. A null `detail` on an audit row means either that no detail ' +
@@ -176,6 +185,8 @@ const EVIDENCE_NOTE =
   'degraded to null rather than dropped, so the row itself is always present. The licence ' +
   'section covers the generated concept images; the delivered licenses.json additionally covers ' +
   'the converted logo.svg, whose raster-to-vector conversion issues no per-request identifier. ' +
+  'A null `seed` or `vendorRequestId` on a concept means the vendor returned none — only some ' +
+  'image vendors issue either — not that provenance is missing. ' +
   'Anything this response could not source is named in `evidenceGaps`.';
 
 /**
@@ -244,6 +255,45 @@ const toJobRecord = (row: JobRow): DisputeJobRecord => ({
   deliveredAt: row.deliveredAt,
 });
 
+/** The gate whose detail carries per-image generation provenance (pipeline.ts). */
+const OCR_GATE = 'ocr';
+
+/**
+ * The seed the image a concept row HOLDS was generated from.
+ *
+ * The join is on the STORED VERDICT — model, transcription and score together
+ * — not on "the newest `ocr` row for this slot". A slot can be gated several
+ * times (each regeneration writes its own row with its own seed), and the free
+ * taster keeps its BEST-scoring attempt rather than its last, so the newest row
+ * is not always the one for the image that was kept. Reporting that row's seed
+ * would name a seed the delivered image was not generated from — a fabricated
+ * reproducibility claim, which is worse than none.
+ *
+ * Fails closed twice over. The detail is `unknown` by construction, so the
+ * shape is checked field by field with `Object.hasOwn` (the report.ts idiom: a
+ * bare read or `in` would walk the prototype chain and admit an inherited
+ * `seed`). And if two matching rows disagree on the seed, none is reported.
+ */
+function seedForConcept(row: ConceptRow, trail: GateAuditRow[]): number | null {
+  const seeds = new Set<number>();
+  for (const audit of trail) {
+    if (audit.gate !== OCR_GATE || audit.slot !== row.slot) continue;
+    const detail = audit.detail;
+    if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) continue;
+    const candidate = detail as Record<string, unknown>;
+    if (!Object.hasOwn(candidate, 'seed') || typeof candidate.seed !== 'number') continue;
+    if (
+      candidate.model !== row.ocrModel ||
+      candidate.transcription !== row.ocrTranscription ||
+      candidate.score !== row.ocrScore
+    ) {
+      continue;
+    }
+    seeds.add(candidate.seed);
+  }
+  return seeds.size === 1 ? [...seeds][0]! : null;
+}
+
 /**
  * Same null-discipline as report.ts's `toReportConcept`: the three OCR columns
  * are written together by one gate, so a verdict is reported only when all
@@ -251,7 +301,7 @@ const toJobRecord = (row: JobRow): DisputeJobRecord => ({
  * zero score and an empty transcription are both real verdicts a failing
  * readback produces, and a falsy check would report them as no verdict at all.
  */
-const toDisputeConcept = (row: ConceptRow): DisputeConcept => {
+const toDisputeConcept = (row: ConceptRow, trail: GateAuditRow[]): DisputeConcept => {
   const hasOcr = row.ocrModel !== null && row.ocrTranscription !== null && row.ocrScore !== null;
   return {
     slot: row.slot,
@@ -259,6 +309,7 @@ const toDisputeConcept = (row: ConceptRow): DisputeConcept => {
     vendor: row.vendor,
     vendorRequestId: row.vendorRequestId,
     r2Key: row.r2Key,
+    seed: seedForConcept(row, trail),
     phash: row.phash,
     attemptsUsed: row.attemptsUsed,
     ocr: hasOcr
@@ -388,7 +439,7 @@ export async function assembleDisputeEvidence(
 
   const { merged, raw } = mergeAuditTrail(trails);
   const inputScreening = summarizeInputScreening(raw);
-  const concepts = conceptRows.map(toDisputeConcept);
+  const concepts = conceptRows.map((row) => toDisputeConcept(row, raw));
   const slotsWithoutVerdict = concepts.filter((c) => c.ocr === null).map((c) => c.slot);
 
   const evidenceGaps: string[] = [];

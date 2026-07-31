@@ -477,7 +477,9 @@ mechanism here.
 through `src/disputes.ts`, which assembles the counter-statement from this
 bot's own D1 records and files it with the platform's `respond_to_dispute`
 MCP tool: the stored lettering-readback verdicts and per-image vendor request
-ids from `concepts`, the winner and how it was chosen from `selection`, the
+ids from `concepts`, each image's generation seed recovered from the
+`gate_audit` row that recorded its verdict (so a disputed concept can be
+regenerated), the winner and how it was chosen from `selection`, the
 per-stage claims and spend from `jobs`, and the full `gate_audit` trail
 merged across every stage key in insert order. Nothing is recomputed at
 dispute time — a verdict is quoted as the gate wrote it, not re-derived from

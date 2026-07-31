@@ -737,6 +737,13 @@ export async function runConceptStage(
     const slotNo = pending.slot;
     const slotLog = log.child({ slot: slotNo, axisId: pending.axis.id });
     let png: Uint8Array;
+    // The vendor's RNG seed for THIS generation, carried to the audit row below
+    // (the only place it is persisted — see types.ts's `Concept.seed`). Scoped
+    // to the iteration, so a resumed slot that re-gates bytes generated in an
+    // earlier invocation records no seed rather than an earlier slot's: the
+    // value was never persisted, and an absent seed is honest where a borrowed
+    // one would be a false reproducibility claim.
+    let seed: number | undefined;
     const row: ConceptUpsert = {
       contractId,
       slot: slotNo,
@@ -806,6 +813,7 @@ export async function runConceptStage(
       pending.attempts += 1;
       pending.status = 'pending';
       pending.vendorRequestId = result.concept.vendorRequestId;
+      seed = result.concept.seed;
       pending.ocr = undefined;
       pending.phash = undefined;
       pending.failReason = undefined;
@@ -905,7 +913,12 @@ export async function runConceptStage(
       slot: slotNo,
       gate: 'ocr',
       result: ocr.verdict.pass ? 'pass' : 'fail',
-      detail: { ...ocr.verdict, seed: undefined, vendorRequestId: pending.vendorRequestId },
+      // The generation provenance rides with the verdict it produced: the
+      // request id the vendor issued, and the seed the image can be regenerated
+      // from. A vendor that returns no seed (Recraft, FLUX) leaves the key off
+      // entirely — JSON.stringify drops `undefined` — which reads as the
+      // absence it is rather than as a value.
+      detail: { ...ocr.verdict, seed, vendorRequestId: pending.vendorRequestId },
     });
 
     // --- Perceptual hash ------------------------------------------------------
