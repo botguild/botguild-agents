@@ -41,8 +41,8 @@ import {
   type VectorGateResult,
   type ZipGateResult,
 } from './gates/index.js';
-import type { ConceptRow } from './jobs.js';
-import { MODERATION_MODEL, MODERATION_VENDOR } from './moderation.js';
+import type { ConceptRow, GateAuditRow } from './jobs.js';
+import { MODERATION_MODEL, MODERATION_VENDOR, type ModerationVerdict } from './moderation.js';
 import type { PackGateReport } from './pack/index.js';
 import type { SelectionSource } from './types.js';
 
@@ -142,24 +142,30 @@ export interface ReportImageModeration {
   checkedAt: string;
 }
 
+/**
+ * The FR-2 pre-generation screening of the brand name and brief, summarized
+ * from the concepts stage's D1 audit trail.
+ *
+ * The vendor's verdict is copied in VERBATIM, response body and all, rather
+ * than referenced. The report is the evidence artifact: the buyer holding it
+ * cannot query D1, and neither can a payer reading it during a dispute, so a
+ * field that said "see `gate_audit`" would be evidence to nobody who needs it.
+ * `auditTrail` still names where the full trail lives — that is a
+ * cross-reference to the outage rows this summarizes, not a substitute for the
+ * verdict itself.
+ */
+export interface ReportInputScreening {
+  /** The vendor and model this bot pins for FR-2 screening. */
+  vendor: string;
+  model: string;
+  /** Failed screening round-trips before generation started (FR-2 parking). */
+  outageAttempts: number;
+  verdict: ModerationVerdict | null;
+  auditTrail: string;
+}
+
 export interface ReportModeration {
-  /**
-   * The FR-2 pre-generation screening of the brand name and brief.
-   *
-   * The verbatim vendor verdict is NOT copied in here: stage 1 writes it to
-   * the D1 `gate_audit` row for the concepts stage, which §10.9 already names
-   * as the dispute evidence trail, and this module has no reader for it. This
-   * section names the pinned vendor and model, reports how many times the
-   * vendor had to be retried before it answered, and says where the verdict
-   * body lives — rather than restating a verdict it did not read.
-   */
-  input: {
-    vendor: string;
-    model: string;
-    /** Failed screening round-trips before generation started (FR-2 parking). */
-    outageAttempts: number;
-    verdictLocation: string;
-  };
+  input: ReportInputScreening;
   images: ReportImageModeration[];
 }
 
@@ -205,7 +211,8 @@ export interface ReportInput {
   concepts: ConceptRow[];
   /** Read off the stage-1 checkpoint, which is the only store of the flag. */
   visionChecks: ReportImageModeration[];
-  moderationOutageAttempts: number;
+  /** The concepts stage's FR-17 audit trail, for the FR-2 screening record. */
+  moderationAudits: GateAuditRow[];
   winner: { slot: number; source: SelectionSource };
   vectorization: ReportVectorization;
   gates: PackGateReport;
@@ -225,6 +232,63 @@ const roundUsd = (value: number): number => Math.round(value * 1e6) / 1e6;
 function parsePhash(hex: string | null): bigint | null {
   if (hex === null || !/^[0-9a-f]{1,16}$/i.test(hex)) return null;
   return fromHex(hex);
+}
+
+/** The gate name stage 1 records its FR-2 screening under (pipeline.ts). */
+const MODERATION_GATE = 'moderation';
+
+const AUDIT_TRAIL_NOTE =
+  'The full screening trail, including any vendor-outage rows this summarizes, is in D1 ' +
+  'gate_audit under the concepts idempotency key recorded below.';
+
+/**
+ * Recognize a stored moderation verdict.
+ *
+ * `GateAuditRow.detail` is `unknown` by construction — the column holds
+ * whatever the writing call passed it — so the shape is checked field by field
+ * before any of it is copied into a customer-facing document. This is an
+ * allow-list: a row that does not carry every field of a `ModerationVerdict` is
+ * not a verdict, whatever else it may be, and is skipped rather than
+ * half-copied into the evidence pack.
+ */
+function isModerationVerdict(value: unknown): value is ModerationVerdict {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.vendor === 'string' &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.flagged === 'boolean' &&
+    typeof candidate.checkedAt === 'string' &&
+    'response' in candidate
+  );
+}
+
+/**
+ * The FR-2 screening section, summarized from the concepts stage's audit trail.
+ *
+ * The verdict reported is the LAST `clear` screening on the record. Stage 1
+ * re-screens on every run — including resumes, because a thread correction can
+ * change the brief between them — parks on an outage, and only proceeds past a
+ * `clear`. So the last clear row is the one that actually authorized the
+ * generation these concepts came from; earlier rows are outages, which are
+ * counted rather than copied.
+ *
+ * Filters by gate itself rather than trusting the caller to have narrowed the
+ * query, so handing it a whole job's trail is safe.
+ */
+export function summarizeInputScreening(rows: GateAuditRow[]): ReportInputScreening {
+  const screenings = rows.filter((row) => row.gate === MODERATION_GATE);
+  const authorizing = screenings.filter(
+    (row) => row.result === 'clear' && isModerationVerdict(row.detail),
+  );
+  const verdict = authorizing.at(-1)?.detail as ModerationVerdict | undefined;
+  return {
+    vendor: MODERATION_VENDOR,
+    model: MODERATION_MODEL,
+    outageAttempts: screenings.filter((row) => row.result === 'unavailable').length,
+    verdict: verdict ? { ...verdict } : null,
+    auditTrail: AUDIT_TRAIL_NOTE,
+  };
 }
 
 function buildPhashMatrix(concepts: ConceptRow[]): PhashMatrix {
@@ -309,13 +373,7 @@ export function buildValidationReport(input: ReportInput): ValidationReport {
     ico: toReportIco(input.gates.ico),
     zip: toReportZip(input.gates.zip),
     moderation: {
-      input: {
-        vendor: MODERATION_VENDOR,
-        model: MODERATION_MODEL,
-        outageAttempts: input.moderationOutageAttempts,
-        verdictLocation:
-          'D1 gate_audit, gate="moderation", for the concepts-stage idempotency key below',
-      },
+      input: summarizeInputScreening(input.moderationAudits),
       images: input.visionChecks.map((check) => ({ ...check })),
     },
     caps: {

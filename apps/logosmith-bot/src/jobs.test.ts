@@ -144,6 +144,66 @@ describe('JobStore', () => {
     assert.equal(row?.gate, 'ocr');
     assert.deepEqual(JSON.parse(row!.detail_json), { score: 0.4 });
   });
+
+  it('reads the audit trail back in insert order, with detail already parsed', async () => {
+    const jobs = createJobStore(db);
+    await jobs.recordGateAudit({ jobKey: 'k', gate: 'moderation', result: 'unavailable' });
+    await jobs.recordGateAudit({
+      jobKey: 'k',
+      contractId: 'c1',
+      gate: 'moderation',
+      result: 'clear',
+      detail: { flagged: false, response: { id: 'modr-1' } },
+    });
+    await jobs.recordGateAudit({ jobKey: 'other', gate: 'moderation', result: 'clear' });
+
+    const trail = await jobs.listGateAudit('k');
+    assert.deepEqual(
+      trail.map((row) => row.result),
+      ['unavailable', 'clear'],
+      'oldest first, and scoped to the job asked for',
+    );
+    // `created_at` has one-second resolution and these rows land in the same
+    // tick, so "which was last" can only come from insert order.
+    assert.ok(trail[0]!.id < trail[1]!.id);
+    assert.deepEqual(trail[1]!.detail, { flagged: false, response: { id: 'modr-1' } });
+    assert.equal(trail[0]!.detail, null, 'an entry written without a detail reads back as null');
+    assert.equal(trail[1]!.contractId, 'c1');
+  });
+
+  it('narrows the audit trail to one gate on request', async () => {
+    const jobs = createJobStore(db);
+    await jobs.recordGateAudit({ jobKey: 'k', gate: 'moderation', result: 'clear' });
+    await jobs.recordGateAudit({ jobKey: 'k', gate: 'ocr', result: 'fail', detail: { s: 1 } });
+
+    // Precondition: the unfiltered read sees both, so the filter below is
+    // narrowing something rather than querying an already-empty trail.
+    assert.equal((await jobs.listGateAudit('k')).length, 2);
+    const moderation = await jobs.listGateAudit('k', 'moderation');
+    assert.deepEqual(
+      moderation.map((row) => row.gate),
+      ['moderation'],
+    );
+  });
+
+  it('degrades a corrupted detail column to null instead of throwing', async () => {
+    // One row damaged after the fact must not take down a whole report build.
+    const jobs = createJobStore(db);
+    await jobs.recordGateAudit({
+      jobKey: 'k',
+      gate: 'moderation',
+      result: 'clear',
+      detail: { a: 1 },
+    });
+    await db
+      .prepare('UPDATE gate_audit SET detail_json = ? WHERE job_key = ?')
+      .bind('{not json', 'k')
+      .run();
+
+    const trail = await jobs.listGateAudit('k');
+    assert.equal(trail.length, 1);
+    assert.equal(trail[0]!.detail, null);
+  });
 });
 
 describe('ConceptStore', () => {

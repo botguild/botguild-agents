@@ -1236,13 +1236,19 @@ export async function runVectorStage(
         : [],
   );
 
+  // FR-17: "the delivered JSON report ... is generated from these records".
+  // The verbatim FR-2 screening verdict is copied out of the concepts stage's
+  // audit trail into the report, because the buyer holding the report — and a
+  // payer reading it during a dispute — cannot query D1 themselves.
+  const moderationAudits = await jobs.listGateAudit(conceptsJobKey, 'moderation');
+
   const report = buildValidationReport({
     contractId,
     brandName: brief.brandName,
     generatedAt: new Date().toISOString(),
     concepts: conceptRows,
     visionChecks,
-    moderationOutageAttempts: stageOne?.moderationAttempts ?? 0,
+    moderationAudits,
     winner: { slot: winnerSlot, source: selectionRow.source },
     vectorization: {
       source: vector.source,

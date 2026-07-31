@@ -273,17 +273,28 @@ interface SetupOptions {
   vectorizer?: Vectorizer;
 }
 
+/**
+ * The verdict stage 1 records and stage 2's report must reproduce verbatim.
+ * `response` carries a real-shaped vendor body on purpose: it is the part that
+ * would be silently lost if the report ever copied only the top-level flags, or
+ * if it went back to pointing at D1 instead of quoting the verdict.
+ */
+const CLEAR_VERDICT = {
+  vendor: 'openai',
+  model: 'omni-moderation-2024-09-26',
+  flagged: false,
+  response: {
+    id: 'modr-harness-1',
+    model: 'omni-moderation-2024-09-26',
+    results: [
+      { flagged: false, categories: { hate: false }, category_scores: { hate: 0.0000021 } },
+    ],
+  },
+  checkedAt: '2026-07-30T12:00:00.000Z',
+};
+
 const clearModeration: ModerationClient = {
-  screen: async () => ({
-    status: 'clear',
-    verdict: {
-      vendor: 'openai',
-      model: 'omni-moderation-2024-09-26',
-      flagged: false,
-      response: {},
-      checkedAt: '2026-07-30T12:00:00.000Z',
-    },
-  }),
+  screen: async () => ({ status: 'clear', verdict: CLEAR_VERDICT }),
 };
 
 async function setup(options: SetupOptions = {}): Promise<Harness> {
@@ -1203,6 +1214,13 @@ describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai
     assert.ok(report.zip.manifest.includes('logo.svg'));
     assert.equal(report.moderation.images.length, 3, 'one unsafe-flag snapshot per concept');
     assert.ok(report.moderation.images.every((image) => image.unsafe === false));
+    // End to end: stage 1 wrote this verdict to D1 gate_audit, listGateAudit
+    // read it back out of the real column, and it survived into the delivered
+    // JSON byte-for-byte — response body included. The buyer holding
+    // report.json can read the screening that authorized generation without
+    // access to our database.
+    assert.deepEqual(report.moderation.input.verdict, CLEAR_VERDICT);
+    assert.equal(report.moderation.input.outageAttempts, 0);
     assert.equal(report.caps.conceptStageUsd, 2 * IMAGE_COST_USD.ideogram + IMAGE_COST_USD.recraft);
     assert.equal(report.caps.vectorStageUsd, 0);
     assert.deepEqual(report.idempotencyKeys, {

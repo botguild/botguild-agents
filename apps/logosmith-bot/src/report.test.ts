@@ -2,12 +2,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_REGENS_PER_SLOT, MAX_SPEND_USD } from './config.js';
 import { checkTrueVector, hammingDistance, fromHex } from './gates/index.js';
-import type { ConceptRow } from './jobs.js';
-import { MODERATION_MODEL, MODERATION_VENDOR } from './moderation.js';
+import type { ConceptRow, GateAuditRow } from './jobs.js';
+import { MODERATION_MODEL, MODERATION_VENDOR, type ModerationVerdict } from './moderation.js';
 import type { PackGateReport } from './pack/index.js';
 import {
   buildLicenseManifest,
   buildValidationReport,
+  summarizeInputScreening,
   VENDOR_TERMS,
   type LicenseRow,
   type ReportInput,
@@ -62,6 +63,47 @@ const CONCEPTS: ConceptRow[] = [
   }),
 ];
 
+// A real-shaped OpenAI moderations body, not a stub: the point of copying the
+// verdict verbatim is that the vendor's own response survives into the
+// deliverable, so the fixture has to carry something that would be visibly lost
+// if only the top-level flags were copied.
+const MODERATION_VERDICT: ModerationVerdict = {
+  vendor: MODERATION_VENDOR,
+  model: MODERATION_MODEL,
+  flagged: false,
+  response: {
+    id: 'modr-6f21c0',
+    model: MODERATION_MODEL,
+    results: [
+      {
+        flagged: false,
+        categories: { violence: false, hate: false },
+        category_scores: { violence: 0.000012, hate: 0.0000034 },
+      },
+    ],
+  },
+  checkedAt: '2026-07-30T11:58:00.000Z',
+};
+
+const auditRow = (over: Partial<GateAuditRow> = {}): GateAuditRow => ({
+  id: 1,
+  jobKey: 'abc:concepts',
+  contractId: 'contract-1',
+  slot: null,
+  gate: 'moderation',
+  result: 'clear',
+  detail: MODERATION_VERDICT,
+  createdAt: '2026-07-30T11:58:00.000Z',
+  ...over,
+});
+
+/** Two vendor outages, then the screening that authorized generation. */
+const MODERATION_AUDITS: GateAuditRow[] = [
+  auditRow({ id: 1, result: 'unavailable', detail: { error: 'moderation vendor returned 503' } }),
+  auditRow({ id: 2, result: 'unavailable', detail: { error: 'moderation vendor returned 503' } }),
+  auditRow({ id: 3, result: 'clear', detail: MODERATION_VERDICT }),
+];
+
 const CLEAN_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
   '<path d="M10 10 H90 V90 H10 Z" fill="#0F3D3E"/></svg>';
@@ -111,7 +153,7 @@ const reportInput = (over: Partial<ReportInput> = {}): ReportInput => ({
       checkedAt: '2026-07-30T11:59:30.000Z',
     },
   ],
-  moderationOutageAttempts: 2,
+  moderationAudits: MODERATION_AUDITS,
   winner: { slot: 3, source: 'buyer' },
   vectorization: { source: 'recraft-native', vendor: 'recraft', costUsd: 0 },
   gates: gates(),
@@ -293,12 +335,39 @@ describe('buildValidationReport — pack gate evidence', () => {
 });
 
 describe('buildValidationReport — moderation, caps, and idempotency keys', () => {
-  it('names the pinned moderation vendor, the outage count, and where the verdict lives', () => {
+  it('names the pinned moderation vendor and the outage count', () => {
     const report = buildValidationReport(reportInput());
     assert.equal(report.moderation.input.vendor, MODERATION_VENDOR);
     assert.equal(report.moderation.input.model, MODERATION_MODEL);
     assert.equal(report.moderation.input.outageAttempts, 2);
-    assert.match(report.moderation.input.verdictLocation, /gate_audit/);
+    assert.match(report.moderation.input.auditTrail, /gate_audit/);
+  });
+
+  it('copies the authorizing screening verdict in verbatim, response body and all', () => {
+    // Precondition: the fixture's verdict carries a nested vendor response, so
+    // a report that copied only the top-level flags would visibly fail below
+    // rather than pass on a verdict-shaped husk.
+    assert.ok(MODERATION_VERDICT.response, 'the fixture must carry a vendor response body');
+
+    const report = buildValidationReport(reportInput());
+    assert.deepEqual(
+      report.moderation.input.verdict,
+      MODERATION_VERDICT,
+      'the delivered report must stand alone as evidence — no pointer to D1',
+    );
+    // Named individually, because deepEqual against the same fixture object
+    // would also pass if the report simply held a reference to it and every
+    // field were later dropped from the type.
+    const verdict = report.moderation.input.verdict!;
+    assert.equal(verdict.flagged, false);
+    assert.equal(verdict.checkedAt, '2026-07-30T11:58:00.000Z');
+    assert.deepEqual((verdict.response as { results: unknown[] }).results, [
+      {
+        flagged: false,
+        categories: { violence: false, hate: false },
+        category_scores: { violence: 0.000012, hate: 0.0000034 },
+      },
+    ]);
   });
 
   it('carries a per-image unsafe-content snapshot for every concept the gate saw', () => {
@@ -345,6 +414,81 @@ describe('buildValidationReport — moderation, caps, and idempotency keys', () 
   });
 });
 
+describe('summarizeInputScreening', () => {
+  it('reports the LAST clear screening — the one that authorized generation', () => {
+    // Stage 1 re-screens on every run, because a thread correction can change
+    // the brief between them. A resumed job therefore has more than one clear
+    // row, and the report must quote the screening the delivered concepts were
+    // actually generated under, not the first one ever recorded.
+    const superseded: ModerationVerdict = {
+      ...MODERATION_VERDICT,
+      checkedAt: '2026-07-30T09:00:00.000Z',
+      response: { id: 'modr-stale' },
+    };
+    const screening = summarizeInputScreening([
+      auditRow({ id: 1, result: 'clear', detail: superseded }),
+      auditRow({ id: 2, result: 'unavailable', detail: { error: '503' } }),
+      auditRow({ id: 3, result: 'clear', detail: MODERATION_VERDICT }),
+    ]);
+    assert.deepEqual(screening.verdict, MODERATION_VERDICT);
+    assert.notDeepEqual(screening.verdict, superseded, 'the stale screening is not the record');
+    assert.equal(screening.outageAttempts, 1);
+  });
+
+  it('counts vendor outages and reports no verdict when none ever cleared', () => {
+    const screening = summarizeInputScreening([
+      auditRow({ id: 1, result: 'unavailable', detail: { error: '503' } }),
+      auditRow({ id: 2, result: 'unavailable', detail: { error: '503' } }),
+    ]);
+    assert.equal(screening.verdict, null);
+    assert.equal(screening.outageAttempts, 2);
+    // The pinned vendor is still named — that is a property of the bot, not of
+    // any particular screening.
+    assert.equal(screening.vendor, MODERATION_VENDOR);
+  });
+
+  it('refuses a clear row whose detail is not verdict-shaped', () => {
+    // `GateAuditRow.detail` is `unknown` — the column holds whatever the
+    // writing call passed. Anything that is not a full verdict must be skipped
+    // rather than half-copied into a customer-facing evidence pack.
+    const notVerdicts: unknown[] = [
+      null,
+      'clear',
+      42,
+      {},
+      { vendor: 'openai' },
+      { vendor: 'openai', model: 'm', flagged: false, checkedAt: 'now' }, // no response
+      { vendor: 'openai', model: 'm', flagged: 'no', checkedAt: 'now', response: {} }, // wrong type
+    ];
+    for (const detail of notVerdicts) {
+      const screening = summarizeInputScreening([auditRow({ id: 1, result: 'clear', detail })]);
+      assert.equal(
+        screening.verdict,
+        null,
+        `${JSON.stringify(detail)} was accepted as a moderation verdict`,
+      );
+    }
+  });
+
+  it('falls back to the last well-formed verdict when a later row is malformed', () => {
+    const screening = summarizeInputScreening([
+      auditRow({ id: 1, result: 'clear', detail: MODERATION_VERDICT }),
+      auditRow({ id: 2, result: 'clear', detail: { vendor: 'openai' } }),
+    ]);
+    assert.deepEqual(screening.verdict, MODERATION_VERDICT);
+  });
+
+  it('ignores audit rows belonging to other gates', () => {
+    const screening = summarizeInputScreening([
+      auditRow({ id: 1, gate: 'ocr', result: 'unavailable', detail: { error: 'no image' } }),
+      auditRow({ id: 2, gate: 'generation', result: 'unavailable', detail: { error: '503' } }),
+      auditRow({ id: 3, gate: 'moderation', result: 'clear', detail: MODERATION_VERDICT }),
+    ]);
+    assert.equal(screening.outageAttempts, 0, 'an OCR outage is not a moderation outage');
+    assert.deepEqual(screening.verdict, MODERATION_VERDICT);
+  });
+});
+
 describe('buildValidationReport — serialization', () => {
   it('round-trips through JSON without losing a field', () => {
     const report = buildValidationReport(reportInput());
@@ -359,6 +503,7 @@ describe('buildValidationReport — serialization', () => {
           conceptRow({ phash: null, ocrModel: null, ocrTranscription: null, ocrScore: null }),
         ],
         visionChecks: [],
+        moderationAudits: [],
         gates: gates({
           vector: checkTrueVector(RASTER_SVG),
           ico: { pass: false, sizes: [], reason: 'buffer did not parse as an ICO' },
@@ -378,6 +523,7 @@ describe('buildValidationReport — serialization', () => {
     // deep-equal, so pin the fields that would carry one.
     assert.equal(roundTripped.ico.reason, 'buffer did not parse as an ICO');
     assert.equal(roundTripped.concepts[0]!.ocr, null);
+    assert.equal(roundTripped.moderation.input.verdict, null);
     assert.equal(roundTripped.winner.axisId, null, 'the winning slot is not in this fixture');
   });
 });

@@ -122,6 +122,23 @@ export function decideOnConflict(row: Pick<JobRow, 'status' | 'checkpoint'>): Cl
   return { action: 'enqueue', reason: 'claimed-not-checkpointed' };
 }
 
+/**
+ * One row of the FR-17 audit trail, read back. `detail` is the parsed
+ * `detail_json` a `recordGateAudit` call wrote — an OCR verdict, a moderation
+ * verdict, a pack gate report — so the store hands back the object that was
+ * stored rather than a string every caller has to re-parse.
+ */
+export interface GateAuditRow {
+  id: number;
+  jobKey: string;
+  contractId: string | null;
+  slot: number | null;
+  gate: string;
+  result: string;
+  detail: unknown;
+  createdAt: string;
+}
+
 export interface JobStore {
   claim(jobKey: string, contractId: string, stage: JobStage): Promise<ClaimDecision>;
   get(jobKey: string): Promise<JobRow | null>;
@@ -145,10 +162,55 @@ export interface JobStore {
     result: string;
     detail?: unknown;
   }): Promise<void>;
+  /**
+   * The audit trail for one job, oldest first, optionally narrowed to a single
+   * gate (FR-17). Read-only: the delivered validation report and license
+   * manifest are "generated from these records", so the records have to be
+   * readable by the code that generates them — a verdict the customer holding
+   * the report cannot see is not evidence to them.
+   */
+  listGateAudit(jobKey: string, gate?: string): Promise<GateAuditRow[]>;
 }
 
 const isUniqueViolation = (err: unknown): boolean =>
   err instanceof Error && /UNIQUE constraint failed/i.test(err.message);
+
+interface RawGateAuditRow {
+  id: number;
+  job_key: string;
+  contract_id: string | null;
+  slot: number | null;
+  gate: string;
+  result: string;
+  detail_json: string | null;
+  created_at: string;
+}
+
+/**
+ * `detail_json` is written by `recordGateAudit`'s own `JSON.stringify`, so a
+ * parse failure means the row was corrupted after the fact. Degrade to null
+ * rather than throw: one damaged audit row must not take down the report build
+ * that the rest of the trail is still perfectly good evidence for.
+ */
+function parseAuditDetail(json: string | null): unknown {
+  if (json === null) return null;
+  try {
+    return JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+const toGateAuditRow = (raw: RawGateAuditRow): GateAuditRow => ({
+  id: raw.id,
+  jobKey: raw.job_key,
+  contractId: raw.contract_id,
+  slot: raw.slot,
+  gate: raw.gate,
+  result: raw.result,
+  detail: parseAuditDetail(raw.detail_json),
+  createdAt: raw.created_at,
+});
 
 export function createJobStore(db: D1Like, now: () => Date = () => new Date()): JobStore {
   const touch = (): string => now().toISOString();
@@ -288,6 +350,21 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
           touch(),
         )
         .run();
+    },
+
+    async listGateAudit(jobKey, gate) {
+      // Ordered by the autoincrement id, not created_at: `touch()` has
+      // one-second resolution at best and several gate rows are written inside
+      // the same tick, so "which screening was last" has to come from insert
+      // order rather than from a timestamp that ties.
+      const query =
+        gate === undefined
+          ? db.prepare('SELECT * FROM gate_audit WHERE job_key = ? ORDER BY id ASC').bind(jobKey)
+          : db
+              .prepare('SELECT * FROM gate_audit WHERE job_key = ? AND gate = ? ORDER BY id ASC')
+              .bind(jobKey, gate);
+      const { results } = await query.all<RawGateAuditRow>();
+      return results.map(toGateAuditRow);
     },
   };
 }
