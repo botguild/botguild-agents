@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadReader, findSelection, parseSelection } from './threads.js';
+import type { ThreadMessage } from './threads.js';
 import type { FetchLike } from './types.js';
 
 describe('parseSelection', () => {
@@ -31,6 +32,67 @@ describe('parseSelection', () => {
   // parsing, rather than filtering the result afterward. See findSelection.
   it('parses the M1 instruction text like any other message, which is why sender filtering has to happen before parsing', () => {
     assert.equal(parseSelection("reply with 'concept 1|2|3'"), 1);
+  });
+
+  // Negation/contrast: a cue word immediately before a matched slot makes
+  // that specific match unreliable. Reviewer-found: "not concept 2" was
+  // returning 2 (the buyer meant anything BUT 2), and "anything but concept
+  // 1" was returning 1 — both confident and wrong.
+  it('refuses to guess a slot that is negated or set up as a contrast', () => {
+    assert.equal(parseSelection('not concept 2'), null);
+    assert.equal(parseSelection('anything but concept 1'), null);
+  });
+
+  // The negation window looks only *backward* from a match — a whole-
+  // message scan for "but" would break this: the buyer clearly picked 2,
+  // and "but" only qualifies the follow-up request, not the pick itself.
+  it('does not let a contrast cue AFTER the pick invalidate it', () => {
+    assert.equal(parseSelection('concept 2, but can you make it blue?'), 2);
+  });
+
+  it('recognizes go with N, make it N, and lets do N as selections', () => {
+    assert.equal(parseSelection('go with 3'), 3);
+    assert.equal(parseSelection('make it 1'), 1);
+    assert.equal(parseSelection("let's do 2"), 2);
+    assert.equal(parseSelection('lets do 2'), 2);
+  });
+
+  // Reviewer-found: "concept 2 is terrible, go with 3" was returning 2 — the
+  // buyer's actual pick (3) was silently discarded. Recognizing "go with N"
+  // means the sentence now names two distinct slots (2 and 3); the existing
+  // per-message ambiguity rule — not any attempt to parse "is terrible" as
+  // negative sentiment — is what turns this into null instead of a
+  // confident, wrong 2. That's the point: widen the match, let ambiguity do
+  // the work.
+  it('turns a contrast-and-correction sentence into an ambiguity, not a stale first match', () => {
+    assert.equal(parseSelection('concept 2 is terrible, go with 3'), null);
+  });
+
+  // Widening the match surface to catch the above risks catching phrases
+  // where the number is a quantity, not a pick — both guarded here: "2x"
+  // has no word boundary between digit and letter, and the "go with N"
+  // family only matches when N is the last thing in the message.
+  it('does not read a quantity after go-with or make-it as a selection', () => {
+    assert.equal(parseSelection('go with 3 colors'), null);
+    assert.equal(parseSelection('make it 2x bigger'), null);
+  });
+
+  // '#N' is also how people write reference numbers. A small deny-list of
+  // nouns immediately before '#N' keeps those out without touching the
+  // locked 'we like #2 best' -> 2 case above ('like' isn't on the list).
+  it('does not read a reference number as a concept pick', () => {
+    assert.equal(parseSelection('see invoice #2 for details'), null);
+    assert.equal(parseSelection('order #2 shipped'), null);
+    assert.equal(parseSelection('room #2, second floor'), null);
+  });
+
+  // A digit immediately followed by '.' and another digit is a decimal, not
+  // an integer slot with a fractional tail — truncating "2.5" to 2 is
+  // exactly the confident-wrong-answer failure mode this module exists to
+  // avoid.
+  it('does not truncate a decimal into a slot number', () => {
+    assert.equal(parseSelection('concept 2.5'), null);
+    assert.equal(parseSelection('#2.5'), null);
   });
 });
 
@@ -80,6 +142,28 @@ describe('findSelection', () => {
   it('skips an ambiguous buyer message and resolves from a later, unambiguous one', () => {
     const messages = [buyer('I like concept 1 and concept 2'), buyer('concept 3')];
     assert.equal(findSelection(messages, 'bot-logosmith'), 3);
+  });
+
+  // Reviewer-found: a soft-deleted message (Message.deletedAt set) is a
+  // realistic platform state whose content can come back null or missing
+  // over the wire, despite ThreadMessage.body's string type — findSelection
+  // must survive that, not throw out of parseSelection's .trim().
+  it('does not throw on a null or missing body, and keeps scanning past it', () => {
+    const nullBody: ThreadMessage = {
+      id: 'm',
+      senderId: 'payer-1',
+      body: null as unknown as string,
+      createdAt: '2026-07-30T00:00:00Z',
+    };
+    const missingBody = {
+      id: 'm',
+      senderId: 'payer-1',
+      createdAt: '2026-07-30T00:00:00Z',
+    } as unknown as ThreadMessage;
+
+    assert.doesNotThrow(() => findSelection([nullBody, missingBody], 'bot-logosmith'));
+    assert.equal(findSelection([nullBody, missingBody], 'bot-logosmith'), null);
+    assert.equal(findSelection([nullBody, missingBody, buyer('concept 2')], 'bot-logosmith'), 2);
   });
 });
 
@@ -191,5 +275,48 @@ describe('createThreadReader', () => {
     });
 
     await assert.rejects(() => reader.listMessages('contract-42'));
+  });
+
+  // Reviewer-found reproduction: a soft-deleted message can carry `content:
+  // null` over the wire. listMessages must not throw mapping it, and the
+  // null body must survive downstream into findSelection (covered directly
+  // in the findSelection suite above) rather than crash the caller.
+  it('maps a soft-deleted message (null content) without throwing', async () => {
+    const fetchImpl = fetchStub({
+      '/threads?': () =>
+        new Response(JSON.stringify({ threads: [{ id: 'th_1' }] }), { status: 200 }),
+      '/messages': () =>
+        new Response(
+          JSON.stringify({
+            messages: [
+              {
+                id: 'm1',
+                sender_id: 'handler-1',
+                sender_bot_id: null,
+                content: null,
+                created_at: '2026-07-30T00:00:00Z',
+              },
+              {
+                id: 'm2',
+                sender_id: 'handler-1',
+                sender_bot_id: null,
+                content: 'concept 2',
+                created_at: '2026-07-30T00:01:00Z',
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    });
+    const reader = createThreadReader({
+      apiUrl: 'https://api.example.com',
+      apiKey: 'k',
+      fetchImpl,
+    });
+
+    const messages = await reader.listMessages('contract-42');
+
+    assert.equal(messages[0]?.body, null);
+    assert.equal(findSelection(messages, 'bot-logosmith'), 2);
   });
 });

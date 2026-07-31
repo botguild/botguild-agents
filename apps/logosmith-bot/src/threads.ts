@@ -79,27 +79,101 @@ export function createThreadReader(deps: ThreadReaderDeps): ThreadReader {
   };
 }
 
-// "concept N" / "option N" / "#N", case-insensitive, matched anywhere in the
-// text. Reused across calls: String#matchAll clones the regex internally, so
-// a shared `g`-flagged pattern does not carry stateful `lastIndex` across
+// "concept N" / "option N" / "#N" / "go with N" / "make it N" / "let's do
+// N", case-insensitive, matched anywhere in the text (the last three only
+// at the tail of the message — see parseSelection's doc comment). Reused
+// across calls: String#matchAll clones the regex internally, so a shared
+// `g`-flagged pattern does not carry stateful `lastIndex` across
 // invocations the way `.exec()`/`.test()` would.
-const SLOT_PATTERN = /\b(?:concept|option)\s*#?\s*(\d+)\b|#(\d+)\b/gi;
+//
+// (?!\.\d) after every digit group rejects decimals ("concept 2.5" is not
+// slot 2) without a second pass — \b alone doesn't catch this, since a word
+// boundary holds just as well before '.' as before a space.
+const SLOT_PATTERN =
+  /\b(?:concept|option)\s*#?\s*(\d+)(?!\.\d)\b|#(\d+)(?!\.\d)\b|\b(?:go\s+with|make\s+it|let'?s\s+do)\s*#?\s*(\d+)(?!\.\d)\b(?=[\s.,!?]*$)/gi;
+
+// Negation/contrast cues that make an otherwise-matched slot unreliable —
+// "not concept 2", "anything but concept 1" — checked only in a short
+// lookbehind window (see tokensBefore), never across the whole message.
+const NEGATION_CUES = new Set(['not', 'but', 'except', 'rather', 'instead', 'avoid', 'no']);
+const NEGATION_WINDOW_TOKENS = 4;
+
+// Nouns that turn "#N" into a reference number ("invoice #2") rather than a
+// concept pick. Only the single nearest word before "#N" is checked, so
+// "we like #2 best" is untouched — "like" isn't on the list.
+const REFERENCE_NOUN_DENYLIST = new Set([
+  'invoice',
+  'order',
+  'room',
+  'ticket',
+  'item',
+  'ref',
+  'no',
+  'number',
+  'suite',
+  'apt',
+  'unit',
+  'table',
+  'seat',
+]);
+
+/**
+ * The last `count` whitespace-delimited tokens of `text` before `index`,
+ * lowercased with leading/trailing punctuation stripped (apostrophes kept,
+ * so "don't" survives intact for the "n't" check). Nearest token last.
+ */
+function tokensBefore(text: string, index: number, count: number): string[] {
+  const before = text
+    .slice(0, index)
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  return before.slice(-count).map((token) => token.replace(/^[^\w']+|[^\w']+$/g, '').toLowerCase());
+}
 
 /**
  * Parses free text into a 1-based concept slot (1-3), or null when the text
- * names none, an out-of-range slot, or more than one distinct slot.
+ * names none, an out-of-range slot, more than one distinct slot, or only an
+ * unreliable mention (negated, a decimal, or a bare reference number).
  *
- * Accepted forms: "concept N", "option N", "#N" — substring-matched
- * anywhere in the message, so natural phrasing like "I'll take concept 1
- * please" still parses — and a bare "N" only when the *entire* message is
- * just the digit, so a stray number inside an ordinary sentence ("give me 3
- * more") is not mistaken for a pick.
+ * Accepted forms — substring-matched anywhere in the message, so natural
+ * phrasing like "I'll take concept 1 please" still parses:
+ *   - "concept N", "option N", "#N".
+ *   - "go with N", "make it N", "let's do N" — but only when N is the last
+ *     thing in the message, aside from trailing punctuation. These are
+ *     free-form action phrases rather than dedicated selection syntax, so if
+ *     more text follows the number it is very likely modifying something
+ *     else — "go with 3 colors", "make it 2x bigger" are quantities, not a
+ *     pick (the latter is also caught by the plain word-boundary check,
+ *     since "2x" has no boundary between digit and letter).
+ *   - a bare "N", only when the *entire* message is just the digit, so a
+ *     stray number inside an ordinary sentence ("give me 3 more") is not
+ *     mistaken for a pick.
  *
- * Two distinct slots named in one message is an unresolved ambiguity, not a
- * choice — "I like concept 1 and concept 2" must not silently collapse to
- * 1 (or 2). A wrong-but-confident answer is worse than null here: null falls
- * through to the FR-9 default-selection timeout, a safe outcome; guessing
- * does not.
+ * Three ways a textual match is discarded before it ever reaches the
+ * ambiguity count below — each is a narrow, local check, not a whole-message
+ * scan, because an overly defensive null costs the buyer a 72-hour wait too:
+ *
+ *   - Negation/contrast: "not", "but", "except", "rather", "instead",
+ *     "avoid", "no", or an "n't" contraction in the ~4 tokens immediately
+ *     BEFORE a match makes that match unreliable — "not concept 2" and
+ *     "anything but concept 1" must not confidently return the negated
+ *     number. This is a lookBEHIND window on purpose: "concept 2, but can
+ *     you make it blue?" must still resolve to 2, since "but" comes after
+ *     the pick, not before it — a whole-message scan would break that case.
+ *   - Reference numbers: see REFERENCE_NOUN_DENYLIST — "#N" alone also
+ *     reads as "invoice #2" or "room #2, second floor"; the locked "we like
+ *     #2 best" case is untouched because "like" isn't a denied noun.
+ *   - Decimals: "concept 2.5" and "#2.5" must not silently truncate to 2.
+ *
+ * Two distinct (surviving) slots named in one message is an unresolved
+ * ambiguity, not a choice — "I like concept 1 and concept 2" must not
+ * silently collapse to 1 (or 2). The same rule resolves "concept 2 is
+ * terrible, go with 3" to null too, once "go with N" is a recognized form:
+ * the sentence names two distinct slots, and ambiguity — not an attempt to
+ * model what "is terrible" means — is what makes this null instead of a
+ * confident (and wrong) 2. A wrong-but-confident answer is worse than null
+ * here: null falls through to the FR-9 default-selection timeout, a safe
+ * outcome; guessing does not.
  */
 export function parseSelection(text: string): number | null {
   const trimmed = text.trim();
@@ -107,8 +181,20 @@ export function parseSelection(text: string): number | null {
 
   const slots = new Set<number>();
   for (const match of trimmed.matchAll(SLOT_PATTERN)) {
-    const n = Number(match[1] ?? match[2]);
-    if (n >= 1 && n <= 3) slots.add(n);
+    const n = Number(match[1] ?? match[2] ?? match[3]);
+    if (n < 1 || n > 3) continue;
+
+    const matchIndex = match.index ?? 0;
+    const cueWindow = tokensBefore(trimmed, matchIndex, NEGATION_WINDOW_TOKENS);
+    if (cueWindow.some((token) => NEGATION_CUES.has(token) || token.includes("n't"))) continue;
+
+    // Only the '#N' form (group 2) can be mistaken for a reference number.
+    if (match[2] !== undefined) {
+      const nearest = tokensBefore(trimmed, matchIndex, 1)[0];
+      if (nearest !== undefined && REFERENCE_NOUN_DENYLIST.has(nearest)) continue;
+    }
+
+    slots.add(n);
   }
 
   // Bare "N": only fires when nothing else matched AND the whole trimmed
@@ -158,7 +244,12 @@ export function parseSelection(text: string): number | null {
 export function findSelection(messages: ThreadMessage[], botId: string): number | null {
   for (const message of messages) {
     if (message.senderId === botId) continue;
-    const slot = parseSelection(message.body);
+    // `body` is typed as a plain string, but a soft-deleted message
+    // (`Message.deletedAt` set) is a realistic platform state whose content
+    // can come back null/missing over the wire — mapKeysToCamel gives no
+    // runtime guarantee the type-level cast promised. Same guard as
+    // voicewright-bot/src/threads.ts's `parse(message.content ?? '')`.
+    const slot = parseSelection(message.body ?? '');
     if (slot !== null) return slot;
   }
   return null;
