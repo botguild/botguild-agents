@@ -27,8 +27,13 @@ import {
   type JobStore,
   type SelectionStore,
 } from './jobs.js';
-import { findSelection, parseSelection } from './threads.js';
+import { findSelection, parseSelection, type ThreadMessage } from './threads.js';
 import {
+  MAX_SELECTION_INFERENCES_PER_CONTRACT,
+  type SelectionInference,
+} from './inferSelection.js';
+import {
+  HAIKU_MODEL_ID,
   MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
@@ -171,6 +176,15 @@ interface Harness {
   extractorCalls: ProseGig[];
   /** What the scripted extractor returns; a valid brief by default. */
   extractorResult: { value: BriefResult<LogoBrief> };
+  /**
+   * Every message handed to the FR-9 Haiku selection fallback, in order. This
+   * is how "was a model ever asked about this?" becomes directly assertable —
+   * the guarantee that a strict-parseable reply never reaches a model is a
+   * statement about this array being empty.
+   */
+  inferenceCalls: Array<{ messageId: string; body: string; allowed: number[] }>;
+  /** Scripted answer per message body; declines everything by default. */
+  inferenceScript: { value: (message: ThreadMessage) => SelectionInference };
   at<T>(when: Date, fn: () => Promise<T>): Promise<T>;
 }
 
@@ -203,6 +217,16 @@ async function makeHarness(): Promise<Harness> {
   const extractorCalls: ProseGig[] = [];
   const extractorResult: { value: BriefResult<LogoBrief> } = {
     value: { ok: true, brief: { brandName: 'Harbor & Vine', industry: 'boutique inn' } },
+  };
+
+  // The selection fallback stands in for a Haiku call. It DECLINES by default,
+  // which is both the conservative direction and what keeps every pre-existing
+  // selection test testing what its name says: with a declining double, the
+  // strict parser and the 72-hour default rule are the only things that can
+  // resolve a winner, exactly as before this fallback existed.
+  const inferenceCalls: Harness['inferenceCalls'] = [];
+  const inferenceScript: Harness['inferenceScript'] = {
+    value: () => ({ slot: null, quote: null, costUsd: 0.0004, outage: false, reason: 'declined' }),
   };
 
   const client = {
@@ -312,6 +336,16 @@ async function makeHarness(): Promise<Harness> {
         return extractorResult.value;
       },
     },
+    selectionInferrer: {
+      async infer({ message, allowed }): Promise<SelectionInference> {
+        inferenceCalls.push({
+          messageId: message.id,
+          body: message.body,
+          allowed: [...allowed].sort((a, b) => a - b),
+        });
+        return inferenceScript.value(message);
+      },
+    },
     costEstimator: {
       async estimate(): Promise<never> {
         throw new Error('costEstimator.estimate: not scripted for these tests');
@@ -342,6 +376,8 @@ async function makeHarness(): Promise<Harness> {
     failThreadsFor,
     extractorCalls,
     extractorResult,
+    inferenceCalls,
+    inferenceScript,
     async at<T>(when: Date, fn: () => Promise<T>): Promise<T> {
       const previous = clock.value;
       clock.value = when;
@@ -795,6 +831,344 @@ describe('selection poll', () => {
 
     assert.equal((await h.selection.get('c-epoch'))?.state, 'concepts_delivered');
     assert.deepEqual(h.queueSent, []);
+  });
+});
+
+// ===============================================================================
+// The Haiku selection fallback (Task 28)
+//
+// The measured problem: 61 of 68 plausible affirmative replies return null from
+// the strict parser, so those buyers wait the full 72 hours and are then handed
+// an auto-pick. The fallback reads only what that parser refused.
+// ===============================================================================
+
+/** A reply the strict parser genuinely cannot read — asserted, not assumed. */
+const SOFT_PICK = 'concept 2 works for us, thanks!';
+assert.equal(
+  parseSelection(SOFT_PICK),
+  null,
+  'the fallback fixtures must be replies the strict parser refuses',
+);
+
+/** Script the inferrer to read `slot` out of any message containing `quote`. */
+const readsQuote = (slot: number, quote: string) => (message: ThreadMessage) =>
+  message.body.includes(quote)
+    ? ({ slot, quote, costUsd: 0.0008, outage: false, reason: null } as SelectionInference)
+    : ({ slot: null, quote: null, costUsd: 0.0004, outage: false, reason: 'declined' } as const);
+
+const auditResults = async (h: Harness, jobKey: string): Promise<string[]> =>
+  (await h.jobs.listGateAudit(jobKey, 'selection')).map((entry) => entry.result);
+
+describe('selection fallback — it is a fallback, and only a fallback', () => {
+  it('never sends a reply the strict parser CAN read to a model', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-strict',
+      delivered: [1, 2, 3],
+      scores: { 1: 0.86, 2: 0.88, 3: 0.99 },
+      m1At,
+    });
+    h.threads.set('c-strict', [buyerSays('m1', 'concept 2', new Date(m1At.getTime() + MINUTE))]);
+    // Fixture precondition, inline: the reply parses. If a future change ever
+    // drained it, this test would silently start asserting nothing.
+    assert.equal(parseSelection('concept 2'), 2);
+    // And the model WOULD have answered differently, so "source: buyer" cannot
+    // be a coincidence of the double agreeing with the parser.
+    h.inferenceScript.value = readsQuote(3, 'concept 2');
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(h.inferenceCalls, [], 'a strict-parser hit is never re-read by a model');
+    assert.equal((await h.selection.get('c-strict'))?.winnerSlot, 2);
+    assert.equal((await h.selection.get('c-strict'))?.source, 'buyer');
+  });
+
+  it('never sends the bot’s own messages to a model', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-botsays',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-botsays', [
+      // The M1 note names every concept by number and asks for one back — the
+      // single most selection-shaped text in the whole thread, and ours.
+      botSays('m0', 'PICK YOUR WINNER — reply with `concept 1|2`.', new Date(m1At.getTime() + 1)),
+      buyerSays('m1', 'thanks, will look tonight', new Date(m1At.getTime() + MINUTE)),
+    ]);
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(
+      h.inferenceCalls.map((call) => call.messageId),
+      ['m1'],
+    );
+  });
+
+  it('never sends a message the buyer posted BEFORE M1 to a model', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-pre',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-pre', [
+      buyerSays('m0', 'the second option in your portfolio', new Date(m1At.getTime() - MINUTE)),
+      buyerSays('m1', 'no rush on this', new Date(m1At.getTime() + MINUTE)),
+    ]);
+    // The pre-M1 message is the one the model would most likely read a "2" out
+    // of, which is why the slice has to be upstream of the model, not after it.
+    h.inferenceScript.value = readsQuote(2, 'second option');
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(
+      h.inferenceCalls.map((call) => call.messageId),
+      ['m1'],
+    );
+    assert.equal((await h.selection.get('c-pre'))?.state, 'concepts_delivered');
+  });
+});
+
+describe('selection fallback — an inferred pick', () => {
+  it('selects immediately, well inside the 72-hour window, and starts stage 2', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-infer',
+      delivered: [1, 2, 3],
+      // Slot 3 scores highest, so the default rule would pick 3 — proving the
+      // inferred pick beat it rather than coinciding with it.
+      scores: { 1: 0.86, 2: 0.88, 3: 0.99 },
+      m1At,
+    });
+    h.threads.set('c-infer', [buyerSays('m1', SOFT_PICK, new Date(m1At.getTime() + MINUTE))]);
+    h.inferenceScript.value = readsQuote(2, 'concept 2 works for us');
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(await h.selection.get('c-infer'), {
+      contractId: 'c-infer',
+      state: 'winner_selected',
+      winnerSlot: 2,
+      source: 'inferred',
+      m1DeliveredAt: m1At.toISOString(),
+    });
+    assert.deepEqual(h.queueSent, [
+      { contractId: 'c-infer', jobKey: await buildJobKey('c-infer', 'vector'), stage: 'vector' },
+    ]);
+    // The delivered set reached the model, so it could never have answered with
+    // a concept the buyer was not shown.
+    assert.deepEqual(h.inferenceCalls, [{ messageId: 'm1', body: SOFT_PICK, allowed: [1, 2, 3] }]);
+    // No new buyer-facing note: there is no revision path to point them at, and
+    // an instruction no code path can honour is the exact class already stripped
+    // from four other messages on this branch.
+    assert.deepEqual(h.messagesSent, []);
+  });
+
+  it('records what it read, and out of which message, in the FR-17 trail', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    const conceptsJobKey = await seedDeliveredM1(h, {
+      contractId: 'c-evidence',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-evidence', [buyerSays('m7', SOFT_PICK, new Date(m1At.getTime() + MINUTE))]);
+    h.inferenceScript.value = readsQuote(2, 'concept 2 works for us');
+
+    await runFifteenMinuteSweep(h.services);
+
+    const trail = await h.jobs.listGateAudit(conceptsJobKey, 'selection');
+    const read = trail.find((entry) => entry.result === 'inference-selected');
+    assert.ok(read, 'the reading itself is evidence and must be on the trail');
+    assert.deepEqual(read.detail, {
+      messageId: 'm7',
+      slot: 2,
+      quote: 'concept 2 works for us',
+      model: HAIKU_MODEL_ID,
+    });
+    // ...and the selection event names the inferred source, not `buyer`.
+    const chosen = trail.find((entry) => entry.result === 'inferred');
+    assert.ok(chosen);
+    assert.equal((chosen.detail as { source: string }).source, 'inferred');
+    assert.equal((chosen.detail as { buyerReply: number | null }).buyerReply, null);
+    assert.equal((chosen.detail as { inferredFrom: string }).inferredFrom, 'm7');
+  });
+
+  it('takes the FIRST message a pick can be read out of, oldest first', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-order',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-order', [
+      buyerSays('m1', 'concept 1 works for us', new Date(m1At.getTime() + MINUTE)),
+      buyerSays('m2', 'concept 2 works for us', new Date(m1At.getTime() + 5 * MINUTE)),
+    ]);
+    // Both are readable by the model and neither by the parser, so ORDER is the
+    // only thing deciding the outcome — first-wins, consistent with select()'s
+    // own first-write-wins.
+    assert.equal(parseSelection('concept 1 works for us'), null);
+    assert.equal(parseSelection('concept 2 works for us'), null);
+    h.inferenceScript.value = (message) =>
+      ({
+        slot: message.body.startsWith('concept 1') ? 1 : 2,
+        quote: message.body,
+        costUsd: 0.0008,
+        outage: false,
+        reason: null,
+      }) as SelectionInference;
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal((await h.selection.get('c-order'))?.winnerSlot, 1);
+    assert.deepEqual(
+      h.inferenceCalls.map((call) => call.messageId),
+      ['m1'],
+      'it stops at the first message that yields a pick',
+    );
+  });
+});
+
+describe('selection fallback — uncertainty falls through to today’s behaviour', () => {
+  it('leaves the contract awaiting when the model reads no pick, then defaults at the timeout', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-decline',
+      delivered: [1, 2],
+      scores: { 1: 0.99, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-decline', [
+      buyerSays('m1', 'is the mark available in navy?', new Date(m1At.getTime() + MINUTE)),
+    ]);
+
+    await runFifteenMinuteSweep(h.services);
+    assert.equal((await h.selection.get('c-decline'))?.state, 'concepts_delivered');
+    assert.deepEqual(h.queueSent, []);
+
+    h.clock.value = new Date(m1At.getTime() + (SELECTION_TIMEOUT_HOURS + 1) * HOUR);
+    await runFifteenMinuteSweep(h.services);
+    assert.equal((await h.selection.get('c-decline'))?.winnerSlot, 1);
+    assert.equal((await h.selection.get('c-decline'))?.source, 'default');
+  });
+
+  it('refuses a pick for a concept M1 never delivered, at the point of decision', async () => {
+    // The delivered-set intersection re-checked where the winner is actually
+    // chosen. A distinctness-demoted slot keeps `ocr_pass = 1`, so nothing about
+    // its row looks wrong to a query — and here the model names it outright.
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    const conceptsJobKey = await seedDeliveredM1(h, {
+      contractId: 'c-undelivered',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88, 3: 0.99 },
+      m1At,
+    });
+    h.threads.set('c-undelivered', [
+      buyerSays('m1', 'concept 3 works for us', new Date(m1At.getTime() + MINUTE)),
+    ]);
+    h.inferenceScript.value = () =>
+      ({
+        slot: 3,
+        quote: 'concept 3 works for us',
+        costUsd: 0.0008,
+        outage: false,
+        reason: null,
+      }) as SelectionInference;
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal((await h.selection.get('c-undelivered'))?.state, 'concepts_delivered');
+    assert.deepEqual(h.queueSent, []);
+    assert.deepEqual(await auditResults(h, conceptsJobKey), ['inference-declined']);
+    // Silently, not with a note: the buyer typed nothing this bot could read, so
+    // there is nothing to tell them they got wrong.
+    assert.deepEqual(h.messagesSent, []);
+  });
+});
+
+describe('selection fallback — the bill is bounded', () => {
+  it('never asks about the same message twice, however many sweeps run', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    const conceptsJobKey = await seedDeliveredM1(h, {
+      contractId: 'c-once',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-once', [
+      buyerSays('m1', 'looks good, let me think', new Date(m1At.getTime() + MINUTE)),
+    ]);
+
+    for (let sweep = 0; sweep < 5; sweep += 1) await runFifteenMinuteSweep(h.services);
+
+    assert.equal(h.inferenceCalls.length, 1, 'the append-only trail is the marker');
+    assert.deepEqual(await auditResults(h, conceptsJobKey), ['inference-declined']);
+  });
+
+  it('stops at the lifetime cap however many replies the buyer posts', async () => {
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    await seedDeliveredM1(h, {
+      contractId: 'c-chatty',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    const chatter = MAX_SELECTION_INFERENCES_PER_CONTRACT + 4;
+    h.threads.set(
+      'c-chatty',
+      Array.from({ length: chatter }, (_, i) =>
+        buyerSays(`m${i}`, `some thought number ${i}`, new Date(m1At.getTime() + (i + 1) * MINUTE)),
+      ),
+    );
+
+    // Two sweeps: the cap has to hold ACROSS invocations, not just within one
+    // loop, which is the whole reason it is derived from the persisted trail.
+    await runFifteenMinuteSweep(h.services);
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal(h.inferenceCalls.length, MAX_SELECTION_INFERENCES_PER_CONTRACT);
+  });
+
+  it('leaves a message the model never saw askable, and retries it next sweep', async () => {
+    // A vendor's bad minute must not permanently retire the message carrying the
+    // buyer's pick — that is the H1 failure shape, and it is why an outage is
+    // not a verdict.
+    const h = await makeHarness();
+    const m1At = new Date(BASE.getTime() - HOUR);
+    const conceptsJobKey = await seedDeliveredM1(h, {
+      contractId: 'c-outage',
+      delivered: [1, 2],
+      scores: { 1: 0.86, 2: 0.88 },
+      m1At,
+    });
+    h.threads.set('c-outage', [buyerSays('m1', SOFT_PICK, new Date(m1At.getTime() + MINUTE))]);
+    h.inferenceScript.value = () =>
+      ({ slot: null, quote: null, costUsd: 0, outage: true, reason: 'model unavailable' }) as const;
+
+    await runFifteenMinuteSweep(h.services);
+    assert.deepEqual(await auditResults(h, conceptsJobKey), [], 'no marker for an unread message');
+
+    h.inferenceScript.value = readsQuote(2, 'concept 2 works for us');
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal(h.inferenceCalls.length, 2, 'the same message is asked about again');
+    assert.equal((await h.selection.get('c-outage'))?.winnerSlot, 2);
+    assert.equal((await h.selection.get('c-outage'))?.source, 'inferred');
   });
 });
 

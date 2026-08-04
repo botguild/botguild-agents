@@ -89,6 +89,7 @@ import {
 } from './jobs.js';
 import { renderProgressPage, renderProgressEvent } from './progress.js';
 import { processJobMessage, type PipelineConfig } from './pipeline.js';
+import { createSelectionInferrer, type SelectionInferrer } from './inferSelection.js';
 import { createProseBriefExtractor } from './proseBrief.js';
 import {
   resolveSelectionForContract,
@@ -321,11 +322,39 @@ function getServices(env: Env): Services {
     logger,
   });
 
+  // One Anthropic client for both Haiku call sites (prose brief intake and the
+  // FR-9 selection fallback), so a construction option added for one of them
+  // cannot silently apply to only half the app.
+  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+
   const secretStore = createD1WebhookSecretStore(env.DB);
   const jobs = createJobStore(env.DB);
   const concepts = createConceptStore(env.DB);
   const selection = createSelectionStore(env.DB);
   const quota = createQuotaStore(env.DB);
+
+  // The FR-9 Haiku fallback, used by BOTH the 15-minute selection poll and the
+  // M1-acceptance webhook handlers — one instance, built here, so neither route
+  // can be wired without it.
+  //
+  // The spend has no D1 job row that would be honest to book it against: the
+  // concepts stage is already `delivered` by the time selection resolves, and
+  // its `spent_usd` is reported to the customer as concept-generation spend, so
+  // adding a reading cost to it would misstate a number in the validation
+  // report. It is booked in two places that ARE accurate — this structured log
+  // line, and the `costUsd` on the FR-17 audit row the sweep writes for every
+  // message it has read, which is published verbatim in the dispute response.
+  // It is deliberately NOT inside `MAX_SPEND_USD`: that cap bounds SPECULATIVE
+  // generation spend before payment is assured (Task 21 Ruling 2), and this
+  // call happens after escrow is funded and M1 is delivered.
+  const selectionInferrer = createSelectionInferrer({
+    anthropic,
+    recordSpend: (costUsd) =>
+      logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'selection inference spend'),
+    // Operator-side only. Nothing from a vendor error may reach a buyer or an
+    // evidence document — an Anthropic 401 body names our internal request_id.
+    logError: (err) => logger.warn({ err, model: HAIKU_MODEL_ID }, 'selection inference failed'),
+  });
 
   const costEstimator = createCostEstimator({
     apiKey: env.ANTHROPIC_API_KEY,
@@ -431,7 +460,7 @@ function getServices(env: Env): Services {
     // constructed without one. Fires on every extraction, refused ones
     // included: a refusal still burned tokens.
     briefExtractor: createProseBriefExtractor({
-      anthropic: new Anthropic({ apiKey: env.ANTHROPIC_API_KEY }),
+      anthropic,
       recordSpend: (costUsd) =>
         logger.info({ costUsd, model: HAIKU_MODEL_ID }, 'prose brief extraction spend'),
       // The vendor's own error, operator-side only. The buyer-facing reason
@@ -439,6 +468,7 @@ function getServices(env: Env): Services {
       logError: (err) =>
         logger.warn({ err, model: HAIKU_MODEL_ID }, 'prose brief extraction failed'),
     }),
+    selectionInferrer,
     queue: env.JOBS,
     apiUrl: env.BOTGUILD_API_URL,
     apiKey: env.BOTGUILD_API_KEY,
@@ -454,6 +484,7 @@ function getServices(env: Env): Services {
     jobs,
     concepts,
     selection,
+    selectionInferrer,
     publicBaseUrl,
     botId,
   });
@@ -485,11 +516,13 @@ function buildApp(
     jobs: JobStore;
     concepts: ConceptStore;
     selection: SelectionStore;
+    selectionInferrer: SelectionInferrer;
     publicBaseUrl: string;
     botId: string;
   },
 ): Hono {
   const { logger, client, mcpClient, secretStore, jobs, concepts, selection, botId } = deps;
+  const { selectionInferrer } = deps;
   const { publicBaseUrl } = deps;
 
   const onMilestoneFunded = createMilestoneFundedHandler({
@@ -517,6 +550,7 @@ function buildApp(
     jobs,
     concepts,
     selection,
+    selectionInferrer,
     queue: env.JOBS,
     apiUrl: env.BOTGUILD_API_URL,
     apiKey: env.BOTGUILD_API_KEY,

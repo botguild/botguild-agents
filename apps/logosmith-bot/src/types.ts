@@ -73,7 +73,26 @@ export type JobKind = 'logo' | 'favicon' | 'taster';
 export type JobStage = 'concepts' | 'vector' | 'single';
 export type JobStatus = 'claimed' | 'parked' | 'in_progress' | 'delivered';
 export type JobOutcome = 'delivered' | 'partial' | 'aborted' | 'rejected';
-export type SelectionSource = 'buyer' | 'default';
+/**
+ * How the winning concept was chosen (FR-9). THREE distinct facts, and every
+ * consumer has to keep them distinct — an unhandled third case that silently
+ * reads as `buyer` is the whole hazard here, because "you told us" and "we
+ * worked out what you probably meant" are different claims to make to somebody
+ * who says they never chose that.
+ *
+ *  - `buyer`    — the strict whole-message parser (threads.ts `parseSelection`)
+ *                 recognized their reply outright.
+ *  - `inferred` — the strict parser could not read it and a Haiku call read a
+ *                 pick out of one message, grounded in a verbatim span of it
+ *                 (inferSelection.ts). The span and the message it came from
+ *                 are in the `gate_audit` trail and in the dispute response.
+ *  - `default`  — nobody replied readably inside the FR-9 window and the
+ *                 default rule picked the best lettering-readback score.
+ *
+ * Persisted in `selection.source`, whose CHECK constraint enumerates the same
+ * three values — see migrations/0004_selection_source_inferred.sql.
+ */
+export type SelectionSource = 'buyer' | 'inferred' | 'default';
 
 /** A declared style axis compiled from the brief (FR-3). */
 export interface StyleAxis {

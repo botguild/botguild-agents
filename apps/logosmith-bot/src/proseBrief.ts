@@ -184,8 +184,16 @@ export function extractionCostUsd(usage: HaikuUsage | undefined | null): number 
  */
 const groundingForm = (text: string): string => text.toLowerCase().replace(/\s+/gu, ' ').trim();
 
-/** Pull the first JSON object out of a response that may carry prose or fences. */
-function extractJsonObject(text: string): Record<string, unknown> | null {
+/**
+ * Pull the first JSON object out of a response that may carry prose or fences.
+ *
+ * Exported so `inferSelection.ts` reads its model's reply through the SAME
+ * implementation rather than a second copy of it. This project has already paid
+ * once for duplicating a vendor-response reader and fixing only one of the two
+ * (the Ideogram/Recraft request-id trap); a parser standing between untrusted
+ * model output and a decision is exactly the kind that must not be forked.
+ */
+export function extractJsonObject(text: string): Record<string, unknown> | null {
   const match = /\{[\s\S]*\}/.exec(text);
   if (!match) return null;
   try {

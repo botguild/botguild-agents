@@ -14,7 +14,7 @@ load-bearing — do not restate their reasoning here without reading them).
 
 Stack: Node 22 / TypeScript, Hono, Cloudflare Workers + Queues + Cron
 Triggers + D1 + KV + R2 + Workers AI, `pnpm` + Turborepo. Full test suite as
-of this writing: **658/658 passing, 147 suites** (`pnpm test` from this
+of this writing: **714/714 passing, 162 suites** (`pnpm test` from this
 directory; run the workspace-wide `pnpm -w build && pnpm -w typecheck &&
 pnpm -w lint` too before trusting a change).
 
@@ -172,6 +172,35 @@ longer among them.
   FR-5 cap and no free-gig quota cost — and constructs the claim key itself.
   Do not read it as evidence that anything triggers one. **Building the
   re-run/revision path is an open product decision.**
+
+- **A buyer's concept pick can be resolved by a model, and the record says
+  when it was.** `parseSelection` (`src/threads.ts`) is a deliberately strict
+  allow-list of whole-message affirmative selections, arrived at over four
+  rounds after three earlier versions each returned a confidently *inverted*
+  slot. It is unchanged and it still runs first. But it was measured to return
+  `null` for 61 of 68 plausible affirmative replies — `concept 2 works`,
+  `concept 2 👍`, `- concept 2`, `concept 2\n\nSent from my iPhone` — and each
+  of those buyers waited the full 72 hours for an auto-pick. So when, and only
+  when, the strict parser reads nothing, `src/inferSelection.ts` asks Haiku to
+  read each unread reply, oldest first.
+
+  What bounds it: a strict-parser hit is never sent to a model; the answer must
+  name a concept that was actually delivered; the model must return the
+  **verbatim span** of the buyer's message its answer rests on and that span is
+  checked to occur in the message; and anything else at all resolves to `null`,
+  which is the 72-hour default that shipped before this existed. Every message
+  the model answers is marked in the `gate_audit` trail so it is never asked
+  about twice, and a per-contract cap bounds the lifetime bill (measured
+  $0.00046/call live, ~0.05% of the $1 anchor).
+
+  **What is not proven:** grounding is a *quotation* check, not a correctness
+  check — it can catch a fabricated span, not a badly-chosen one. A live probe
+  (2026-08-04, in `src/inferSelection.ts`'s header) answered 27 of 27 replies
+  correctly with zero false positives, including every inversion the regex
+  rounds were spent on, but that is 27 replies and not a proof. An inferred
+  winner is recorded as `selection.source = 'inferred'`, said plainly in the M2
+  note ("LogoSmith read your reply in this thread as choosing it" — never "you
+  chose it"), and the dispute response quotes the words it was read out of.
 
 ## Required secrets
 
@@ -508,7 +537,7 @@ detailed and are the actual source of truth, not a paraphrase of them here.
 
 ## Schema
 
-Three migrations in `migrations/`, applied in order by `wrangler d1
+Four migrations in `migrations/`, applied in order by `wrangler d1
 migrations apply`:
 
 - **`0001_init.sql`** — the full initial schema: `jobs` (per-stage claims and
@@ -532,6 +561,12 @@ migrations apply`:
   `free_gig_usage(contract_id)`, making one-free-allowance-per-contract a
   database-enforced invariant rather than resting on application-level
   `NOT EXISTS` logic a future refactor could quietly drop.
+- **`0004_selection_source_inferred.sql`** — rebuilds `selection` to widen its
+  `source` CHECK to a third value, `inferred`. SQLite cannot `ALTER` a CHECK,
+  so this is the documented build-copy-drop-rename procedure; every other
+  column is reproduced byte-for-byte from `0001`. The column is what makes
+  "the buyer said so" and "a model read their reply as saying so" different
+  facts in the dispute record — see the migration's own comment.
 
 ## Bundle and memory
 
@@ -568,7 +603,9 @@ bot's own D1 records and files it with the platform's `respond_to_dispute`
 MCP tool: the stored lettering-readback verdicts and per-image vendor request
 ids from `concepts`, each image's generation seed recovered from the
 `gate_audit` row that recorded that image's verdict (so a disputed concept
-can be regenerated), the winner and how it was chosen from `selection`, the
+can be regenerated), the winner and how it was chosen from `selection`
+(including, when the winner was `inferred`, the message id and the verbatim
+span of the buyer's own words the choice was read out of), the
 per-stage claims and spend from `jobs`, and the full `gate_audit` trail
 merged across every stage key in insert order. Nothing is recomputed at
 dispute time — a verdict is quoted as the gate wrote it, not re-derived from

@@ -632,8 +632,156 @@ describe('assembleDisputeEvidence — the winner and how it was chosen', () => {
       state: 'winner_selected',
       winnerSlot: 2,
       selectionSource: 'buyer',
+      // A `buyer` source rests on a reply a strict parser recognized outright,
+      // so there is no reading to quote and this must be null. A quote beside a
+      // `buyer` source would imply a model was consulted when none was.
+      inference: null,
       m1DeliveredAt: NOW.toISOString(),
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // An INFERRED winner (Task 28). "You told us" and "we read your reply as
+  // saying so" are different claims, and a payer disputing "I never chose that"
+  // is owed the difference plus the words it was read out of.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Re-point the seeded contract at an inferred winner, optionally recording the
+   * reading that produced it. Returns deps whose selection row and gate_audit
+   * trail are BOTH on the seeded database, so the join under test is real.
+   */
+  async function seedInferred(
+    options: { reading?: unknown; slot?: number; extraReading?: unknown } = {},
+  ): Promise<{ deps: DisputeDeps }> {
+    const { db, deps, conceptsKey } = await seed({ withoutSelection: true });
+    const selection = createSelectionStore(db, () => NOW);
+    const jobs = createJobStore(db, () => NOW);
+    await selection.open(CONTRACT);
+    await selection.select(CONTRACT, options.slot ?? 2, 'inferred');
+
+    for (const detail of [options.reading, options.extraReading]) {
+      if (detail === undefined) continue;
+      await jobs.recordGateAudit({
+        jobKey: conceptsKey,
+        contractId: CONTRACT,
+        slot: 2,
+        gate: 'selection',
+        result: 'inference-selected',
+        detail,
+      });
+    }
+    return { deps: { ...deps, selection } };
+  }
+
+  const READING = {
+    messageId: 'msg-42',
+    slot: 2,
+    quote: 'concept 2 works for us',
+    model: 'claude-haiku-4-5',
+  };
+
+  it('says the winner was inferred and quotes the words it was read out of', async () => {
+    const { deps } = await seedInferred({ reading: READING });
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+
+    assert.equal(evidence.selection?.selectionSource, 'inferred');
+    assert.deepEqual(evidence.selection?.inference, {
+      messageId: 'msg-42',
+      quote: 'concept 2 works for us',
+      model: 'claude-haiku-4-5',
+      at: NOW.toISOString(),
+    });
+    assert.deepEqual(evidence.evidenceGaps, [], 'a complete reading is not a gap');
+    // The covering note has to explain what `inferred` means, or the field is a
+    // word the arbitrator has to guess at.
+    assert.match(evidence.note, /`inferred` means it was NOT/);
+    // ...and the raw row it was summarized from is published too, so the
+    // summary and the record a reader checks it against cannot diverge.
+    assert.ok(
+      evidence.gateAudit.some((row) => row.result === 'inference-selected'),
+      'the reading is in the trail as written',
+    );
+  });
+
+  it('names a gap when an inferred winner’s reading cannot be recovered', async () => {
+    const { deps } = await seedInferred();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+
+    assert.equal(evidence.selection?.selectionSource, 'inferred');
+    assert.equal(evidence.selection?.inference, null);
+    assert.equal(gapMatching(evidence, /chosen by INFERENCE/).length, 1);
+    // It must not assert the reply never existed — only that this record
+    // cannot show it.
+    assert.match(evidence.evidenceGaps.join(' '), /does not assert that no such reply existed/);
+  });
+
+  it('refuses a reading recorded against a DIFFERENT slot than the winner', async () => {
+    // A reading that lost a race to another writer must never be presented as
+    // the reason for a winner it did not choose.
+    const { deps } = await seedInferred({ slot: 1, reading: READING });
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+
+    assert.equal(evidence.selection?.winnerSlot, 1);
+    assert.equal(evidence.selection?.inference, null);
+    assert.equal(gapMatching(evidence, /chosen by INFERENCE/).length, 1);
+  });
+
+  it('reports NOTHING when two recorded readings disagree', async () => {
+    // Task 25's seed election, same rule: naming one of two disagreeing rows is
+    // a guess, and a quote attributed to the wrong message is worse than none.
+    const { deps } = await seedInferred({
+      reading: READING,
+      extraReading: { ...READING, messageId: 'msg-99', quote: 'lets go with 2' },
+    });
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+
+    assert.equal(evidence.selection?.inference, null);
+    assert.equal(gapMatching(evidence, /chosen by INFERENCE/).length, 1);
+  });
+
+  it('refuses a damaged reading rather than half-copying it', async () => {
+    for (const detail of [
+      null,
+      'not an object',
+      [READING],
+      { ...READING, quote: 42 },
+      { ...READING, messageId: undefined },
+      { messageId: 'm', slot: 2, quote: 'q' },
+    ]) {
+      const { deps } = await seedInferred({ reading: detail });
+      const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+      assert.equal(
+        evidence.selection?.inference,
+        null,
+        `detail ${JSON.stringify(detail)} must not be copied into the document`,
+      );
+    }
+  });
+
+  it('never attaches a reading to a buyer or default selection', async () => {
+    // The reading is recorded under the concepts key regardless; what must not
+    // happen is a quote appearing beside a source that did not rest on one.
+    for (const source of ['buyer', 'default'] as const) {
+      const { db, deps, conceptsKey } = await seed({ withoutSelection: true });
+      const selection = createSelectionStore(db, () => NOW);
+      const jobs = createJobStore(db, () => NOW);
+      await selection.open(CONTRACT);
+      await selection.select(CONTRACT, 2, source);
+      await jobs.recordGateAudit({
+        jobKey: conceptsKey,
+        contractId: CONTRACT,
+        slot: 2,
+        gate: 'selection',
+        result: 'inference-selected',
+        detail: READING,
+      });
+
+      const evidence = await assembleDisputeEvidence({ ...deps, selection }, CONTRACT);
+      assert.equal(evidence.selection?.selectionSource, source);
+      assert.equal(evidence.selection?.inference, null, `a ${source} winner rests on no reading`);
+      assert.deepEqual(gapMatching(evidence, /chosen by INFERENCE/), []);
+    }
   });
 
   it('distinguishes a default selection from a buyer selection', async () => {

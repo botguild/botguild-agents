@@ -1869,6 +1869,48 @@ describe('runVectorStage — the traced path and its spend ledger', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// How the winner was chosen, as told to the buyer (Task 28)
+//
+// `SelectionSource` has THREE values, and the M2 note is the place a buyer
+// actually reads one of them. A third case falling through to either of the
+// other two branches is the whole hazard: "you chose it" overstates the record
+// when a model worked out what they probably meant, and "the default rule chose
+// it" is simply false when their own words are what selected it.
+// ---------------------------------------------------------------------------
+
+describe('runVectorStage — the M2 note says honestly how the winner was chosen', () => {
+  const noteFor = async (source: SelectionSource): Promise<string> => {
+    const h = await setupVector({ generate: recraftEmblem, winner: SLOT_OF['emblem']!, source });
+    assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
+    assert.equal(
+      readJson<ValidationReport>(h, 'report.json').winner.selectionSource,
+      source,
+      'and the delivered report records the same source it just described',
+    );
+    return h.deliveries.at(-1)!.note;
+  };
+
+  it('tells an INFERRED winner that the reply was read, not that they said it', async () => {
+    const note = await noteFor('inferred');
+
+    assert.match(note, /LogoSmith read your reply in this thread as choosing it/);
+    assert.ok(!note.includes('you chose it in this thread'), 'it does not claim they said it');
+    assert.ok(!note.includes('default-selection rule'), 'nor that a rule chose it');
+    // No "reply if that is wrong": there is no revision path to honour it, and
+    // four buyer-facing instructions no code path could act on have already had
+    // to be stripped from this branch.
+    assert.ok(!/if that is wrong|if that's wrong/i.test(note));
+  });
+
+  it('keeps the other two sources saying what they always said', async () => {
+    assert.match(await noteFor('buyer'), /you chose it in this thread/);
+    const fallback = await noteFor('default');
+    assert.match(fallback, /the default-selection rule chose it/);
+    assert.ok(!fallback.includes('read your reply'));
+  });
+});
+
 describe('runVectorStage — vendor and gate failures never deliver', () => {
   it('parks on a retryable vectorizer outage and tells the buyer exactly once', async () => {
     const h = await setupVector({

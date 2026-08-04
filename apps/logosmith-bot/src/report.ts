@@ -88,7 +88,17 @@ export interface PhashMatrix {
 export interface ReportWinner {
   slot: number;
   axisId: string | null;
-  /** FR-9: a buyer thread reply, or the default-selection rule firing. */
+  /**
+   * FR-9, and it is THREE facts, not two: `buyer` (the strict whole-message
+   * parser recognized their reply), `inferred` (it could not, and a Haiku call
+   * read a pick out of one reply, grounded in a verbatim span of it), or
+   * `default` (nobody replied readably and the best lettering-readback score
+   * won). See types.ts `SelectionSource`.
+   *
+   * Reported as the bare source here rather than with the quoted span: the span
+   * lives in the `gate_audit` trail under the concepts key quoted below in
+   * `idempotencyKeys`, and it is published in full by the dispute response.
+   */
   selectionSource: SelectionSource;
 }
 

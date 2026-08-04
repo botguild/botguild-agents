@@ -37,8 +37,11 @@ import {
 import { parseFaviconBrief, resolveBrief } from './brief.js';
 import {
   BRIEF_OUTAGE_PARK_REASON,
+  HAIKU_MODEL_ID,
   MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
+  SELECTION_GATE,
+  SELECTION_INFERENCE_SELECTED,
   SELECTION_TIMEOUT_HOURS,
   STUCK_CLAIM_MINUTES,
   pricingCalc,
@@ -54,7 +57,8 @@ import {
   type JobStore,
   type SelectionStore,
 } from './jobs.js';
-import { createThreadReader, findSelectionIn } from './threads.js';
+import { MAX_SELECTION_INFERENCES_PER_CONTRACT, type SelectionInferrer } from './inferSelection.js';
+import { createThreadReader, findSelectionIn, type ThreadMessage } from './threads.js';
 import type { FetchLike, JobMessage, SelectionSource } from './types.js';
 
 /** Structural queue seam — env.JOBS (`Queue<JobMessage>`) satisfies this shape. */
@@ -74,6 +78,22 @@ export interface SelectionResolutionDeps {
   concepts: ConceptStore;
   selection: SelectionStore;
   queue: JobQueueLike;
+  /**
+   * The FR-9 Haiku fallback, consulted ONLY for messages the strict parser
+   * returned null for (see `inferSelectionFromThread`).
+   *
+   * REQUIRED, NOT OPTIONAL, for two reasons. An optional dependency defaults to
+   * "no fallback", which is a silent regression to the 72-hour wait on whichever
+   * call site forgot it — and this object is built by hand in index.ts for the
+   * `milestone.accepted` / `acceptance.auto_approved` handlers as well as by the
+   * cron, so "forgot it" is a live possibility rather than a hypothetical.
+   * Second, the Anthropic SDK issues its requests through the GLOBAL `fetch`,
+   * which a harness's injected `fetchImpl` does NOT intercept: two test
+   * harnesses in this app were silently dialling api.anthropic.com for exactly
+   * that reason. A required field makes an absent double a compile error rather
+   * than a live HTTPS call.
+   */
+  selectionInferrer: SelectionInferrer;
   apiUrl: string;
   apiKey: string;
   botId: string;
@@ -110,12 +130,44 @@ const clockOf = (deps: { now?: () => Date }): (() => Date) => deps.now ?? ((): D
 
 const SELECTION_TIMEOUT_MS = SELECTION_TIMEOUT_HOURS * 60 * 60 * 1000;
 
-/** FR-17 gate name for every selection event written to the audit trail. */
-const SELECTION_GATE = 'selection';
 /** The `result` marking the one-time "you picked a concept we never sent" note. */
 const UNSELECTABLE_RESULT = 'unselectable-pick';
 /** The `result` marking the one-time "we cannot tell what M1 delivered" note. */
 const UNRESOLVABLE_RESULT = 'no-selectable-concept';
+/**
+ * The `result` marking a message the Haiku fallback read a pick out of. Shared
+ * with `disputes.ts` through config.ts, which is why it is not declared here.
+ */
+const INFERENCE_SELECTED_RESULT = SELECTION_INFERENCE_SELECTED;
+/** The `result` marking a message the Haiku fallback read and found no pick in. */
+const INFERENCE_DECLINED_RESULT = 'inference-declined';
+/**
+ * The two markers together: "this bot has already paid to have this message
+ * read". The trail is the marker for the same reason the FR-14 free-gig quota
+ * uses it — it is append-only, it is already the customer-facing evidence
+ * record, and it needs no new column.
+ */
+const INFERENCE_RESULTS: ReadonlySet<string> = new Set([
+  INFERENCE_SELECTED_RESULT,
+  INFERENCE_DECLINED_RESULT,
+]);
+
+/**
+ * The message id a recorded inference row names, or null when the row's detail
+ * is absent, damaged, or not the shape this module writes.
+ *
+ * `GateAuditRow.detail` is `unknown` by construction — the column holds
+ * whatever the writing call passed it — so it is checked rather than cast. A
+ * row that cannot be read yields null and is simply not counted as a marker,
+ * which costs at most one repeated model call. `Object.hasOwn` is not needed
+ * here because a bare read of `messageId` off `Object.prototype` cannot produce
+ * a string; the `typeof` test is what makes the read safe.
+ */
+export function inferenceMessageId(detail: unknown): string | null {
+  if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) return null;
+  const value = (detail as Record<string, unknown>)['messageId'];
+  return typeof value === 'string' && value !== '' ? value : null;
+}
 
 /**
  * An ISO-8601 instant as epoch millis, or NaN for anything else.
@@ -359,6 +411,145 @@ async function noteSelectionUnresolvable(
   });
 }
 
+/** A pick the Haiku fallback read, and the buyer's own words behind it. */
+interface InferredPick {
+  slot: number;
+  /** The verbatim span of the buyer's message the answer rests on. */
+  quote: string;
+  /** Which message it came from — the evidence trail names it. */
+  messageId: string;
+}
+
+/**
+ * THE FALLBACK, AND ONLY THE FALLBACK. Ask Haiku to read the buyer replies the
+ * strict parser could not, oldest first, and stop at the first that yields a
+ * pick inside the delivered set.
+ *
+ * The caller reaches this ONLY when `findSelectionIn` found no usable pick, so
+ * a message the strict parser reads is never sent to a model and nothing here
+ * can override a literal reading of the buyer's words. `parseSelection` is
+ * unchanged and untouched: see threads.ts's header for why loosening it is the
+ * one change that has been made and reverted three times.
+ *
+ * WHY OLDEST FIRST, ONE MESSAGE AT A TIME. It reproduces FR-9 first-wins
+ * structurally rather than asking a model to compare replies: `SelectionStore.
+ * select` is itself first-write-wins, so the first reply that reads as a pick
+ * is the one whose answer the store will actually keep. It also makes grounding
+ * trivial — a quote has exactly one message it can belong to — and it means a
+ * long thread costs one call per unread message rather than one call over a
+ * transcript nobody can audit afterwards.
+ *
+ * THE BOUND IS THE TRAIL. The 15-minute cron reaches an awaiting contract
+ * roughly 288 times across the FR-9 window, so an unbounded fallback would
+ * re-ask about the same message forever. Every message the model ANSWERS is
+ * marked in the FR-17 selection trail and never asked about again, and
+ * `MAX_SELECTION_INFERENCES_PER_CONTRACT` caps the lifetime total so a buyer
+ * posting many replies cannot turn each one into a call. Together those bound
+ * the spend for one contract at that many calls, ever.
+ *
+ * A MESSAGE THE MODEL NEVER SAW STAYS ASKABLE. A transport failure returns
+ * `outage` and writes no marker, because retiring a message on our vendor's bad
+ * minute would silently cost the buyer their pick — the exact shape of the
+ * final review's H1. An outage also stops this sweep's loop: the next message
+ * would fail the same way, and the next cron is fifteen minutes away.
+ *
+ * THE SUCCESS ROW IS NOT WRITTEN HERE. A `inference-selected` marker written
+ * before `selection.select` succeeded would retire the message that carries the
+ * buyer's pick if the write then failed, losing it permanently; written after,
+ * a failed write costs one repeated call and recovers. That is the opposite
+ * ordering to the free-gig quota's marker, and deliberately so — there,
+ * over-counting errs toward refusing, which is right for an abuse guard; here,
+ * over-asking errs toward honouring what the buyer wrote, which is right for a
+ * selection.
+ */
+async function inferSelectionFromThread(
+  deps: SelectionResolutionDeps,
+  args: {
+    contractId: string;
+    conceptsJobKey: string;
+    messages: ThreadMessage[];
+    delivered: Set<number>;
+  },
+): Promise<InferredPick | null> {
+  const { contractId, conceptsJobKey, messages, delivered } = args;
+  const log = deps.logger.child({ contractId });
+
+  const trail = await deps.jobs.listGateAudit(conceptsJobKey, SELECTION_GATE);
+  const examined = new Set<string>();
+  for (const entry of trail) {
+    if (!INFERENCE_RESULTS.has(entry.result)) continue;
+    const id = inferenceMessageId(entry.detail);
+    if (id !== null) examined.add(id);
+  }
+
+  let budget = MAX_SELECTION_INFERENCES_PER_CONTRACT - examined.size;
+  if (budget <= 0) {
+    log.info(
+      { examined: examined.size, cap: MAX_SELECTION_INFERENCES_PER_CONTRACT },
+      'selection inference budget for this contract is spent; leaving it to the default rule',
+    );
+    return null;
+  }
+
+  for (const message of messages) {
+    if (budget <= 0) break;
+    // Bot-authored text is excluded BEFORE the model sees it, for the reason
+    // findSelection excludes it before parsing: this bot writes "concept N"
+    // into the M1 delivery note, the gate-failure notes and the unselectable-
+    // pick note, and a model shown its own instruction to "reply with
+    // `concept 1|2|3`" has every reason to read a selection out of it.
+    if (message.senderId === deps.botId) continue;
+    if (examined.has(message.id)) continue;
+
+    const result = await deps.selectionInferrer.infer({ message, allowed: delivered });
+    if (result.outage) {
+      log.warn(
+        { messageId: message.id },
+        'selection inference is unavailable; message left unread and retried next sweep',
+      );
+      return null;
+    }
+    budget -= 1;
+
+    // THE DELIVERED-SET INTERSECTION, RE-CHECKED AT THE POINT OF DECISION.
+    // `SelectionInferrer` enforces it too, and today's implementation does so
+    // correctly — but this is where a winner is actually chosen, and `slot` is
+    // typed `number | null` by an interface anything can implement. Task 21
+    // settled the principle on the same shape of question: the module that
+    // makes the claim is the module that verifies it, rather than resting on a
+    // caller elsewhere behaving. An out-of-set answer is treated as a decline,
+    // not as a buyer error — the buyer typed nothing this module could read, so
+    // there is nothing to tell them they got wrong.
+    const usable = result.slot !== null && delivered.has(result.slot) ? result.slot : null;
+
+    if (usable === null || result.quote === null) {
+      await deps.jobs.recordGateAudit({
+        jobKey: conceptsJobKey,
+        contractId,
+        gate: SELECTION_GATE,
+        result: INFERENCE_DECLINED_RESULT,
+        detail: {
+          messageId: message.id,
+          model: HAIKU_MODEL_ID,
+          costUsd: result.costUsd,
+          reason:
+            result.slot !== null && usable === null
+              ? `slot ${result.slot} was not delivered`
+              : result.reason,
+        },
+      });
+      continue;
+    }
+
+    log.info(
+      { messageId: message.id, slot: usable, costUsd: result.costUsd },
+      'selection inferred from a reply the strict parser could not read',
+    );
+    return { slot: usable, quote: result.quote, messageId: message.id };
+  }
+  return null;
+}
+
 /**
  * Resolve one contract's concept selection and, when a winner exists, start
  * stage 2 (PRD FR-9, §6 step 7).
@@ -369,7 +560,9 @@ async function noteSelectionUnresolvable(
  * should not then idle for the rest of the 72-hour window.
  *
  * The thread is read once. A parsed buyer reply for a concept that was actually
- * delivered selects immediately, at any age. Otherwise the default rule fires,
+ * delivered selects immediately, at any age. Failing that — and only failing
+ * that — the Haiku fallback is asked to read the replies the strict parser
+ * could not, which also selects at any age. Otherwise the default rule fires,
  * but only past `SELECTION_TIMEOUT_HOURS` or under `force`. Everything is a
  * no-op unless the selection row is at `concepts_delivered`.
  */
@@ -454,12 +647,33 @@ export async function resolveSelectionForContract(
     });
   }
 
+  // THE FALLBACK RUNS ONLY WHEN THE STRICT PARSER FOUND NOTHING. A reply
+  // `parseSelection` recognized is never re-read by a model, so an inference can
+  // never override a literal reading of the buyer's own words.
+  //
+  // It runs BEFORE the timeout check, which is the entire point: a buyer who
+  // wrote "concept 2 works" has answered, and making them wait out the 72-hour
+  // window for an auto-pick because a regex could not read a perfectly clear
+  // sentence is the cost this exists to stop paying.
+  const inferred =
+    picked === null
+      ? await inferSelectionFromThread(deps, {
+          contractId,
+          conceptsJobKey,
+          messages: scoped,
+          delivered,
+        })
+      : null;
+
   let winner: number;
   let source: SelectionSource;
 
   if (picked !== null) {
     winner = picked;
     source = 'buyer';
+  } else if (inferred !== null) {
+    winner = inferred.slot;
+    source = 'inferred';
   } else {
     const timedOut = Number.isFinite(m1At) && now.getTime() - m1At >= SELECTION_TIMEOUT_MS;
     if (opts.force !== true && !timedOut) {
@@ -506,6 +720,40 @@ export async function resolveSelectionForContract(
     return;
   }
 
+  // THE EVIDENCE FOR AN INFERRED PICK, written only once the store actually
+  // holds it. Two conditions, both load-bearing: the persisted source must be
+  // ours, and the persisted winner must be the slot we inferred — a webhook
+  // racing this sweep can have already written a different winner by a
+  // different route, and a row claiming we inferred THAT one would be a false
+  // statement in the record a dispute is answered from.
+  //
+  // Written after the select rather than before it so that a failed write costs
+  // one repeated model call instead of permanently retiring the message that
+  // carries the buyer's pick (see `inferSelectionFromThread`).
+  if (
+    inferred !== null &&
+    persisted.source === 'inferred' &&
+    persisted.winnerSlot === inferred.slot
+  ) {
+    await jobs.recordGateAudit({
+      jobKey: conceptsJobKey,
+      contractId,
+      slot: inferred.slot,
+      gate: SELECTION_GATE,
+      result: INFERENCE_SELECTED_RESULT,
+      // `quote` is the buyer's own words, verified to occur in their message
+      // before it got here. It is in this trail because the dispute response
+      // has to be able to show WHAT WAS READ, not merely assert that something
+      // was: "we inferred it" without the words is not evidence.
+      detail: {
+        messageId: inferred.messageId,
+        slot: inferred.slot,
+        quote: inferred.quote,
+        model: HAIKU_MODEL_ID,
+      },
+    });
+  }
+
   await jobs.recordGateAudit({
     jobKey: conceptsJobKey,
     contractId,
@@ -517,6 +765,7 @@ export async function resolveSelectionForContract(
       source: persisted.source,
       forced: opts.force === true,
       buyerReply: picked,
+      inferredFrom: inferred === null ? null : inferred.messageId,
       deliveredSlots: [...delivered].sort((a, b) => a - b),
       m1DeliveredAt: row.m1DeliveredAt,
     },

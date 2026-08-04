@@ -247,6 +247,21 @@ export const MODERATION_ATTEMPTS_BEFORE_NOTICE = 3;
  */
 export const BRIEF_OUTAGE_PARK_REASON = 'brief_extraction_outage';
 
+/**
+ * The FR-17 gate name every selection event is recorded under, and the `result`
+ * marking a message the Haiku selection fallback read a pick out of.
+ *
+ * They live here, beside `BRIEF_OUTAGE_PARK_REASON`, because they are a
+ * protocol between two modules that must not drift: `sweeps.ts` WRITES them
+ * when it resolves a winner, and `disputes.ts` READS them to recover the
+ * buyer's own words behind an inferred pick. Gate names are otherwise a local
+ * literal per module in this app (`MODERATION_GATE` is declared twice), which
+ * is tolerable where a drift costs a missing summary — not where it costs the
+ * quoted evidence in a dispute response.
+ */
+export const SELECTION_GATE = 'selection';
+export const SELECTION_INFERENCE_SELECTED = 'inference-selected';
+
 /** `claimed` jobs older than this with no checkpoint are re-enqueued (§12). */
 export const STUCK_CLAIM_MINUTES = 30;
 

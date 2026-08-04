@@ -679,10 +679,20 @@ interface M2NoteInput {
  */
 function buildM2Note(input: M2NoteInput): string {
   const { brief, gates } = input;
+  // THREE SOURCES, THREE SENTENCES. `inferred` must not fall through to either
+  // of the other two: telling a buyer "you chose it" when a model worked out
+  // what they probably meant overstates the record, and telling them the
+  // default rule chose it when their own words are what selected it is simply
+  // false. The wording says plainly that their reply was read rather than
+  // parsed, and promises no action, because no revision path exists for them to
+  // be pointed at — four buyer-facing notes on this branch have already had to
+  // be stripped of instructions no code path could honour.
   const chosen =
     input.selectionSource === 'buyer'
       ? 'you chose it in this thread'
-      : 'the default-selection rule chose it — the best lettering-readback score of the set';
+      : input.selectionSource === 'inferred'
+        ? 'LogoSmith read your reply in this thread as choosing it'
+        : 'the default-selection rule chose it — the best lettering-readback score of the set';
   return [
     `LogoSmith — Milestone 2: the true-vector brand pack for "${brief.brandName}".`,
     '',

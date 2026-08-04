@@ -37,6 +37,7 @@
 import type { AgentMcpClient } from '@botguild/agent-core';
 import type { D1Like } from '@botguild/agent-core-workers';
 import type { Logger } from 'pino';
+import { SELECTION_GATE, SELECTION_INFERENCE_SELECTED } from './config.js';
 import {
   buildJobKey,
   type ConceptRow,
@@ -119,12 +120,48 @@ export interface DisputeConcept {
   ocr: ReportOcrSnapshot | null;
 }
 
+/**
+ * What was read, and out of which message, when the winner was INFERRED.
+ *
+ * THIS IS THE POINT OF THE `inferred` SOURCE. "I never chose that" is answered
+ * by two different sentences depending on how the pick was made: with `buyer`,
+ * the reply was recognized outright by a parser that only accepts whole-message
+ * affirmative selections, and the record's claim is simply that they said it;
+ * with `inferred`, a model read a pick out of a reply that parser could not
+ * read, and the honest claim is narrower — THESE ARE THE WORDS IT READ IT OUT
+ * OF. `quote` was verified to occur verbatim in that message before it was ever
+ * recorded, so the payer can check it against their own thread.
+ */
+export interface DisputeInference {
+  /** The contract-thread message the quote was taken from. */
+  messageId: string;
+  /** The buyer's own words the pick rests on, verbatim. */
+  quote: string;
+  /** The model that read them. */
+  model: string;
+  /** When it was read. */
+  at: string;
+}
+
 export interface DisputeSelection {
   state: 'concepts_delivered' | 'winner_selected' | 'pack_delivered';
   /** `null` while the state is `concepts_delivered`: the state says why. */
   winnerSlot: number | null;
-  /** FR-9: a buyer thread reply, or the default-selection rule firing. */
+  /**
+   * FR-9, and it is THREE facts: `buyer` (the strict whole-message parser
+   * recognized their reply), `inferred` (it could not, and a model read a pick
+   * out of one reply — see `inference`), or `default` (nobody replied readably
+   * inside the selection window and the best lettering-readback score won).
+   */
   selectionSource: SelectionSource | null;
+  /**
+   * Present only for an `inferred` winner, and `null` for every other source —
+   * including `inferred` when the reading could not be recovered from the
+   * trail, which is named in `evidenceGaps` rather than papered over. It is
+   * never populated for `buyer` or `default`, because neither of those rests
+   * on a reading and a quote beside them would imply one.
+   */
+  inference: DisputeInference | null;
   m1DeliveredAt: string;
 }
 
@@ -201,7 +238,7 @@ const EVIDENCE_NOTE =
   'Assembled from LogoSmith’s own records for this contract, written while the work ran: ' +
   '`concepts` (one row per generated image, with the vendor request id and the lettering ' +
   'readback verdict as the gate recorded it, and the generation seed recovered from the audit ' +
-  'row that recorded that verdict), `selection` (the winner and how it was chosen), ' +
+  'row that recorded that verdict), `selection` (the winner and how it was chosen — see below), ' +
   '`jobs` (the per-stage idempotency claims and vendor spend), and `gate_audit` (the ' +
   'append-only gate decision trail, listed here in insert order across every stage). Nothing ' +
   'is recomputed at dispute time. A null `detail` on an audit row means either that no detail ' +
@@ -215,7 +252,16 @@ const EVIDENCE_NOTE =
   'indistinguishable so naming one would be a guess, the slot may have been re-gated after a ' +
   'pause, or that row’s stored detail may no longer parse. Some of those are provenance genuinely ' +
   'missing, so a null seed asserts nothing either way rather than confirming the record is ' +
-  'complete. Anything this response could not source is named in `evidenceGaps`.';
+  'complete. `selection.selectionSource` distinguishes THREE different facts and they should not ' +
+  'be read as one: `buyer` means the reply was recognized outright by a strict parser that ' +
+  'accepts only whole-message affirmative selections; `inferred` means it was NOT — the reply ' +
+  'was not in a form that parser accepts, so a model was asked to read it, and ' +
+  '`selection.inference` names the message and quotes the buyer’s own words the choice was read ' +
+  'out of, verified to occur verbatim in that message before it was recorded; `default` means no ' +
+  'readable reply arrived inside the selection window and the concept with the best ' +
+  'lettering-readback score was chosen automatically, exactly as the gig terms state. ' +
+  '`selection.inference` is null for the other two sources because neither rests on a reading. ' +
+  'Anything this response could not source is named in `evidenceGaps`.';
 
 /**
  * The gap sentences, as an allow-list of the things this module knows it can
@@ -237,6 +283,13 @@ const GAP = {
     'No selection record exists for this contract, so this response cannot say which concept ' +
     'was chosen or how. A selection record is created when Milestone 1 is delivered, so its ' +
     'absence is consistent with a job that never reached concept delivery.',
+  unreadableInference:
+    'The winning concept was chosen by INFERENCE — the buyer’s reply was not in a form ' +
+    'LogoSmith’s strict selection parser accepts, so a model was asked to read it — but the ' +
+    'reading itself could not be recovered from the gate audit trail: no `inference-selected` ' +
+    'row naming that concept is present, its stored detail is damaged, or two rows disagree. ' +
+    'This response therefore does not quote the words the choice was read out of. It does not ' +
+    'assert that no such reply existed; only that this record cannot show it.',
   noScreening:
     'No cleared pre-generation content screening is on record for this contract, so the ' +
     'vendor’s verbatim screening verdict could not be quoted. `inputScreening` still ' +
@@ -445,6 +498,49 @@ function mergeAuditTrail(trails: Array<{ stage: JobStage; rows: GateAuditRow[] }
 }
 
 /**
+ * Recover the reading behind an `inferred` winner from the FR-17 trail.
+ *
+ * Read from the trail rather than stored on the `selection` row on purpose: the
+ * trail is where `sweeps.ts` records it, it is append-only, and it is already
+ * published verbatim in this same document — so the summary here and the raw
+ * row a reader can check it against cannot diverge.
+ *
+ * FAIL-CLOSED, and in the shape Task 25's seed election settled. The row must
+ * name the SAME slot the selection row holds, so a reading that lost a race to
+ * another writer cannot be presented as the reason for a winner it did not
+ * choose. Every field is checked before it is copied — `detail` is `unknown` by
+ * construction — and TWO rows that disagree report NOTHING: naming one of them
+ * would be a guess, and a quote attributed to the wrong message is worse in a
+ * dispute than no quote at all.
+ */
+function inferenceFor(trail: GateAuditRow[], winnerSlot: number | null): DisputeInference | null {
+  if (winnerSlot === null) return null;
+
+  const readings: DisputeInference[] = [];
+  for (const row of trail) {
+    if (row.gate !== SELECTION_GATE || row.result !== SELECTION_INFERENCE_SELECTED) continue;
+    const detail = row.detail;
+    if (typeof detail !== 'object' || detail === null || Array.isArray(detail)) continue;
+    const record = detail as Record<string, unknown>;
+    if (record['slot'] !== winnerSlot) continue;
+    const messageId = record['messageId'];
+    const quote = record['quote'];
+    const model = record['model'];
+    if (typeof messageId !== 'string' || typeof quote !== 'string' || typeof model !== 'string') {
+      continue;
+    }
+    readings.push({ messageId, quote, model, at: row.createdAt });
+  }
+
+  if (readings.length === 0) return null;
+  const [first] = readings;
+  const unanimous = readings.every(
+    (reading) => reading.messageId === first.messageId && reading.quote === first.quote,
+  );
+  return unanimous ? first : null;
+}
+
+/**
  * The URLs a dispute reader can open.
  *
  * Only URLs the record PROVES resolve are listed. The per-stage evidence page
@@ -523,6 +619,17 @@ export async function assembleDisputeEvidence(
   if (concepts.length === 0) evidenceGaps.push(GAP.noConcepts);
   if (slotsWithoutVerdict.length > 0) evidenceGaps.push(missingVerdictGap(slotsWithoutVerdict));
   if (selectionRow === null) evidenceGaps.push(GAP.noSelection);
+
+  // The reading behind an inferred winner is sourced ONLY when the winner was
+  // inferred: a quote beside a `buyer` or `default` source would imply a
+  // reading that did not happen. An inferred winner whose reading cannot be
+  // recovered says so, because "a model read your reply" without the words it
+  // read is exactly the unevidenced assertion this document may not make.
+  const inference =
+    selectionRow?.source === 'inferred' ? inferenceFor(raw, selectionRow.winnerSlot) : null;
+  if (selectionRow?.source === 'inferred' && inference === null) {
+    evidenceGaps.push(GAP.unreadableInference);
+  }
   if (inputScreening.verdict === null) {
     // `summarizeInputScreening` returns null for two different facts — no
     // cleared screening was ever recorded, and one was recorded but its stored
@@ -551,6 +658,7 @@ export async function assembleDisputeEvidence(
             state: selectionRow.state,
             winnerSlot: selectionRow.winnerSlot,
             selectionSource: selectionRow.source,
+            inference: inference,
             m1DeliveredAt: selectionRow.m1DeliveredAt,
           },
     inputScreening,
