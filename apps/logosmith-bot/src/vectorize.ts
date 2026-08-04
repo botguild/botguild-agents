@@ -38,7 +38,7 @@
 //     must route to the caller's abort leg, not its park leg.
 
 import { optimize, type Config } from 'svgo';
-import { IMAGE_COST_USD } from './config.js';
+import { IMAGE_COST_USD, vectorizerCreditsToUsd } from './config.js';
 import { checkTrueVector, sanitizeSvg } from './gates/index.js';
 import type { FetchLike } from './types.js';
 
@@ -73,6 +73,14 @@ const errorMessage = (err: unknown): string => (err instanceof Error ? err.messa
  *  - `removeScripts` is NOT in preset-default — svgo leaves `<script>`
  *    completely untouched (verified with a probe input). `sanitizeSvg` below
  *    is what actually removes it.
+ *  - `removeDoctype` IS in preset-default, IS INHERITED RATHER THAN CHOSEN,
+ *    AND IS LOAD-BEARING. DO NOT OVERRIDE IT OFF. Vectorizer.ai's real
+ *    response (measured 2026-08-04) opens with a DOCTYPE carrying an external
+ *    `http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd` DTD URL; this plugin
+ *    is the ONLY thing that removes it, because `checkTrueVector` does not
+ *    catch a DOCTYPE at all (mutation-measured: pass=true with the external
+ *    URL still in the document). See `toVector` below and the regression test
+ *    that pins it.
  *  - `inlineStyles` IS in preset-default and is explicitly turned OFF here.
  *    Left on, it rewrites `<style>.a{fill:url(https://evil/x.svg)}</style>`
  *    into an inline `style="fill:url(https://evil/x.svg)"` on whatever
@@ -153,15 +161,54 @@ export function createVectorizer(deps: {
         return { ok: true, svg: processed.svg, source: 'recraft-native', costUsd: 0 };
       }
 
-      // NOT verified against a live call — no Vectorizer.ai credential was
-      // obtainable this session (the same constraint noted on Recraft in
-      // generate.ts). This shape IS grounded in vectorizer.ai's published API
-      // docs (https://vectorizer.ai/api/documentation, read 2026-07-30):
-      // HTTP Basic auth of `apiId:apiSecret`, `multipart/form-data` with an
-      // `image` field, a raw (non-JSON) SVG body on success. `PipelineSecrets`
-      // exposes exactly one string (`vectorizerToken`), so it is read here as
-      // the pre-joined `"apiId:apiSecret"` pair — the same shape curl's own
-      // `-u apiId:apiSecret` flag takes before base64-encoding it.
+      // VERIFIED LIVE 2026-08-04 against the real API, as Ideogram was on
+      // 2026-07-30 and Recraft on 2026-08-04 (both in generate.ts). Three
+      // calls, all in the vendor's FREE TEST MODE — `mode=test` returns a
+      // full-shaped response and charges 0.000000 credits (see the README).
+      // THAT MODE IS A VERIFICATION TOOL ONLY AND IS DELIBERATELY NOT WIRED IN
+      // HERE: this Worker never sends it, so what ships always pays.
+      //
+      // EVERY ASSUMPTION THIS ADAPTER WAS WRITTEN ON HELD, which is worth
+      // recording because the credential shape was the flagged risk — had
+      // `vectorizerToken` not been the pre-joined pair, every M2 that does not
+      // take the Recraft native-SVG bypass would have failed. What is now
+      // MEASURED, replacing what this comment previously took from
+      // vectorizer.ai's published docs (read 2026-07-30):
+      //
+      //   * `Basic btoa("apiId:apiSecret")` of the single `PipelineSecrets`
+      //     string is ACCEPTED — the pre-joined reading below is correct, as
+      //     are the endpoint, the `image` + `output.file_format=svg` form
+      //     fields, and reading the success body with `response.text()`
+      //     (HTTP 200, `content-type: image/svg+xml`, 47899 bytes).
+      //   * THE BODY IS SVG BEHIND AN XML PROLOG **AND A DOCTYPE**, and that
+      //     DOCTYPE CARRIES AN EXTERNAL DTD URL
+      //     (`http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd`) — an external
+      //     reference arriving in vendor output, which is the exact class of
+      //     defect this branch has already shipped into paid logos twice. It
+      //     does NOT survive `finalizeVector`: SVGO's `removeDoctype` strips
+      //     it, verified on the real response (47899 -> 23105 bytes, zero
+      //     `http:` outside `xmlns` in the delivered SVG, gate clean).
+      //
+      //     BUT `removeDoctype` IS AN INHERITED `preset-default` PLUGIN NOBODY
+      //     CHOSE, AND IT IS LOAD-BEARING, NOT BELT-AND-BRACES. Measured by
+      //     mutation: override it off and the DOCTYPE *and its external URL*
+      //     survive into the delivered file, and `checkTrueVector` PASSES IT
+      //     (pass=true, violations=[]) — `<!DOCTYPE` matches neither the
+      //     tag-allowlist scan (which needs `<name`, and `!` is not a name
+      //     character) nor `hasNonFragmentReference` (which looks for `href=`
+      //     and `url(`, and a DOCTYPE has neither). THE GATE IS NOT A SECOND
+      //     LINE OF DEFENCE HERE; SVGO IS THE ONLY ONE. That is why
+      //     vectorize.test.ts now pins it with the real captured prefix: the
+      //     test is what makes an inherited default a checked decision.
+      //   * THE CHARGE IS THE `x-credits-charged` RESPONSE HEADER — a header,
+      //     not a body field, since the body is raw SVG — reported beside
+      //     `x-credits-calculated`. The ledger bills from it below rather than
+      //     from a constant that drifts unseen.
+      //
+      // Still unobserved, and so still inferred: any PAID call (all three
+      // probes were test-mode, so a non-zero charge value has never been
+      // seen), the credits->USD ratio (derived, not measured — see
+      // `VECTORIZER_CREDITS_PER_USD`), and every non-200 error body.
       const body = new FormData();
       // `new Uint8Array(input.png)` (rather than `input.png` directly) is not
       // a semantic change — it re-copies into a plain `ArrayBuffer`-backed
@@ -219,24 +266,35 @@ export function createVectorizer(deps: {
       // 200. Both failures below are PAID failures and say so, because the
       // FR-5 ledger is the only bound on the park loop they feed (a retryable
       // failure deliberately consumes no attempt — Task 18 Ruling 1).
+      // `billed` is the PLANNING figure; it stands only until the response
+      // says what was really charged.
       const billed = IMAGE_COST_USD.vectorizer;
+
+      // WHAT THE VENDOR SAYS IT CHARGED, not what we planned for. Read BEFORE
+      // the body, for the same reason generate.ts reads Recraft's id header
+      // first: the body is the half that can fail mid-stream, and the charge
+      // is exactly what that failure branch has to report. Falls back to the
+      // planning constant on any unusable count — see `vectorizerCreditsToUsd`
+      // for why the fallback direction is upward, and why a free test-mode
+      // call (`x-credits-charged: 0.000000`) therefore bills $0.20.
+      const charged = vectorizerCreditsToUsd(response.headers.get('x-credits-charged')) ?? billed;
 
       let svgText: string;
       try {
         svgText = await response.text();
       } catch (err) {
-        return { ok: false, retryable: true, error: errorMessage(err), costUsd: billed };
+        return { ok: false, retryable: true, error: errorMessage(err), costUsd: charged };
       }
 
       const processed = finalizeVector(svgText);
       if (!processed.ok) {
-        return { ok: false, retryable: false, error: processed.error, costUsd: billed };
+        return { ok: false, retryable: false, error: processed.error, costUsd: charged };
       }
       return {
         ok: true,
         svg: processed.svg,
         source: 'vectorizer',
-        costUsd: IMAGE_COST_USD.vectorizer,
+        costUsd: charged,
       };
     },
   };

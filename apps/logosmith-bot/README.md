@@ -14,7 +14,7 @@ load-bearing — do not restate their reasoning here without reading them).
 
 Stack: Node 22 / TypeScript, Hono, Cloudflare Workers + Queues + Cron
 Triggers + D1 + KV + R2 + Workers AI, `pnpm` + Turborepo. Full test suite as
-of this writing: **651/651 passing, 146 suites** (`pnpm test` from this
+of this writing: **658/658 passing, 147 suites** (`pnpm test` from this
 directory; run the workspace-wide `pnpm -w build && pnpm -w typecheck &&
 pnpm -w lint` too before trusting a change).
 
@@ -22,6 +22,13 @@ pnpm -w lint` too before trusting a change).
 
 Read this section before the runbooks below — it changes how much you should
 trust a given failure.
+
+**All three image vendors are now live-verified** (Ideogram 2026-07-30,
+Recraft and Vectorizer.ai 2026-08-04), which closes what was this branch's
+largest standing caveat: no adapter here is written from documentation alone
+any more. What each probe did *not* observe is named vendor by vendor below,
+and those gaps are real — but "we have never once called this API" is no
+longer among them.
 
 - **Recraft's adapter is now verified live (2026-08-04) — and it shipped
   wrong for a while.** This entry used to say no Recraft key was obtainable
@@ -55,22 +62,59 @@ trust a given failure.
   SVG), and neither the **non-200 error bodies** nor a response **missing
   the header or the credit count** has ever been seen.
 
-- **Vectorizer.ai's credential shape is also unverified.** Vectorizer.ai's
-  documented auth is HTTP Basic with `base64(apiId:apiSecret)`. This bot has
-  exactly one secret slot for it (`PipelineSecrets.vectorizerToken`, backed
-  by the `VECTORIZER_AI_TOKEN` wrangler secret), so `src/vectorize.ts` reads
-  that single string as an **already-joined** `"apiId:apiSecret"` pair and
-  base64-encodes the whole thing. If Vectorizer.ai's provisioning flow hands
-  you `apiId` and `apiSecret` as two separate values instead, you must join
-  them yourself (`` `${apiId}:${apiSecret}` ``) before putting the secret —
-  **do not put just the secret half in `VECTORIZER_AI_TOKEN` and assume it
-  works.** Get this wrong and every paid job that doesn't take the Recraft
-  native-SVG short-circuit (i.e. every job whose winning concept came from
-  Ideogram) fails at the vectorize step — and since the bypass is now
-  confirmed to fire (see above), that is precisely the two-in-three of jobs
-  whose buyer picked `wordmark` or `lockup`, not an unknown fraction. Verify
-  this the first time a real token is provisioned, before relying on it for
-  a paying customer.
+- **Vectorizer.ai is now verified live (2026-08-04) too — and unlike Recraft,
+  every assumption held.** This entry used to warn that the credential shape
+  was unverified and that getting it wrong would fail every job not taking the
+  Recraft bypass. A token arrived, the endpoint was probed three times in the
+  vendor's **free test mode**, and the adapter needed no correction. What is
+  now *measured*:
+
+  - **The credential shape is right.** This bot has exactly one secret slot
+    (`PipelineSecrets.vectorizerToken`, backed by the `VECTORIZER_AI_TOKEN`
+    wrangler secret), and `src/vectorize.ts` reads that single string as an
+    **already-joined** `"apiId:apiSecret"` pair, base64-encoding the whole
+    thing — that is exactly what the API accepts. **This does not remove the
+    provisioning warning:** vectorizer.ai still hands you `apiId` and
+    `apiSecret` as two separate values, so you must join them yourself
+    (`` `${apiId}:${apiSecret}` ``) before putting the secret. Do not put just
+    the secret half in `VECTORIZER_AI_TOKEN` and assume it works.
+  - The endpoint, the `image` + `output.file_format=svg` multipart fields and
+    the raw-SVG success body (`HTTP 200`, `image/svg+xml`, 47899 bytes) are
+    all as the adapter assumed.
+  - **The response carries an external reference, and only SVGO removes it.**
+    The body opens with an XML prolog *and* a `<!DOCTYPE>` naming an external
+    DTD URL (`http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd`). It does not
+    reach the buyer — SVGO's `removeDoctype` strips it (47899 → 23105 bytes on
+    the real response; zero `http:` outside `xmlns` in the delivered SVG) —
+    but `removeDoctype` is an *inherited* `preset-default` plugin nobody here
+    chose, and it is **load-bearing**: mutation-tested, with it disabled the
+    DOCTYPE and its URL survive and `checkTrueVector` **passes them** (a
+    DOCTYPE matches neither the tag allowlist nor the reference scan). There
+    is no second line of defence. `src/vectorize.test.ts` now pins this with
+    the real captured prefix; do not override that plugin off.
+  - The charge is the **`x-credits-charged` response header** (a header, not
+    a body field — the body is raw SVG), reported beside
+    `x-credits-calculated`. The stage-2 ledger bills from it, falling back to
+    `IMAGE_COST_USD.vectorizer` on any count it cannot parse.
+
+  **Verifying this integration costs nothing.** Adding `mode=test` to the
+  multipart form returns a **full-shaped** response — real SVG, real headers —
+  and charges `x-credits-charged: 0.000000` (against
+  `x-credits-calculated: 1.000000`). That is how all three probes above were
+  run, and it is the way to re-verify the adapter after a vendor change, check
+  a freshly provisioned credential before a paying customer depends on it, or
+  extend the calibration harness over this leg without real spend. **It is
+  deliberately not wired into production code:** `src/vectorize.ts` never
+  sends `mode=test`, so what ships always pays. Inject it from a probe by
+  wrapping the `fetchImpl` you hand `createVectorizer`, not by adding a flag
+  to the adapter.
+
+  **Still unproven for this vendor:** every probe was test-mode, so **no paid
+  call has ever been observed** — the non-zero charge value, specifically, is
+  inferred; the credits→USD **ratio** is derived exactly as Recraft's is
+  (vectorizer.ai publishes a credit *count*, and 1 credit ≈ $0.20 only at the
+  entry pricing tier — see `VECTORIZER_CREDITS_PER_USD` in `src/config.ts`);
+  and no **non-200 error body** has ever been seen.
 
 - **The license manifest ships incomplete on purpose, not by omission.**
   `buildLicenseManifest` (`src/report.ts`) looks up each delivered image's
@@ -144,7 +188,7 @@ committed anywhere, and `.dev.vars` is gitignored.
 | `MODERATION_API_KEY` | FR-2 input content-safety screening (OpenAI omni-moderation, pinned model — see `src/moderation.ts`) |
 | `IDEOGRAM_API_KEY` | Ideogram 3.0 image generation (`wordmark`/`lockup` axes) — **verified live** |
 | `RECRAFT_API_KEY` | Recraft V3 image generation (`emblem` axis) — **verified live 2026-08-04**, see above |
-| `VECTORIZER_AI_TOKEN` | Vectorizer.ai raster-to-vector conversion — **credential shape unverified**, see above |
+| `VECTORIZER_AI_TOKEN` | Vectorizer.ai raster-to-vector conversion — **verified live 2026-08-04**; the joined `apiId:apiSecret` pair, not either half alone, see above |
 | `GOOGLE_FONTS_API_KEY` | Font-pairing lookup for `brand.json` |
 | `ADMIN_TOKEN` | Bearer-protects `POST /admin/register`; the route is disabled (503) if this is unset |
 
@@ -181,8 +225,14 @@ for you, and nothing here should be trusted to have completed it silently.
    and the moderation vendor are presumably already provisioned from
    development). Put each with `wrangler secret put`.
 3. **Purchase a Vectorizer.ai plan** sized for expected volume, and get the
-   real `apiId`/`apiSecret` pair — see the credential-shape warning above
-   before you put the secret.
+   real `apiId`/`apiSecret` pair — join them into one `apiId:apiSecret` string
+   before putting the secret (see the Vectorizer.ai entry above), then confirm
+   the token works with a **free `mode=test` call**, which costs nothing and
+   is documented in that same entry. The credit price a plan buys is also what
+   `VECTORIZER_CREDITS_PER_USD` in `src/config.ts` is reconciled against, so
+   if the plan's rate is not the entry tier's ~$0.20/credit, update that
+   constant (`config.test.ts` will tell you if it and `IMAGE_COST_USD`
+   disagree).
 4. **Get the Google Fonts API key** (a simple API-key signup, no plan
    choice) and put it as `GOOGLE_FONTS_API_KEY`.
 5. Only after 1–3 are done: run the **calibration procedure** below and

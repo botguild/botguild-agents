@@ -302,13 +302,18 @@ export const HAIKU_PRICING_PER_MTOK = {
 /**
  * Conservative flat per-image vendor costs for the FR-5 spend ledger (§11).
  *
- * THESE ARE PLANNING FIGURES, AND FOR RECRAFT ALSO A FALLBACK. Recraft's live
- * API reports what it actually charged on every 200 (see
- * `recraftCreditsToUsd` below), and `generate.ts` bills the ledger from that
- * report in preference to this table. This entry stays as (a) the value used
- * when a response carries no usable credit count, and (b) the number the
- * worst-case-burn invariant in `config.test.ts` sizes `MAX_SPEND_USD` against
- * — a cap has to be chosen from a figure known BEFORE the calls are made.
+ * THESE ARE PLANNING FIGURES, AND FOR RECRAFT AND VECTORIZER ALSO FALLBACKS.
+ * Both of those vendors' live APIs report what they actually charged on a 200
+ * — Recraft in the body's `credits` field, Vectorizer.ai in the
+ * `x-credits-charged` RESPONSE HEADER (see `recraftCreditsToUsd` and
+ * `vectorizerCreditsToUsd` below) — and `generate.ts`/`vectorize.ts` bill the
+ * ledger from those reports in preference to this table. Those entries stay as
+ * (a) the value used when a response carries no usable credit count, and
+ * (b) the numbers the worst-case-burn invariant in `config.test.ts` sizes
+ * `MAX_SPEND_USD` against — a cap has to be chosen from figures known BEFORE
+ * the calls are made. (The vectorizer entry is not IN that invariant at all:
+ * stage 2's single conversion is deliberately outside the FR-5 cap — see
+ * `MAX_SPEND_USD` above and `runVectorStage` in pipeline.ts.)
  *
  * Reading the real charge STRENGTHENS that cap rather than weakening it: if a
  * vendor ever bills above its planning figure, the ledger now sees the
@@ -362,6 +367,62 @@ export function recraftCreditsToUsd(credits: unknown): number | undefined {
   // The outer round mirrors pipeline.ts/report.ts's `roundUsd` for anything
   // that does not divide cleanly.
   return Math.round((credits / RECRAFT_CREDITS_PER_USD) * 1e6) / 1e6;
+}
+
+/**
+ * How many Vectorizer.ai credits buy a dollar.
+ *
+ * DERIVED, NOT MEASURED — exactly as `RECRAFT_CREDITS_PER_USD` is, and for
+ * exactly the same reason. The three live probe calls on 2026-08-04 reported
+ * `x-credits-calculated: 1.000000` for one `output.file_format=svg`
+ * conversion, so the QUANTITY (one credit per conversion) is measured. The
+ * PRICE is not: vectorizer.ai publishes a credit COUNT, and 1 credit ≈ $0.20
+ * only at the entry subscription tier — the rate improves with volume, so a
+ * larger plan makes this constant wrong in the SAFE direction (we would bill
+ * the ledger more than we paid). Reconciling the measured 1.000000 against the
+ * per-conversion price this file already carried — `IMAGE_COST_USD.vectorizer`
+ * = $0.20 — gives the 5 below.
+ *
+ * `config.test.ts` pins the agreement (1 credit must equal
+ * `IMAGE_COST_USD.vectorizer`), so moving either constant without the other
+ * fails loudly rather than silently re-pricing stage 2's ledger. If a plan
+ * change moves the credit price, THIS is the constant that moves.
+ */
+export const VECTORIZER_CREDITS_PER_USD = 5;
+
+/**
+ * What a Vectorizer.ai `x-credits-charged` response header is worth in
+ * dollars, or `undefined` when the response reported no usable count.
+ *
+ * TAKES A STRING WHERE ITS RECRAFT SIBLING TAKES A NUMBER, because this vendor
+ * reports the charge in a HEADER (the body is raw SVG, so there is no JSON
+ * field to read) and `Headers.get` hands back `string | null`. The parse
+ * therefore lives here rather than at the call site.
+ *
+ * ONLY A PLAIN POSITIVE DECIMAL IS ACCEPTED — the `1.000000` / `0.000000`
+ * shape actually measured. Everything else (absent, empty, `0`, negative,
+ * exponent notation, hex — note `Number('0x10')` is 16 — or a number with
+ * trailing junk) falls back at the call site to `IMAGE_COST_USD.vectorizer`,
+ * i.e. UPWARD to the conservative planning figure. UNDER-REPORTING SPEND IS
+ * THE DANGEROUS DIRECTION, identically to Recraft: a retryable vectorize
+ * failure parks without consuming an FR-5 attempt, so realized `spentUsd` is
+ * the only thing that ever ends that park -> unpark loop (`sweepParkedJobs`),
+ * and it cannot bound spend it has been told was free.
+ *
+ * ONE CONSEQUENCE, STATED SO IT IS NOT MISTAKEN FOR A BUG: a FREE test-mode
+ * call reports `x-credits-charged: 0.000000` and is therefore billed the full
+ * $0.20 planning figure. That is deliberate. `mode=test` is a verification
+ * tool documented in the README and is never sent by this Worker, so the only
+ * way a production response reports a zero charge is a vendor anomaly — and
+ * over-billing an anomaly is the safe direction to be wrong in.
+ */
+export function vectorizerCreditsToUsd(credits: unknown): number | undefined {
+  if (typeof credits !== 'string') return undefined;
+  const trimmed = credits.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.round((parsed / VECTORIZER_CREDITS_PER_USD) * 1e6) / 1e6;
 }
 
 // --- Pack contract (§8) --------------------------------------------------------

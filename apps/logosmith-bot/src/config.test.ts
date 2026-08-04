@@ -13,12 +13,14 @@ import {
   OCR_SIMILARITY_THRESHOLD,
   RECRAFT_CREDITS_PER_USD,
   SEED_PRICE_USD,
+  VECTORIZER_CREDITS_PER_USD,
   botProfile,
   fallbackEstimate,
   pricingCalc,
   rateCard,
   recraftCreditsToUsd,
   scorerConfig,
+  vectorizerCreditsToUsd,
 } from './config.js';
 import { applyMigrations } from './testSupport.js';
 
@@ -171,6 +173,46 @@ describe('config', () => {
       assert.equal(recraftCreditsToUsd(bad), undefined, `credits=${JSON.stringify(bad)}`);
     }
     assert.equal(recraftCreditsToUsd(160), 0.16);
+  });
+
+  // Same derivation, same caveat, one vendor over: the three live probe calls
+  // (2026-08-04, all free test-mode) reported `x-credits-calculated: 1.000000`
+  // for one SVG conversion, so the QUANTITY is measured and the PRICE is not —
+  // 1 credit ≈ $0.20 holds at the entry tier only. This test IS the
+  // reconciliation against the per-conversion figure already in
+  // IMAGE_COST_USD, so neither constant can move without the other.
+  it('reconciles the measured Vectorizer.ai credit charge with the planning constant', () => {
+    assert.equal(VECTORIZER_CREDITS_PER_USD, 5);
+    assert.equal(vectorizerCreditsToUsd('1.000000'), IMAGE_COST_USD.vectorizer);
+  });
+
+  it('refuses a Vectorizer.ai charge header it cannot trust, rather than billing zero', () => {
+    // Fails SAFE upward, exactly as Recraft's does: every `undefined` here
+    // makes `vectorize.ts` substitute IMAGE_COST_USD.vectorizer. `'0.000000'`
+    // is in this list ON PURPOSE and is not an oversight — it is the value a
+    // FREE `mode=test` call really reports, and billing $0.00 for a call this
+    // Worker only ever makes in paid mode is the direction that leaves the
+    // park -> unpark loop unbounded.
+    for (const bad of [
+      null,
+      undefined,
+      '',
+      '   ',
+      '0',
+      '0.000000',
+      '-1',
+      'NaN',
+      'Infinity',
+      '0x10', // Number('0x10') is 16 — a lenient parse would bill $3.20
+      '1e0',
+      '1.0abc',
+      1, // the Recraft shape: a number, which a header can never be
+      {},
+      [],
+    ]) {
+      assert.equal(vectorizerCreditsToUsd(bad), undefined, `charged=${JSON.stringify(bad)}`);
+    }
+    assert.equal(vectorizerCreditsToUsd('2.000000'), 0.4);
   });
 
   it('declares the §8 pack size contract', () => {

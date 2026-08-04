@@ -27,6 +27,17 @@ const verboseSvg = (): string =>
   '  <rect x="10" y="10" width="80" height="80" fill="#0F3D3E" />\n' +
   '</svg>\n';
 
+// THE REAL PREFIX MEASURED ON THE LIVE 2026-08-04 vectorizer.ai RESPONSE
+// (`mode=test`, 47899 bytes), byte-for-byte, wrapped around a minimal body.
+// Both lines matter and only one of them is harmless: the XML prolog is inert,
+// but the DOCTYPE carries an EXTERNAL DTD URL — a vendor shipping us an
+// external reference in the artifact this bot sells.
+const liveDoctypePrefixSvg = (): string =>
+  '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n' +
+  '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" ' +
+  '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n' +
+  CLEAN_SVG;
+
 /** Fails the test loudly if the native-SVG path ever reaches the network. */
 const unreachableFetch: FetchLike = async () => {
   throw new Error('fetchImpl must not be called for a Recraft-native winner');
@@ -301,6 +312,63 @@ describe('createVectorizer — external references (critical, see gates/vector.t
     assert.equal(result.retryable, false);
     assert.match(result.error, /external reference/i);
   });
+
+  // ---------------------------------------------------------------------------
+  // THE DOCTYPE, AND WHY IT GETS ITS OWN TEST. The live 2026-08-04 response
+  // opens with a DOCTYPE naming an external DTD URL. It never reaches the
+  // buyer — but nothing tested that, and what removes it is `removeDoctype`,
+  // a plugin INHERITED from svgo's `preset-default` that nobody on this branch
+  // chose. This test is what turns that inherited default into a decision:
+  // disable it (or upgrade to an svgo that drops it from the preset) and this
+  // fails immediately, instead of an external URL quietly reappearing in a
+  // paid logo.svg for the third time on this branch.
+  // ---------------------------------------------------------------------------
+  it('strips the live response DOCTYPE and its external DTD URL', async () => {
+    const raw = liveDoctypePrefixSvg();
+    // Preconditions — the fixture must actually carry what it claims to.
+    assert.match(raw, /<!DOCTYPE/);
+    assert.match(raw, /w3\.org\/Graphics/);
+
+    const vectorizer = createVectorizer({
+      fetchImpl: async () => new Response(raw, { status: 200 }),
+      vectorizerToken: 't',
+    });
+    const result = await vectorizer.toVector({ png: PNG });
+    assert.ok(result.ok);
+    assert.ok(!/<!DOCTYPE/i.test(result.svg), 'the vendor DOCTYPE must not survive into logo.svg');
+    assert.ok(
+      !/w3\.org\/Graphics/i.test(result.svg),
+      'the external DTD URL must not survive into logo.svg',
+    );
+    // The property those two assertions exist to protect, stated directly: no
+    // `http:` anywhere except the xmlns declarations a standalone SVG needs.
+    assert.ok(
+      !/http:/i.test(result.svg.replace(/xmlns(?::\w+)?="[^"]*"/g, '')),
+      'no external reference may remain outside the xmlns declarations',
+    );
+    assert.ok(checkTrueVector(result.svg).pass);
+  });
+
+  it('does not get that protection from the gate — SVGO is the only thing removing it', () => {
+    // MUTATION-MEASURED, AND THE REASON THE TEST ABOVE HAD TO BE WRITTEN.
+    // Overriding `removeDoctype: false` leaves the DOCTYPE *and its external
+    // URL* in the finalized document, and `checkTrueVector` returns
+    // pass=true / violations=[] on it: `<!DOCTYPE` matches neither the
+    // tag-allowlist scan (which needs `<name`, and `!` is not a name
+    // character) nor `hasNonFragmentReference` (which looks for `href=` and
+    // `url(` — a DOCTYPE has neither). So the gate is NOT a second line of
+    // defence behind SVGO here; there is no second line.
+    //
+    // IF THIS ASSERTION EVER FAILS, THAT IS GOOD NEWS, NOT A REGRESSION: it
+    // means `checkTrueVector` has been hardened to catch a DOCTYPE. Delete
+    // this test and correct the "SVGO is the only one" claim in vectorize.ts's
+    // SVGO_CONFIG docstring and `toVector` comment, which would then be stale.
+    const gate = checkTrueVector(liveDoctypePrefixSvg());
+    assert.ok(
+      gate.pass,
+      `checkTrueVector now rejects a DOCTYPE (${gate.violations.join('; ')}) — see this test's comment`,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -317,6 +385,10 @@ describe('createVectorizer — paid failures are visible to the spend ledger', (
         ({
           ok: true,
           status: 200,
+          // A real Response always has these; the charge is read from them
+          // BEFORE the body precisely so a body that dies mid-stream cannot
+          // take the charge figure down with it.
+          headers: new Headers({ 'x-credits-charged': '2.000000' }),
           text: async () => {
             throw new Error('connection reset while streaming the body');
           },
@@ -325,7 +397,7 @@ describe('createVectorizer — paid failures are visible to the spend ledger', (
     });
     const result = await vectorizer.toVector({ png: PNG });
     assert.ok(!result.ok && result.retryable);
-    assert.equal(result.costUsd, IMAGE_COST_USD.vectorizer);
+    assert.equal(result.costUsd, 0.4);
   });
 
   it('bills a 200 whose SVG fails the true-vector self-check', async () => {
@@ -366,5 +438,57 @@ describe('createVectorizer — paid failures are visible to the spend ledger', (
     }).toVector({ png: PNG, nativeSvg: '<svg viewBox="0 0 10 10"><image href="#x"/></svg>' });
     assert.ok(!native.ok);
     assert.equal(native.costUsd, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WHAT THE VENDOR SAYS IT CHARGED. Verified live 2026-08-04: vectorizer.ai
+// reports the charge in the `x-credits-charged` RESPONSE HEADER (beside
+// `x-credits-calculated`), not in the body — the body is raw SVG. The ledger
+// bills from that report rather than from a constant that drifts unseen when
+// a plan or a price changes.
+//
+// The credits->USD RATIO is derived, not measured (see
+// `VECTORIZER_CREDITS_PER_USD`), so these fixtures pin our handling of a
+// measured credit COUNT, not the vendor's dollar pricing.
+// ---------------------------------------------------------------------------
+describe('createVectorizer — the charge comes from the response, not a constant', () => {
+  const charged = (value: string | undefined) =>
+    createVectorizer({
+      fetchImpl: async () =>
+        new Response(CLEAN_SVG, {
+          status: 200,
+          headers: value === undefined ? {} : { 'x-credits-charged': value },
+        }),
+      vectorizerToken: 't',
+    }).toVector({ png: PNG });
+
+  it('bills what the x-credits-charged header reports', async () => {
+    // MUTATION GUARD. 2 credits is deliberately NOT the 1 credit a normal
+    // conversion costs, so replacing the header read with the flat constant
+    // fails here with 0.2 !== 0.4 rather than passing by coincidence.
+    const result = await charged('2.000000');
+    assert.ok(result.ok);
+    assert.equal(result.costUsd, 0.4);
+    assert.notEqual(result.costUsd, IMAGE_COST_USD.vectorizer);
+  });
+
+  it('agrees with the planning constant on the charge a normal conversion reports', async () => {
+    const result = await charged('1.000000');
+    assert.ok(result.ok);
+    assert.equal(result.costUsd, IMAGE_COST_USD.vectorizer);
+  });
+
+  it('falls back UPWARD to the planning figure on any charge it cannot trust', async () => {
+    // `'0.000000'` is the value a FREE `mode=test` call really returns — the
+    // exact shape all three live probes saw. It is treated as untrusted on
+    // purpose: this Worker never sends `mode=test`, so a zero charge in
+    // production is an anomaly, and billing $0.00 for a call that ran is what
+    // leaves the park -> unpark loop with nothing bounding it.
+    for (const header of [undefined, '', '0.000000', 'free', '-1']) {
+      const result = await charged(header);
+      assert.ok(result.ok);
+      assert.equal(result.costUsd, IMAGE_COST_USD.vectorizer, `header=${String(header)}`);
+    }
   });
 });
