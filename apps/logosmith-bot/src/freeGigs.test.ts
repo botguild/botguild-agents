@@ -35,6 +35,7 @@ import {
 } from './jobs.js';
 import type { ModerationClient } from './moderation.js';
 import type { ProseGig } from './proseBrief.js';
+import { checkInk, svgDrawsInk } from './pack/faviconPack.js';
 import { renderSvgToPng } from './pack/render.js';
 import { nodeWasmSources } from './pack/wasm.node.js';
 import { FAVICON_ZIP_ENTRIES, unzipFiles } from './pack/zip.js';
@@ -308,7 +309,11 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
       assert.ok(8000 > MIN_SOURCE_PX);
       assert.ok(8000 * 8000 > MAX_SOURCE_PIXELS);
 
-      const result = await fetchSourceLogo({ fetchImpl: respondWith(bomb), url: LOGO_URL });
+      const result = await fetchSourceLogo({
+        sources,
+        fetchImpl: respondWith(bomb),
+        url: LOGO_URL,
+      });
       const text = reason(result);
       assert.match(text, /8000x8000px/);
       assert.match(text, /megapixels/);
@@ -321,6 +326,7 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
 
   it('refuses a 16000x16000 source, which would decode to ~977 MiB', async () => {
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(pngDeclaring(16000, 16000)),
       url: LOGO_URL,
     });
@@ -337,6 +343,7 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
     // working budget from a broken one.
     assert.equal(2000 * 3000, MAX_SOURCE_PIXELS);
     const ok = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(fixtures['png2000x3000']!),
       url: LOGO_URL,
     });
@@ -344,6 +351,7 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
     assert.deepEqual(readPngDimensions(fixtures['png2000x3000']!), { width: 2000, height: 3000 });
 
     const over = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(pngDeclaring(2001, 3000)),
       url: LOGO_URL,
     });
@@ -355,6 +363,7 @@ describe('fetchSourceLogo — decompression bombs are refused from the header', 
     // construction, so it is asserted rather than assumed.
     assert.ok(2048 * 2048 <= MAX_SOURCE_PIXELS);
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(fixtures['png2048']!),
       url: LOGO_URL,
     });
@@ -376,14 +385,14 @@ describe('fetchSourceLogo — §12 refusals', () => {
           },
         }),
       );
-    const result = await fetchSourceLogo({ fetchImpl, url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl, url: LOGO_URL });
     assert.match(reason(result), /larger than 10 MB/);
     assert.equal(MAX_SOURCE_BYTES, 10 * 1024 * 1024);
   });
 
   it('refuses a body whose magic bytes are not PNG, JPEG, or SVG', async () => {
     const pdf = new TextEncoder().encode('%PDF-1.4\n%âãÏÓ');
-    const result = await fetchSourceLogo({ fetchImpl: respondWith(pdf), url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(pdf), url: LOGO_URL });
     assert.match(reason(result), /does not return a PNG, JPEG, or SVG/);
   });
 
@@ -392,7 +401,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
       new Response(new TextEncoder().encode('not an image at all') as unknown as BodyInit, {
         headers: { 'content-type': 'image/png' },
       });
-    const result = await fetchSourceLogo({ fetchImpl, url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl, url: LOGO_URL });
     assert.match(reason(result), /does not return a PNG, JPEG, or SVG/);
   });
 
@@ -400,7 +409,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
     const html = new TextEncoder().encode(
       '<!DOCTYPE html><html><body>404 — no svg here</body></html>',
     );
-    const result = await fetchSourceLogo({ fetchImpl: respondWith(html), url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(html), url: LOGO_URL });
     assert.match(reason(result), /contains no <svg> element/);
   });
 
@@ -408,6 +417,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
     // Precondition: the fixture really is under the minimum.
     assert.deepEqual(readPngDimensions(fixtures['png256']!), { width: 256, height: 256 });
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(fixtures['png256']!),
       url: LOGO_URL,
     });
@@ -434,7 +444,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
     // timer holds the loop open for the 25 ms it takes.
     const keepAlive = setTimeout(() => undefined, 5_000);
     try {
-      const result = await fetchSourceLogo({ fetchImpl, url: LOGO_URL, timeoutMs: 25 });
+      const result = await fetchSourceLogo({ sources, fetchImpl, url: LOGO_URL, timeoutMs: 25 });
       assert.match(reason(result), /did not respond within/);
     } finally {
       clearTimeout(keepAlive);
@@ -446,7 +456,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
       assert.equal(init?.redirect, 'manual', 'redirects must not be followed');
       return new Response(null, { status: 302 });
     };
-    const result = await fetchSourceLogo({ fetchImpl, url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl, url: LOGO_URL });
     assert.match(reason(result), /redirects \(HTTP 302\)/);
   });
 
@@ -461,7 +471,7 @@ describe('fetchSourceLogo — §12 refusals', () => {
       'https://169.254.169.254/logo.png',
       'https://localhost/logo.png',
     ]) {
-      const result = await fetchSourceLogo({ fetchImpl, url });
+      const result = await fetchSourceLogo({ sources, fetchImpl, url });
       assert.equal(result.ok, false, url);
     }
     assert.equal(calls, 0, 'a policy refusal must not reach the network');
@@ -470,16 +480,24 @@ describe('fetchSourceLogo — §12 refusals', () => {
   it('gives every refusal its own distinct reason', async () => {
     const html = new TextEncoder().encode('<!DOCTYPE html><html></html>');
     const reasons = [
-      reason(await fetchSourceLogo({ fetchImpl: respondWith(fixtures['png256']!), url: LOGO_URL })),
       reason(
         await fetchSourceLogo({
+          sources,
+          fetchImpl: respondWith(fixtures['png256']!),
+          url: LOGO_URL,
+        }),
+      ),
+      reason(
+        await fetchSourceLogo({
+          sources,
           fetchImpl: respondWith(new TextEncoder().encode('%PDF-1.4')),
           url: LOGO_URL,
         }),
       ),
-      reason(await fetchSourceLogo({ fetchImpl: respondWith(html), url: LOGO_URL })),
+      reason(await fetchSourceLogo({ sources, fetchImpl: respondWith(html), url: LOGO_URL })),
       reason(
         await fetchSourceLogo({
+          sources,
           fetchImpl: respondWith(new Uint8Array(0), 503),
           url: LOGO_URL,
         }),
@@ -510,6 +528,7 @@ describe('fetchSourceLogo — a walkable header is not a decodable image', () =>
     );
 
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(truncated),
       url: LOGO_URL,
     });
@@ -521,6 +540,7 @@ describe('fetchSourceLogo — a walkable header is not a decodable image', () =>
 
   it('refuses a PNG that is only a header', async () => {
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(pngDeclaring(1024, 1024)),
       url: LOGO_URL,
     });
@@ -532,9 +552,10 @@ describe('fetchSourceLogo — a walkable header is not a decodable image', () =>
     const image = photon.PhotonImage.new_from_byteslice(fixtures['png512']!);
     const truncated = new Uint8Array(image.get_bytes_jpeg(90)).subarray(0, 400);
     image.free();
-    await fetchSourceLogo({ fetchImpl: respondWith(truncated), url: LOGO_URL });
+    await fetchSourceLogo({ sources, fetchImpl: respondWith(truncated), url: LOGO_URL });
 
     const after = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(fixtures['png512']!),
       url: LOGO_URL,
     });
@@ -549,7 +570,7 @@ describe('fetchSourceLogo — a walkable header is not a decodable image', () =>
       ...jpegDeclaring(3000, 3000).subarray(2),
     ]);
     assert.equal(readJpegDimensions(decoy), null, 'two frame headers must not resolve to one size');
-    const result = await fetchSourceLogo({ fetchImpl: respondWith(decoy), url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(decoy), url: LOGO_URL });
     assert.match(reason(result), /header could not be read/);
   });
 
@@ -564,7 +585,7 @@ describe('fetchSourceLogo — a walkable header is not a decodable image', () =>
     new DataView(lying.buffer).setUint32(20, 1024);
     assert.deepEqual(readPngDimensions(lying), { width: 1024, height: 1024 });
 
-    const result = await fetchSourceLogo({ fetchImpl: respondWith(lying), url: LOGO_URL });
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(lying), url: LOGO_URL });
     // photon rejects the corrupted IHDR CRC outright, so this lands on the
     // undecodable branch — either refusal is correct, and both are refusals.
     assert.equal(result.ok, false);
@@ -587,6 +608,7 @@ describe('fetchSourceLogo — an SVG that cannot draw is refused, not delivered 
     assert.ok(sanitizeSvg(wrapperSvg).includes('<image'), 'sanitize must not be the guard here');
 
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(new TextEncoder().encode(wrapperSvg)),
       url: 'https://cdn.example.com/logo.svg',
     });
@@ -603,6 +625,7 @@ describe('fetchSourceLogo — an SVG that cannot draw is refused, not delivered 
       '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">' +
       '<text x="10" y="50" font-size="40">Harbor</text></svg>';
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(new TextEncoder().encode(textSvg)),
       url: 'https://cdn.example.com/logo.svg',
     });
@@ -615,16 +638,154 @@ describe('fetchSourceLogo — an SVG that cannot draw is refused, not delivered 
     // "or post an SVG, which has no such limit", pointing the buyer straight at
     // the input that silently produces blank icons and spends their allowance.
     const over = reason(
-      await fetchSourceLogo({ fetchImpl: respondWith(pngDeclaring(8000, 8000)), url: LOGO_URL }),
+      await fetchSourceLogo({
+        sources,
+        fetchImpl: respondWith(pngDeclaring(8000, 8000)),
+        url: LOGO_URL,
+      }),
     );
     assert.equal(/SVG, which has no such limit/.test(over), false, over);
     assert.match(over, /wrapping this same bitmap inside an SVG will not/);
+  });
+
+  // -------------------------------------------------------------------------
+  // HTML entities in XML — the reported Critical, and the class around it.
+  //
+  // The mechanism, measured: `squareSvgWrapper` base64-encodes the buyer's SVG
+  // into a nested <image>, and resvg swallows a parse failure inside a nested
+  // data-URI sub-document instead of throwing. So the free gig did not crash —
+  // it DELIVERED six blank icons with every gate passing, spent the allowance,
+  // and told the buyer it had worked.
+  // -------------------------------------------------------------------------
+
+  const svgWithTitle = (title: string): Uint8Array =>
+    new TextEncoder().encode(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">' +
+        `<title>${title}</title>` +
+        '<path d="M50 50 H462 V462 H50 Z" fill="#0F3D3E"/></svg>',
+    );
+  const SVG_URL = 'https://cdn.example.com/logo.svg';
+
+  it('KEEPS an ordinary designer SVG whose <title> carries &nbsp;', async () => {
+    // THE REAL TRIGGER. Illustrator/Figma/Sketch emit &nbsp; whenever a
+    // designer types a non-breaking space into a layer name. It is not defined
+    // in XML, so it is a fatal parse error — but the logo itself is perfectly
+    // good, and the funnel exists to win customers, so it is substituted
+    // rather than refused.
+    const bytes = svgWithTitle('Harbor&nbsp;&amp;&nbsp;Vine');
+    // Pin the premise: nothing upstream neutralises the entity for us.
+    assert.ok(
+      sanitizeSvg(new TextDecoder().decode(bytes)).includes('&nbsp;'),
+      'sanitizeSvg must not be the guard here',
+    );
+
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(bytes), url: SVG_URL });
+    assert.equal(result.ok, true, result.ok ? '' : result.reason);
+    assert.ok(result.ok);
+    assert.ok(result.source.kind === 'svg');
+    assert.equal(result.source.svg.includes('&nbsp;'), false, 'the entity is gone');
+    // Escaped rather than typed: a literal U+00A0 is invisible in a diff, and
+    // this assertion is entirely about which character is now there.
+    assert.match(result.source.svg, /Harbor\u00A0&amp;\u00A0Vine/, 'replaced by the literal');
+    // And the thing that actually matters: it now draws.
+    assert.ok(await svgDrawsInk(result.source.svg, sources), 'the kept logo must render');
+  });
+
+  it('substitutes the rest of the allow-list, and leaves &amp; to the XML parser', async () => {
+    const result = await fetchSourceLogo({
+      sources,
+      fetchImpl: respondWith(
+        svgWithTitle('A&mdash;B&ndash;C&copy;D&trade;E&hellip;F&rsquo;G&amp;H'),
+      ),
+      url: SVG_URL,
+    });
+    assert.ok(result.ok && result.source.kind === 'svg');
+    assert.equal(
+      result.source.svg.match(/<title>(.*)<\/title>/)![1],
+      'A—B–C©D™E…F’G&amp;H',
+      '&amp; is one of XML’s own five and must survive untouched',
+    );
+  });
+
+  it('refuses an entity that is NOT on the allow-list, and names it', async () => {
+    // The allow-list is the safety argument: an unknown name is left alone,
+    // stays unresolved, and takes this path rather than being guessed at.
+    const result = await fetchSourceLogo({
+      sources,
+      fetchImpl: respondWith(svgWithTitle('Harbor&sparkles;Vine')),
+      url: SVG_URL,
+    });
+    const text = reason(result);
+    assert.match(text, /&sparkles;/, 'the refusal must name the actual entity');
+    assert.match(text, /renders completely blank/);
+    assert.match(text, /XML does not define/);
+    assert.match(text, /re-export|replace them with the literal/i);
+  });
+
+  it('refuses a bare unescaped ampersand — the other thing designers type', async () => {
+    const result = await fetchSourceLogo({
+      sources,
+      fetchImpl: respondWith(svgWithTitle('Harbor & Vine')),
+      url: SVG_URL,
+    });
+    const text = reason(result);
+    assert.match(text, /bare "&"/);
+    assert.match(text, /&amp;/, 'and it must say what to write instead');
+  });
+
+  it('does NOT expand an entity the document itself declares (XXE stays refused)', async () => {
+    // resvg refuses SYSTEM entities on its own; that refusal is a property to
+    // keep, not to route around. The substitution is a fixed allow-list of
+    // literals compiled into the source, so it cannot reach a definition that
+    // came from the document — and the render probe turns resvg's refusal into
+    // a buyer-facing message instead of a blank delivery.
+    const xxe = new TextEncoder().encode(
+      '<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>' +
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">' +
+        '<title>&xxe;</title><path d="M50 50 H462 V462 H50 Z" fill="#0F3D3E"/></svg>',
+    );
+    const result = await fetchSourceLogo({ sources, fetchImpl: respondWith(xxe), url: SVG_URL });
+    const text = reason(result);
+    assert.equal(/root:/.test(text), false, 'no file content may ever reach the buyer');
+    assert.match(text, /renders completely blank/);
+    // `xxe` is declared by the document, so the scan must NOT blame it as an
+    // undefined HTML entity — the generic wording is the honest one here.
+    assert.equal(/&xxe;/.test(text), false, text);
+  });
+
+  it('ACCEPTS a sparse but real logo — refusing a valid one is as bad as a blank', async () => {
+    // The measurement that set the probe size. A hairline monogram renders to
+    // ZERO opaque pixels at 16px and 1568 at 512px, so probing small would
+    // refuse this legitimate mark. See INK_PROBE_PX in pack/faviconPack.ts.
+    const hairline = new TextEncoder().encode(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
+        '<path d="M254 60 h4 v392 h-4 Z" fill="#111"/></svg>',
+    );
+    const result = await fetchSourceLogo({
+      sources,
+      fetchImpl: respondWith(hairline),
+      url: SVG_URL,
+    });
+    assert.equal(result.ok, true, result.ok ? '' : result.reason);
+
+    // A thin 8:1 wordmark of hairline strokes — the sparsest realistic shape.
+    const wordmark = new TextEncoder().encode(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 64">' +
+        Array.from(
+          { length: 7 },
+          (_, i) => `<rect x="${20 + i * 60}" y="28" width="3" height="8" fill="#111"/>`,
+        ).join('') +
+        '</svg>',
+    );
+    const wide = await fetchSourceLogo({ sources, fetchImpl: respondWith(wordmark), url: SVG_URL });
+    assert.equal(wide.ok, true, wide.ok ? '' : wide.reason);
   });
 });
 
 describe('fetchSourceLogo — accepted sources', () => {
   it('accepts a valid PNG and reports its true dimensions', async () => {
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(fixtures['png512']!),
       url: LOGO_URL,
     });
@@ -648,6 +809,7 @@ describe('fetchSourceLogo — accepted sources', () => {
       '<script>fetch("https://evil.example.com")</script>' +
       '<path d="M1 1 H9 V9 H1 Z" onclick="alert(1)" fill="#000"/></svg>';
     const result = await fetchSourceLogo({
+      sources,
       fetchImpl: respondWith(new TextEncoder().encode(svg)),
       url: 'https://cdn.example.com/logo.svg',
     });
@@ -1405,6 +1567,84 @@ describe('runSingleStage — the quota holds under concurrency (the farming atta
   });
 });
 
+describe('runSingleStage — an unrenderable SVG never reaches the allowance', () => {
+  const svgResponse = (title: string, art = '<path d="M50 50 H462 V462 H50 Z" fill="#0F3D3E"/>') =>
+    new Response(
+      new TextEncoder().encode(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" ' +
+          `height="512"><title>${title}</title>${art}</svg>`,
+      ) as unknown as BodyInit,
+    );
+
+  it('refuses before consuming, and names the entity', async () => {
+    // WHAT THIS USED TO DO, measured on the real pipeline before the fix:
+    // outcome 'delivered', usage 1, holdsAllowance true, ZERO buyer messages,
+    // and a ZIP of six fully transparent icons under a note reading "your
+    // favicon package for cdn.example.com". A DLQ would at least have alerted
+    // an operator; this alerted nobody.
+    const h = await setupFree({ logoResponse: () => svgResponse('Harbor&sparkles;Vine') });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+
+    // THE ALLOWANCE IS THE POINT. The refusal happens at intake, upstream of
+    // consumeFreeGigQuota, so the buyer keeps all three free gigs.
+    assert.equal(await usage(h), 0, 'no allowance may be consumed for a buyer-input refusal');
+    assert.equal(await h.quota.holdsAllowance(CONTRACT_ID), false);
+    assert.equal(h.deliveries.length, 0, 'and nothing may be delivered');
+    assert.equal(h.r2.objects.has(`${h.token}/pack.zip`), false);
+    assert.equal((await h.jobs.get(h.jobKey))!.outcome, 'rejected');
+
+    // And the buyer is actually told, in terms they can act on.
+    assert.equal(h.messages.length, 1, 'the buyer must be told exactly once');
+    const note = h.messages[0]!;
+    assert.match(note, /&sparkles;/);
+    assert.match(note, /renders completely blank/);
+    assert.match(note, /has not been counted against your free-job allowance/);
+  });
+
+  it('DELIVERS the &nbsp; logo, with icons that are not blank', async () => {
+    // The reported trigger, end to end: substituted at intake, so the buyer
+    // gets their pack instead of a refusal — and the icons carry real ink.
+    const h = await setupFree({ logoResponse: () => svgResponse('Harbor&nbsp;&amp;&nbsp;Vine') });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'delivered' });
+    assert.equal(await usage(h), 1, 'a delivered pack does consume the allowance');
+
+    const zip = h.r2.objects.get(`${h.token}/pack.zip`)!;
+    const files = unzipFiles(zip.bytes);
+    const ink = await checkInk(files['icon-512.png']!, 'icon-512.png');
+    assert.equal(ink.pass, true, 'the delivered icon must not be blank');
+    assert.ok(ink.opaquePixels! > 1000, `expected real ink, got ${ink.opaquePixels}`);
+
+    // The gate report the buyer reads must state it, not just compute it.
+    assert.match(h.deliveries[0]!.note, /Icons are not blank: PASS/);
+  });
+
+  it('releases the allowance when the pack builder THROWS', async () => {
+    // The belt-and-braces wrapper around services.faviconPack. Stated plainly
+    // because a wrapper whose comment overclaims is worse than none: this does
+    // NOT fire on the &nbsp; class — that render returns blank rather than
+    // throwing, and is stopped at intake — so the only way to reach the branch
+    // is the injected builder, exactly as the gate-failure test above does.
+    // What it covers is a genuine throw from the render/resize/encode chain,
+    // which would otherwise escape to the queue consumer, be logged as
+    // transient, retried, and dead-lettered with the allowance already spent.
+    const h = await setupFree({
+      faviconPack: async () => {
+        throw new Error('wasm trap: unreachable');
+      },
+    });
+
+    assert.deepEqual(await runSingleStage(h.config, h.message), { outcome: 'aborted' });
+    assert.equal(await usage(h), 0, 'our failure, so the allowance must go back');
+    assert.equal(await h.quota.holdsAllowance(CONTRACT_ID), false);
+    assert.equal(h.deliveries.length, 0);
+    assert.equal((await h.jobs.get(h.jobKey))!.outcome, 'aborted');
+    assert.match(h.messages[0]!, /could not build your favicon package/);
+    assert.match(h.messages[0]!, /NOT been counted against your free-job allowance/);
+  });
+});
+
 describe('runSingleStage — a favicon pack that fails its own gates is not delivered', () => {
   it('ships nothing and says why when the pack gates fail', async () => {
     // No INPUT can reach this branch — every PNG is letterboxed to its exact
@@ -1427,6 +1667,7 @@ describe('runSingleStage — a favicon pack that fails its own gates is not deli
           ],
           ico: { pass: false, sizes: [], reason: 'buffer did not parse as an ICO' },
           zip: { pass: true, present: [], missing: [], reasons: [] },
+          ink: { file: 'icon-512.png', opaquePixels: 169744, pass: true },
           pass: false,
         },
       }),

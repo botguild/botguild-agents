@@ -28,9 +28,17 @@
 
 import { MIN_SOURCE_PX, checkLogoUrl } from './brief.js';
 import { FREE_GIGS_PER_PAYER, FREE_GIG_WINDOW_DAYS, SEED_PRICE_USD } from './config.js';
-import { checkTrueVector, readPngDimensions, sanitizeSvg, type Dimensions } from './gates/index.js';
+import {
+  checkTrueVector,
+  readPngDimensions,
+  sanitizeSvg,
+  scanEntityRefs,
+  substituteHtmlEntities,
+  type Dimensions,
+} from './gates/index.js';
 import type { QuotaStore } from './jobs.js';
-import { decodeRasterSource, type FaviconSource } from './pack/faviconPack.js';
+import { decodeRasterSource, svgDrawsInk, type FaviconSource } from './pack/faviconPack.js';
+import type { WasmSources } from './pack/wasm.js';
 import type { FetchLike } from './types.js';
 
 // --- Quota (FR-14) -----------------------------------------------------------
@@ -252,6 +260,15 @@ async function readCapped(body: ReadableStream<Uint8Array>): Promise<Uint8Array 
 export interface FetchSourceLogoDeps {
   fetchImpl: FetchLike;
   url: string;
+  /**
+   * Needed because admission now includes a REAL RENDER of an SVG source (see
+   * the svg branch below). Render capability crossing into intake is the
+   * established shape here, not a novelty: the raster leg already imports
+   * `decodeRasterSource` from the pack builder for the same reason — proving
+   * the input works is worth more at intake, before an allowance is spent,
+   * than anywhere downstream of it.
+   */
+  sources: WasmSources;
   /** Test seam for the §12 timeout; production takes the 15 s default. */
   timeoutMs?: number;
 }
@@ -335,7 +352,19 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
     // even though the favicon pack delivers no SVG: these bytes are still fed
     // to a renderer, and buyer-supplied markup carrying <script> or
     // <foreignObject> has no business reaching it (§12).
-    const svg = sanitizeSvg(new TextDecoder().decode(bytes));
+    // HTML ENTITIES, SUBSTITUTED BEFORE ANYTHING PARSES THIS.
+    //
+    // `&nbsp;`, `&mdash;` and friends are HTML-only: XML predefines five
+    // entities and no others, so in an SVG they are a fatal parse error that
+    // aborts the whole document. Illustrator, Figma and Sketch emit them
+    // whenever a designer types a non-breaking space or an em dash into a
+    // layer name, which lands one in `<title>`/`<desc>` — an ordinary,
+    // well-meant, unrenderable logo. Substituting the allow-listed set for
+    // their literal characters keeps that logo (measured: 0 opaque px before,
+    // 169744 after), which is the right product outcome for the funnel that
+    // exists to win customers. Anything NOT on the allow-list is left
+    // untouched and falls to the render probe below.
+    const svg = substituteHtmlEntities(sanitizeSvg(new TextDecoder().decode(bytes)));
     if (!svg.includes('<svg')) {
       return { ok: false, reason: 'that URL returned XML that contains no <svg> element' };
     }
@@ -368,6 +397,53 @@ export async function fetchSourceLogo(deps: FetchSourceLogoDeps): Promise<Source
           'outlined paths. LogoSmith renders without font files, so the text would vanish and ' +
           'the icons would come out blank or partial. Re-export it with the text converted to ' +
           'outlines (most editors call this "convert to path" or "outline stroke")',
+      };
+    }
+
+    // THE AUTHORITY: render it, through the exact wrapper the pack uses, and
+    // require ink. The two census checks above catch the two constructs we
+    // KNOW draw nothing; this catches the open-ended rest — a parse failure
+    // anywhere in the document, which resvg reports by returning a fully
+    // transparent pixmap rather than by throwing, because the buyer's SVG is
+    // parsed as a nested data-URI sub-document. Nothing textual can stand in
+    // for it: resvg's tolerances are resvg's, and this is the only check that
+    // cannot be wrong about them.
+    //
+    // IT RUNS BEFORE `consumeFreeGigQuota`, which is the entire point. Every
+    // input that cannot be rendered has to be refused while the refusal is
+    // still free — the same check-early discipline the raster leg's
+    // `decodeRasterSource` probe above exists for.
+    if ((await svgDrawsInk(svg, deps.sources)) === 0) {
+      // The wording is chosen from what is actually in the document, so the
+      // commonest cause names itself instead of hiding behind "it did not
+      // render". The scan is diagnostic only — the render above already made
+      // the decision.
+      const entities = scanEntityRefs(svg);
+      if (entities.unresolved.length > 0 || entities.bareAmpersand) {
+        const named = entities.unresolved
+          .slice(0, 3)
+          .map((name) => `&${name};`)
+          .join(', ');
+        return {
+          ok: false,
+          reason:
+            'your SVG renders completely blank because it uses ' +
+            (entities.unresolved.length > 0
+              ? `HTML entities such as ${named} that XML does not define`
+              : 'a bare "&" that XML reads as the start of an entity reference') +
+            ' — SVG is XML, and one of these aborts the whole file rather than just the ' +
+            'element it sits in. Re-export it (most editors will write plain characters), or ' +
+            'replace them with the literal characters — and write a literal "&" as "&amp;"',
+        };
+      }
+      return {
+        ok: false,
+        reason:
+          'that SVG renders completely blank — LogoSmith drew it at ' +
+          'full size and got an entirely empty image, so every icon in the pack would be ' +
+          'empty too. This usually means the file is malformed somewhere its editor ' +
+          'tolerates but a strict renderer does not. Re-export it from your design tool, or ' +
+          `post the bitmap instead (PNG or JPEG, longest edge at least ${MIN_SOURCE_PX}px)`,
       };
     }
     return { ok: true, source: { kind: 'svg', svg } };

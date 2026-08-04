@@ -292,9 +292,10 @@ describe('buildFaviconPack — photon memory discipline', () => {
         siteName: 'example.com',
         sources,
       });
-      // One decode of the source, plus one resize per contracted size. The
-      // source is square, so no size needs a letterbox canvas.
-      assert.equal(free.mock.callCount(), 1 + FAVICON_SIZES.length);
+      // One decode of the source, plus one resize per contracted size, plus
+      // one decode of the largest icon for the ink gate. The source is square,
+      // so no size needs a letterbox canvas.
+      assert.equal(free.mock.callCount(), 1 + FAVICON_SIZES.length + 1);
 
       free.mock.resetCalls();
       await buildFaviconPack({
@@ -303,7 +304,7 @@ describe('buildFaviconPack — photon memory discipline', () => {
         sources,
       });
       // Same, plus one letterbox canvas per size for the 2:1 source.
-      assert.equal(free.mock.callCount(), 1 + 2 * FAVICON_SIZES.length);
+      assert.equal(free.mock.callCount(), 1 + 2 * FAVICON_SIZES.length + 1);
     } finally {
       free.mock.restore();
     }
@@ -355,5 +356,79 @@ describe('buildFaviconPack — never upscales', () => {
     const alphaAt = (x: number, y: number): number => icon.data[(y * 512 + x) * 4 + 3]!;
     assert.equal(alphaAt(256, 4), 0, 'the surround must be transparent letterbox, not upscale');
     assert.equal(alphaAt(256, 256), 255, 'the mark itself must still be there');
+  });
+});
+
+describe('buildFaviconPack — the ink gate', () => {
+  it('FAILS the pack when the source renders to nothing', async () => {
+    // The pack builder's own backstop, independent of intake. An SVG whose
+    // <title> carries an entity XML does not define parses fine as the OUTER
+    // wrapper and produces a completely transparent render, because resvg
+    // swallows a parse failure in a nested data-URI sub-document rather than
+    // throwing. Every other gate here is satisfied by a perfectly formed empty
+    // image — that is exactly how six blank icons once shipped as a success.
+    const blank =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">' +
+      '<title>Harbor&sparkles;Vine</title>' +
+      '<path d="M50 50 H462 V462 H50 Z" fill="#0F3D3E"/></svg>';
+
+    const pack = await buildFaviconPack({
+      source: { kind: 'svg', svg: blank },
+      siteName: 'example.com',
+      sources,
+    });
+
+    assert.equal(pack.gates.ink.pass, false);
+    assert.equal(pack.gates.ink.opaquePixels, 0);
+    assert.equal(pack.gates.ink.file, 'icon-512.png');
+    assert.equal(pack.gates.pass, false, 'a blank pack must never pass');
+
+    // ...and it is ONLY the ink gate that objects. If any other gate also
+    // failed, this test would not be proving what it claims to prove.
+    assert.ok(
+      pack.gates.dimensions.every((entry) => entry.pass),
+      'dimensions are correct — a blank icon is still exactly size x size',
+    );
+    assert.equal(pack.gates.ico.pass, true, 'and the ICO still parses');
+    assert.equal(pack.gates.zip.pass, true, 'and every contracted entry is present');
+  });
+
+  it('passes a sparse-but-real mark that renders empty at the SMALL sizes', async () => {
+    // Why the gate reads icon-512 and not favicon-16. This hairline monogram
+    // measures 0 opaque px at 16 px and 1568 at 512 px, so gating the small
+    // icons would refuse a legitimate logo — as bad an outcome as shipping a
+    // blank one.
+    const hairline =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">' +
+      '<path d="M254 60 h4 v392 h-4 Z" fill="#111"/></svg>';
+    const pack = await buildFaviconPack({
+      source: { kind: 'svg', svg: hairline },
+      siteName: 'example.com',
+      sources,
+    });
+
+    assert.equal(pack.gates.ink.pass, true);
+    assert.ok(pack.gates.ink.opaquePixels! > 0);
+    assert.equal(pack.gates.pass, true);
+
+    // The measurement that decided the probe size, pinned so a future change
+    // to the gate's chosen entry has to confront it.
+    const small = await decodeRgba(unzipFiles(pack.zip)['favicon-16.png']!);
+    let opaque16 = 0;
+    for (let i = 3; i < small.data.length; i += 4) if (small.data[i] !== 0) opaque16++;
+    assert.equal(opaque16, 0, 'this legitimate mark really does vanish at 16px');
+  });
+
+  it('passes an ordinary logo and reports the count it measured', async () => {
+    const pack = await buildFaviconPack({
+      source: { kind: 'svg', svg: SQUARE_SVG },
+      siteName: 'example.com',
+      sources,
+    });
+    assert.equal(pack.gates.ink.pass, true);
+    assert.ok(
+      pack.gates.ink.opaquePixels! > 100_000,
+      `a solid mark should be mostly ink, got ${pack.gates.ink.opaquePixels}`,
+    );
   });
 });

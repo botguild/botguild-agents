@@ -1024,6 +1024,14 @@ export async function runConceptStage(
           slotLog.error('vendor returned an empty concept');
           continue;
         }
+        // NOTE: SVGO RUNS AT STAGE 2 ONLY. `finalizeVector` (vectorize.ts) is
+        // reached through `toVector`, downstream of here, so these are the RAW
+        // vendor bytes with nothing but `sanitizeSvg` applied — and sanitizeSvg
+        // does not touch entities. Anything SVGO would have resolved or
+        // stripped (it does resolve `&nbsp;`, measured) is still present at
+        // this line. Assuming otherwise is the easy mistake; the throw below is
+        // the deliberate handling, pinned by "persists the attempt when resvg
+        // rejects a malformed vendor SVG" in pipeline.test.ts.
         const svg = sanitizeSvg(result.concept.nativeSvg);
         bytes = await renderSvgToPng(svg, CONCEPT_PX, config.sources);
         const svgKey = `${token}/concept-${slotNo}.svg`;
@@ -1826,6 +1834,13 @@ function faviconGateLines(gates: FaviconPackGates): string[] {
             .join('; ')}.`),
     `- favicon.ico parse-back: ${gates.ico.pass ? `PASS — lists ${gates.ico.sizes.join(', ')}` : `FAIL — ${gates.ico.reason ?? 'unreadable'}`}.`,
     `- ZIP completeness: ${gates.zip.pass ? `PASS — ${gates.zip.present.length} entries` : `FAIL — ${gates.zip.reasons.join('; ')}`}.`,
+    `- Icons are not blank: ${
+      gates.ink.pass
+        ? `PASS — ${gates.ink.file} carries ${gates.ink.opaquePixels} opaque pixels`
+        : `FAIL — ${gates.ink.file} ${
+            gates.ink.opaquePixels === null ? 'could not be decoded' : 'is a completely empty image'
+          }`
+    }.`,
   ];
 }
 
@@ -1964,7 +1979,11 @@ async function runFaviconGig(
     briefJson: JSON.stringify(brief),
   });
 
-  const fetched = await fetchSourceLogo({ fetchImpl: config.fetchImpl, url: brief.logoUrl });
+  const fetched = await fetchSourceLogo({
+    fetchImpl: config.fetchImpl,
+    url: brief.logoUrl,
+    sources: config.sources,
+  });
   await jobs.recordGateAudit({
     jobKey,
     contractId,
@@ -2016,11 +2035,59 @@ async function runFaviconGig(
   // The favicon brief carries no brandName, so the webmanifest is named for the
   // site the logo came from — the one piece of buyer identity the input has.
   const siteName = new URL(brief.logoUrl).hostname;
-  const pack = await services.faviconPack({
-    source: fetched.source,
-    siteName,
-    sources: config.sources,
-  });
+  // BELT AND BRACES — AND NOT THE LOAD-BEARING GUARD. Say plainly which is
+  // which, because a wrapper described as the backstop for a bug it cannot
+  // catch is worse than no wrapper at all.
+  //
+  // The load-bearing guard is `fetchSourceLogo`'s render probe, upstream of
+  // `consumeFreeGigQuota`. THIS CATCH DOES NOT FIRE ON THE `&nbsp;` CLASS AT
+  // ALL: resvg answers an unparseable nested data-URI SVG with a fully
+  // transparent pixmap, not an exception, so that path returns normally and is
+  // stopped at intake or by the pack's own ink gate — never here. What this
+  // does cover is a genuine throw from the render/resize/encode chain (a
+  // photon trap on a source that decoded at intake, an allocation failure),
+  // which would otherwise escape to the queue consumer, be logged as transient,
+  // retried, and dead-lettered with the allowance already spent.
+  let pack: FaviconPackResult;
+  try {
+    pack = await services.faviconPack({
+      source: fetched.source,
+      siteName,
+      sources: config.sources,
+    });
+  } catch (err) {
+    // Our failure, not the buyer's input — so the allowance goes back, exactly
+    // as the gate-failure branch below does it.
+    const heldAllowance = await config.quota.holdsAllowance(contractId);
+    if (heldAllowance) {
+      await config.quota.release(contractId);
+      await jobs.recordGateAudit({
+        jobKey,
+        contractId,
+        gate: FREE_GIG_USAGE_GATE,
+        result: 'released',
+        detail: { kind: 'favicon', reason: 'the pack builder threw' },
+      });
+    }
+    await jobs.recordGateAudit({
+      jobKey,
+      contractId,
+      gate: 'favicon-pack',
+      result: 'error',
+      detail: { error: err instanceof Error ? err.message : String(err) },
+    });
+    await client.sendMessage(
+      contractId,
+      `LogoSmith could not build your favicon package for ${siteName}: the pack builder failed ` +
+        'while rendering your logo. Nothing has been delivered and nothing has been charged — ' +
+        'this was a free LogoSmith job — and it has NOT been counted against your free-job ' +
+        'allowance, because the failure was on LogoSmith’s side. Post the gig again and ' +
+        'LogoSmith will pick it up automatically.',
+    );
+    await jobs.markDelivered(jobKey, 'aborted');
+    log.error({ err }, 'favicon pack builder threw; allowance released, nothing delivered');
+    return { outcome: 'aborted' };
+  }
   await jobs.recordGateAudit({
     jobKey,
     contractId,

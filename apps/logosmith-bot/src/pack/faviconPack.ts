@@ -58,7 +58,7 @@ import {
   type ZipGateResult,
 } from '../gates/index.js';
 import { assembleIco } from './ico.js';
-import { renderSvgToPng } from './render.js';
+import { renderSvgToPixmap, renderSvgToPng } from './render.js';
 import type { WasmSources } from './wasm.js';
 import { FAVICON_ZIP_ENTRIES, buildHtmlSnippet, buildWebmanifest, zipFiles } from './zip.js';
 
@@ -72,10 +72,19 @@ export type FaviconSource =
   | { kind: 'svg'; svg: string }
   | { kind: 'raster'; bytes: Uint8Array; width: number; height: number };
 
+export interface InkGateResult {
+  /** The entry the count was taken from. */
+  file: string;
+  /** Pixels with alpha > 0. `null` when the PNG could not be decoded at all. */
+  opaquePixels: number | null;
+  pass: boolean;
+}
+
 export interface FaviconPackGates {
   dimensions: Array<{ file: string } & DimensionsResult>;
   ico: IcoGateResult;
   zip: ZipGateResult;
+  ink: InkGateResult;
   pass: boolean;
 }
 
@@ -162,6 +171,73 @@ export async function decodeRasterSource(bytes: Uint8Array): Promise<Dimensions 
     return width > 0 && height > 0 ? { width, height } : null;
   } catch {
     return null;
+  } finally {
+    image.free();
+  }
+}
+
+/**
+ * The size every ink measurement is taken at — the largest contracted icon.
+ *
+ * PICKED FROM MEASUREMENT, NOT INTUITION, and the small sizes are the reason.
+ * Opaque-pixel counts for the production wrapper render, by size:
+ *
+ *   solid square           16:196  32:676  48:1600  180:21316  512:169744
+ *   hairline ring          16:84   32:164  48:244   180:910    512:4294
+ *   hairline monogram "I"  16:0    32:26   48:76    180:276    512:1568
+ *   thin wide wordmark     16:6    32:12   48:16    180:56     512:290
+ *   single dot (r=3/512)   16:0    32:4    48:4     180:4      512:33
+ *   &nbsp; / bare & / XXE  16:0    32:0    48:0     180:0      512:0
+ *
+ * A THIN MONOGRAM AND A SMALL DOT BOTH RENDER TO ZERO OPAQUE PIXELS AT 16 px.
+ * Measuring there would refuse legitimate logos, and refusing a valid logo is
+ * as bad as delivering a blank one. At 512 the sparsest legitimate mark
+ * measured still leaves 33 opaque pixels — and every unrenderable input
+ * measures exactly 0, at every size. So the threshold is simply "> 0": the
+ * most permissive rule available, and still perfectly discriminating, with a
+ * margin of 33 px against the most degenerate real artwork and 290 against a
+ * realistic sparse one.
+ */
+const INK_PROBE_PX = 512;
+
+/** Pixels whose alpha byte is non-zero, over a tightly-packed RGBA buffer. */
+function countOpaque(rgba: Uint8Array): number {
+  let opaque = 0;
+  for (let i = 3; i < rgba.length; i += 4) {
+    if (rgba[i] !== 0) opaque++;
+  }
+  return opaque;
+}
+
+/**
+ * Does this PNG contain any ink at all?
+ *
+ * Runs against the ENCODED DELIVERABLE rather than an intermediate, so it
+ * covers the whole chain — wrapper, render, resize, letterbox, encode — and
+ * would catch a future regression in any of them that intake could not see.
+ * A PNG that will not decode fails: `opaquePixels: null` is not a pass.
+ *
+ * COST, STATED RATHER THAN DISCOVERED: this makes the SVG source path load
+ * photon too, where it previously loaded only resvg — the two paths used to
+ * take one wasm module each. That is one 1.5 MB module plus a 512x512 RGBA
+ * decode (1 MiB), and it sits inside the two-module budget Task 23 derived
+ * (~80 MB of headroom under the 128 MB ceiling). Measuring the intermediate
+ * pixmap instead would dodge it, but would no longer be a check on the bytes
+ * actually being shipped, which is the whole reason this gate exists.
+ */
+export async function checkInk(png: Uint8Array, file: string): Promise<InkGateResult> {
+  const photon = await loadPhoton();
+  let image: InstanceType<(typeof photon)['PhotonImage']>;
+  try {
+    image = photon.PhotonImage.new_from_byteslice(png);
+  } catch {
+    return { file, opaquePixels: null, pass: false };
+  }
+  try {
+    const opaquePixels = countOpaque(image.get_raw_pixels());
+    return { file, opaquePixels, pass: opaquePixels > 0 };
+  } catch {
+    return { file, opaquePixels: null, pass: false };
   } finally {
     image.free();
   }
@@ -271,6 +347,44 @@ function squareSvgWrapper(svg: string, size: number): string {
   );
 }
 
+/**
+ * WILL THE BUYER'S SVG ACTUALLY DRAW? Answered by rendering it, at intake.
+ *
+ * THE BUG THIS EXISTS FOR, and why nothing cheaper works. `squareSvgWrapper`
+ * above base64-encodes the buyer's SVG into a nested `<image>`, and resvg
+ * SWALLOWS a parse failure inside a nested data-URI sub-document rather than
+ * throwing: the wrapper parses fine, the referenced document does not, and the
+ * render returns a fully transparent pixmap. Measured on the real renderer, an
+ * ordinary SVG whose `<title>` contains `&nbsp;`:
+ *
+ *   direct  (unwrapped) : THROWS "unknown entity reference 'nbsp'"
+ *   wrapped (production): 64x64, opaquePx = 0 / 4096
+ *
+ * So the free favicon gig never saw the throw. It shipped six blank icons with
+ * every gate passing, the buyer's allowance spent and a delivery note telling
+ * them it had worked — the third appearance of blank-icons-as-success in this
+ * module. A try/catch cannot catch it (nothing throws) and a text scan cannot
+ * predict it (resvg's tolerances are resvg's), so the guard is a real render
+ * through the SAME wrapper production uses. That sameness is structural rather
+ * than commented: this calls `squareSvgWrapper` itself.
+ *
+ * Returns the opaque-pixel count so a caller can log what it saw; 0 covers
+ * both "rendered empty" and "the render threw", which are one refusal.
+ */
+export async function svgDrawsInk(svg: string, sources: WasmSources): Promise<number> {
+  try {
+    const pixmap = await renderSvgToPixmap(
+      squareSvgWrapper(svg, INK_PROBE_PX),
+      INK_PROBE_PX,
+      sources,
+    );
+    return countOpaque(pixmap.data);
+  } catch {
+    // An unwrapped-style throw is still just "it does not draw".
+    return 0;
+  }
+}
+
 /** Every contracted size, each rendered independently from the vector. */
 async function renderSvgSizes(
   svg: string,
@@ -325,13 +439,38 @@ export async function buildFaviconPack(input: FaviconPackInput): Promise<Favicon
   files['snippet.html'] = encoder.encode(buildHtmlSnippet());
 
   const zip = zipFiles(files);
+  // INK, measured on the largest delivered icon.
+  //
+  // Intake proves the SOURCE renders; this proves WHAT WE ARE ABOUT TO DELIVER
+  // does. They are not the same claim — a future change to `squareSvgWrapper`,
+  // the photon resize or the letterbox could produce blanks from a source that
+  // passed intake happily, and every other gate here would still pass, because
+  // dimensions, ICO and ZIP completeness are all satisfied by a perfectly
+  // formed empty image. That is exactly how this shipped.
+  //
+  // ONLY THE LARGEST ENTRY IS MEASURED, and that is a measurement result, not
+  // a shortcut: a hairline monogram renders to 0 opaque pixels at 16 px while
+  // drawing 1568 at 512 (see INK_PROBE_PX). Gating the small icons would
+  // refuse legitimate sparse artwork.
+  //
+  // THE PAID PATH NEEDS NO EQUIVALENT: a blank concept already fails the OCR
+  // readback (nothing to transcribe) and the pHash distinctness gate (every
+  // blank is identical to every other), so the free favicon gig is the only
+  // path in this bot whose gates all pass on an empty image.
+  const largest = FAVICON_SIZES.reduce((a, b) => (a > b ? a : b));
+  const largestFile = FAVICON_FILENAMES[largest]!;
   const gates: FaviconPackGates = {
     dimensions,
     ico: checkIco(ico),
     zip: checkZipCompleteness(zip, FAVICON_ZIP_ENTRIES),
+    ink: await checkInk(files[largestFile]!, largestFile),
     pass: false,
   };
-  gates.pass = gates.dimensions.every((entry) => entry.pass) && gates.ico.pass && gates.zip.pass;
+  gates.pass =
+    gates.dimensions.every((entry) => entry.pass) &&
+    gates.ico.pass &&
+    gates.zip.pass &&
+    gates.ink.pass;
 
   return { zip, files, gates };
 }

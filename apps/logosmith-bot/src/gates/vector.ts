@@ -245,6 +245,134 @@ export function sanitizeSvg(svg: string): string {
   );
 }
 
+// --- HTML entities in XML ----------------------------------------------------
+
+/**
+ * Named character entities that HTML defines and XML DOES NOT.
+ *
+ * SVG is XML, and XML predefines exactly five entities (`amp`, `lt`, `gt`,
+ * `quot`, `apos`). Everything else must be declared by a DTD or it is a FATAL
+ * parse error that aborts the whole document, not just the element it sits in.
+ * Illustrator, Figma and Sketch nevertheless emit these routinely — a designer
+ * typing a non-breaking space or an em dash into a layer name lands one in
+ * `<title>`/`<desc>` — so a perfectly good logo arrives unrenderable.
+ *
+ * THIS IS AN ALLOW-LIST, NOT A BLOCKLIST, and the distinction is the whole
+ * safety argument. Every value below is a fixed literal compiled into this
+ * file. An entity that is not here is left ALONE, so it stays unresolved and
+ * takes the refusal path — which is what must happen to anything whose
+ * definition would have come from the document itself. In particular this
+ * never resolves `SYSTEM`/external entities or an internal DTD subset's
+ * declarations: resvg refuses those on its own (measured: `unknown entity
+ * reference 'xxe'` for a `file:///etc/passwd` SYSTEM entity, and it detects
+ * expansion loops), and that refusal is a property to keep, not route around.
+ */
+const HTML_ENTITIES: Readonly<Record<string, string>> = {
+  // Spaces and dashes — by far the commonest, and the reported trigger.
+  nbsp: '\u00A0', // no-break space
+  ensp: '\u2002', // en space
+  emsp: '\u2003', // em space
+  thinsp: '\u2009', // thin space
+  shy: '\u00AD', // soft hyphen
+  ndash: '–',
+  mdash: '—',
+  minus: '−',
+  // Curly quotes — what every word processor autocorrects straight quotes into.
+  lsquo: '‘',
+  rsquo: '’',
+  sbquo: '‚',
+  ldquo: '“',
+  rdquo: '”',
+  bdquo: '„',
+  laquo: '«',
+  raquo: '»',
+  // Marks a brand name genuinely carries.
+  copy: '©',
+  reg: '®',
+  trade: '™',
+  sect: '§',
+  para: '¶',
+  dagger: '†',
+  Dagger: '‡',
+  // Ordinary typography.
+  hellip: '…',
+  bull: '•',
+  middot: '·',
+  prime: '′',
+  Prime: '″',
+  deg: '°',
+  plusmn: '±',
+  times: '×',
+  divide: '÷',
+  frac12: '½',
+  frac14: '¼',
+  frac34: '¾',
+  permil: '‰',
+  // Currency.
+  euro: '€',
+  pound: '£',
+  yen: '¥',
+  cent: '¢',
+};
+
+/** The five XML predefines. Left untouched — the parser owns them. */
+const XML_PREDEFINED = new Set(['amp', 'lt', 'gt', 'quot', 'apos']);
+
+const NAMED_REF_RE = /&([A-Za-z][A-Za-z0-9]*);/g;
+/** `&` that begins no well-formed reference at all — itself a fatal XML error. */
+const BARE_AMP_RE = /&(?![A-Za-z][A-Za-z0-9]*;|#[0-9]+;|#[xX][0-9A-Fa-f]+;)/;
+/** Names the document declares for itself, in an internal DTD subset. */
+const ENTITY_DECL_RE = /<!ENTITY\s+(?:%\s+)?([A-Za-z_][\w.-]*)\s/g;
+
+/**
+ * Replace the allow-listed HTML entities above with their literal characters.
+ *
+ * Every replacement is a plain character — never `&`, `<` or `>` — so this
+ * cannot manufacture a new reference, and one pass is therefore enough. The
+ * XML predefines are deliberately NOT substituted: leaving `&amp;` alone keeps
+ * the document's own escaping intact, and the parser resolves it correctly.
+ */
+export function substituteHtmlEntities(svg: string): string {
+  return svg.replace(NAMED_REF_RE, (match, name: string) =>
+    Object.hasOwn(HTML_ENTITIES, name) ? HTML_ENTITIES[name]! : match,
+  );
+}
+
+export interface EntityScan {
+  /**
+   * Named references XML cannot resolve on its own, excluding any the document
+   * declares in its own internal DTD subset — those resvg does expand
+   * (measured), so naming them would misattribute an unrelated failure.
+   */
+  unresolved: string[];
+  /** A bare `&` beginning no valid reference — the other thing designers type. */
+  bareAmpersand: boolean;
+}
+
+/**
+ * Find what is left that an XML parser cannot resolve.
+ *
+ * DIAGNOSTIC ONLY — this decides the WORDING of a refusal, never the refusal
+ * itself. The authority on "will this draw" is a real render (`svgDrawsInk` in
+ * pack/faviconPack.ts), because that is the only check that cannot be wrong
+ * about what resvg does. Making this the gate instead would refuse documents
+ * that render perfectly today: an SVG declaring `<!ENTITY brand "Harbor">` and
+ * using `&brand;` renders fully (measured 169744 opaque px), and a text scan
+ * that called it unresolvable would reject a working logo.
+ */
+export function scanEntityRefs(svg: string): EntityScan {
+  const declared = new Set(
+    [...svg.matchAll(ENTITY_DECL_RE)].map((match) => match[1]!).filter(Boolean),
+  );
+  const unresolved = new Set<string>();
+  for (const match of svg.matchAll(NAMED_REF_RE)) {
+    const name = match[1]!;
+    if (XML_PREDEFINED.has(name) || declared.has(name)) continue;
+    unresolved.add(name);
+  }
+  return { unresolved: [...unresolved], bareAmpersand: BARE_AMP_RE.test(svg) };
+}
+
 /** Assert the SVG contains only vector primitives (FR-10). */
 export function checkTrueVector(svg: string): VectorGateResult {
   const viewBoxMatch = svg.match(VIEWBOX_ATTR_RE);
