@@ -291,7 +291,7 @@ async function renderSvgSizes(
  * Gates are RETURNED, never thrown, and never applied by the caller's
  * good intentions: a free deliverable that ships a broken favicon costs the
  * conversion this whole gig exists to earn, so it clears the same
- * dimensions/ICO/ZIP checks the $25 pack does — only against the smaller
+ * dimensions/ICO/ZIP checks the paid pack does — only against the smaller
  * entry contract.
  */
 export async function buildFaviconPack(input: FaviconPackInput): Promise<FaviconPackResult> {

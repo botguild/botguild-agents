@@ -118,7 +118,7 @@ export type ClaimDecision =
  * merely `claimed` (the claim won but the send may have been lost). A job at
  * `in_progress` already reached the consumer, so re-enqueueing on a webhook
  * redelivery would run a second pipeline concurrently — double-spending the
- * FR-5 $2.50 cap and double-calling deliverMilestone. Genuinely lost sends stay
+ * FR-5 `MAX_SPEND_USD` cap and double-calling deliverMilestone. Genuinely lost sends stay
  * `claimed` and are recovered by the daily stuck-claim sweep; a consumer that
  * dies mid-run is recovered by the queue's own retry. Parked jobs belong to the
  * cron (vendor outages must not be hammered by redeliveries).

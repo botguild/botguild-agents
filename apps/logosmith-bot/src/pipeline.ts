@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Queue pipeline — both paid stages of the $25 gig:
+// Queue pipeline — both paid stages of the paid gig:
 //
 //   stage 1 (`runConceptStage`): concepts → gates → capped regeneration → M1
 //                                (PRD §6 steps 3-6)
@@ -1248,9 +1248,17 @@ export async function runConceptStage(
  * checked per generation inside stage 1 against stage 1's own ledger. It is
  * deliberately NOT re-checked here. Stage 2 spends at most one ~$0.20
  * conversion, on a contract the buyer has already funded and already picked a
- * winner for; refusing to deliver the thing they paid for to save twenty cents
- * against a $25 escrow would be the wrong trade in every direction. The report
- * still shows both stages' spend summed, so the true figure is never hidden.
+ * winner for.
+ *
+ * The original rationale was economic — "twenty cents against a $25 escrow" —
+ * and that argument DIED with the $1 introductory price: $0.20 is now a fifth
+ * of the contract, not 0.8% of it. The ruling stands anyway, on a contractual
+ * argument that does not move with the price: the buyer has paid and chosen,
+ * so refusing to convert means keeping their money and delivering nothing.
+ * That is worse at any anchor. If the price ever changes again, re-read THIS
+ * paragraph rather than the arithmetic — the arithmetic was never the reason.
+ * The report still shows both stages' spend summed, so the true figure is
+ * never hidden.
  */
 export async function runVectorStage(
   config: PipelineConfig,
