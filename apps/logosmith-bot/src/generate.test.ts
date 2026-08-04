@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGenerator } from './generate.js';
-import { IMAGE_COST_USD } from './config.js';
+import { IMAGE_COST_USD, recraftCreditsToUsd } from './config.js';
 import type { StyleAxis } from './types.js';
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
@@ -84,20 +84,43 @@ describe('generate', () => {
     assert.deepEqual([...result.concept.png.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   });
 
-  // Recraft's response shape below is NOT verified against a live API — no key
-  // was obtainable this session (its Generate button is gated behind a prepaid
-  // API-units balance). Every Recraft test in this file asserts only that OUR
-  // adapter handles the documented shape correctly; a green run here proves
-  // our branch logic is self-consistent, NOT that Recraft actually returns
-  // this shape. Do not read passing tests as vendor confirmation.
+  // WHAT A GREEN RUN BELOW NOW PROVES, AND WHAT IT STILL DOES NOT.
+  //
+  // This caveat used to say flatly that no Recraft response shape here was
+  // verified against a live API. A key arrived and the endpoint was probed
+  // twice on 2026-08-04 (one `recraftv3` `vector_illustration` image per call),
+  // so the caveat is now partial rather than total.
+  //
+  // LIVE-VERIFIED, and the fixtures below are the measured shape: the success
+  // body's top-level keys are exactly `created` / `credits` / `data` with NO
+  // `id`; `created` is a Unix timestamp; `data[0]` carries `url` and
+  // `image_id`; the per-call request id is the `x-recraft-requestid` RESPONSE
+  // HEADER; `credits` reports the charge (80 for one image); and
+  // `vector_illustration` really does return SVG, which passes the true-vector
+  // gate raw and sanitized alike.
+  //
+  // STILL INFERRED, and a failure in one of these still points at our
+  // handling before it points at the vendor: the error bodies behind a non-200
+  // status, the raster-return branch (never observed — every live call
+  // returned SVG), and any response missing the header or the credit count.
+  // Those fixtures are constructed, not measured. Do not read them as vendor
+  // confirmation.
+  const recraftBody = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      created: 1785846259,
+      credits: 80,
+      data: [{ url: 'https://cdn/x.svg', image_id: 'img-asset-1' }],
+      ...over,
+    });
+
   it('captures Recraft native SVG when the vendor returns one', async () => {
     const generator = createGenerator({
       fetchImpl: fetchStub({
         'recraft.ai': async () =>
-          new Response(
-            JSON.stringify({ id: 'rc-1', data: [{ url: 'https://cdn/x.svg', image_id: 'rc-1' }] }),
-            { status: 200 },
-          ),
+          new Response(recraftBody(), {
+            status: 200,
+            headers: { 'x-recraft-requestid': 'b4601a46-598c-4570-87ee-cd82bd58dcc5' },
+          }),
         'cdn/x.svg': async () =>
           new Response('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', {
             status: 200,
@@ -117,14 +140,112 @@ describe('generate', () => {
     assert.equal(result.concept.axisId, recraftAxis.id);
   });
 
-  it('returns a plain PNG when Recraft returns a raster instead of SVG', async () => {
+  // MUTATION GUARD FOR THE HEADER READ. `created` is a Unix timestamp and
+  // `image_id` is an ASSET id; neither is the id a vendor can look the CALL up
+  // by, and the live body has no `id` field at all. Every candidate here holds
+  // a DISTINCT value, so the assertion is only satisfiable by reading the
+  // header — reverting `generateRecraft` to the old `body?.id ??
+  // body?.data?.[0]?.image_id` fails this test by name with
+  // `'img-asset-1' !== 'b4601a46-...'`.
+  it('reads the Recraft request id from the x-recraft-requestid header, not from the body', async () => {
     const generator = createGenerator({
       fetchImpl: fetchStub({
         'recraft.ai': async () =>
           new Response(
-            JSON.stringify({ id: 'rc-2', data: [{ url: 'https://cdn/x.png', image_id: 'rc-2' }] }),
-            { status: 200 },
+            // A stray top-level `id` that the real API does not send, present
+            // purely so the dead branch cannot pass by coincidence either.
+            recraftBody({ id: 'body-id-that-does-not-exist-live' }),
+            {
+              status: 200,
+              headers: { 'x-recraft-requestid': 'b4601a46-598c-4570-87ee-cd82bd58dcc5' },
+            },
           ),
+        'cdn/x.svg': async () =>
+          new Response('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', { status: 200 }),
+      }),
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const result = await generator.generate(recraftAxis, 'an emblem for Acme');
+    assert.ok(result.ok);
+    assert.equal(result.concept.vendorRequestId, 'b4601a46-598c-4570-87ee-cd82bd58dcc5');
+  });
+
+  it('falls back to the Recraft asset id only when the request-id header is absent', async () => {
+    const generator = createGenerator({
+      fetchImpl: fetchStub({
+        'recraft.ai': async () => new Response(recraftBody(), { status: 200 }),
+        'cdn/x.svg': async () =>
+          new Response('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', { status: 200 }),
+      }),
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const result = await generator.generate(recraftAxis, 'an emblem for Acme');
+    assert.ok(result.ok);
+    assert.equal(result.concept.vendorRequestId, 'img-asset-1');
+  });
+
+  // MUTATION GUARD FOR THE COST READ. 160 credits is deliberately NOT the
+  // measured 80, so a revert to billing the flat `IMAGE_COST_USD.recraft`
+  // constant fails here with `0.08 !== 0.16`.
+  it('bills Recraft from the credits the response reports, not from the flat constant', async () => {
+    const generator = createGenerator({
+      fetchImpl: fetchStub({
+        'recraft.ai': async () =>
+          new Response(recraftBody({ credits: 160 }), {
+            status: 200,
+            headers: { 'x-recraft-requestid': 'rc-req-160' },
+          }),
+        'cdn/x.svg': async () =>
+          new Response('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', { status: 200 }),
+      }),
+      ai: noAi,
+      ideogramApiKey: 'i',
+      recraftApiKey: 'r',
+    });
+    const result = await generator.generate(recraftAxis, 'an emblem for Acme');
+    assert.ok(result.ok);
+    assert.equal(result.costUsd, 0.16);
+    // And the measured 80 reconciles with the planning constant, so the
+    // ordinary case bills exactly what the ledger was sized for.
+    assert.equal(recraftCreditsToUsd(80), IMAGE_COST_USD.recraft);
+  });
+
+  it('falls back to the planning cost when Recraft reports no usable credit count', async () => {
+    // Absent, zero and non-numeric all fail SAFE — upward to the planning
+    // figure, never down to $0.00, which would leave the park loop unbounded.
+    for (const credits of [undefined, 0, -5, 'eighty']) {
+      const generator = createGenerator({
+        fetchImpl: fetchStub({
+          'recraft.ai': async () =>
+            new Response(recraftBody({ credits }), {
+              status: 200,
+              headers: { 'x-recraft-requestid': 'rc-req-nocredits' },
+            }),
+          'cdn/x.svg': async () =>
+            new Response('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>', { status: 200 }),
+        }),
+        ai: noAi,
+        ideogramApiKey: 'i',
+        recraftApiKey: 'r',
+      });
+      const result = await generator.generate(recraftAxis, 'an emblem for Acme');
+      assert.ok(result.ok);
+      assert.equal(result.costUsd, IMAGE_COST_USD.recraft, `credits=${String(credits)}`);
+    }
+  });
+
+  it('returns a plain PNG when Recraft returns a raster instead of SVG', async () => {
+    const generator = createGenerator({
+      fetchImpl: fetchStub({
+        'recraft.ai': async () =>
+          new Response(recraftBody({ data: [{ url: 'https://cdn/x.png', image_id: 'img-2' }] }), {
+            status: 200,
+            headers: { 'x-recraft-requestid': 'rc-req-2' },
+          }),
         cdn: imageResponse,
       }),
       ai: noAi,
@@ -135,7 +256,7 @@ describe('generate', () => {
     assert.ok(result.ok);
     assert.equal(result.concept.nativeSvg, undefined);
     assert.deepEqual([...result.concept.png.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
-    assert.equal(result.concept.vendorRequestId, 'rc-2');
+    assert.equal(result.concept.vendorRequestId, 'rc-req-2');
     assert.equal(result.costUsd, IMAGE_COST_USD.recraft);
   });
 
@@ -143,10 +264,10 @@ describe('generate', () => {
     const generator = createGenerator({
       fetchImpl: fetchStub({
         'recraft.ai': async () =>
-          new Response(
-            JSON.stringify({ id: 'rc-3', data: [{ url: 'https://cdn/x.bin', image_id: 'rc-3' }] }),
-            { status: 200 },
-          ),
+          new Response(recraftBody({ data: [{ url: 'https://cdn/x.bin', image_id: 'img-3' }] }), {
+            status: 200,
+            headers: { 'x-recraft-requestid': 'rc-req-3' },
+          }),
         cdn: async () => new Response('not an image', { status: 200 }),
       }),
       ai: noAi,
@@ -302,8 +423,14 @@ describe('generate — paid failures are visible to the spend ledger', () => {
       status: 200,
       headers: { 'x-request-id': 'req-paid' },
     });
+  // The live success shape (`created`/`credits`/`data`, id in the header), so
+  // these paid-failure branches are exercised against what the vendor really
+  // sends rather than against the documented shape they used to assume.
   const recraftOk = (url: string) => async () =>
-    new Response(JSON.stringify({ id: 'rc-paid', data: [{ url }] }), { status: 200 });
+    new Response(
+      JSON.stringify({ created: 1785846259, credits: 80, data: [{ url, image_id: 'img-paid' }] }),
+      { status: 200, headers: { 'x-recraft-requestid': 'rc-req-paid' } },
+    );
 
   const make = (handlers: Record<string, () => Promise<Response>>, ai = noAi) =>
     createGenerator({
@@ -350,7 +477,13 @@ describe('generate — paid failures are visible to the spend ledger', () => {
 
   it('bills a Recraft response with no image url, a dead link, and an unusable asset', async () => {
     const noUrl = await make({
-      'recraft.ai': async () => new Response(JSON.stringify({ id: 'rc' }), { status: 200 }),
+      // A 200 that reported its charge but produced nothing usable: the
+      // credits are still what we pay, so they are still what the ledger sees.
+      'recraft.ai': async () =>
+        new Response(JSON.stringify({ created: 1785846259, credits: 80 }), {
+          status: 200,
+          headers: { 'x-recraft-requestid': 'rc-req-nourl' },
+        }),
     }).generate(recraftAxis, 'p');
     const deadLink = await make({
       'recraft.ai': recraftOk('https://cdn/x.png'),

@@ -85,8 +85,10 @@ describe('createVectorizer — Recraft-native short-circuit', () => {
   });
 
   it('fails a malformed native SVG instead of throwing or shipping garbage', async () => {
-    // Recraft is unverified live (generate.ts carries the same caveat) — this
-    // proves toVector does not assume the vendor SVG even parses.
+    // The live 2026-08-04 probe returned an SVG that parsed and passed the
+    // gate clean — so this is no longer covering an unverified vendor, it is
+    // covering the case that ONE good sample cannot rule out. `toVector` must
+    // not assume the vendor SVG even parses.
     const vectorizer = createVectorizer({ fetchImpl: unreachableFetch, vectorizerToken: 't' });
     const result = await vectorizer.toVector({
       png: PNG,

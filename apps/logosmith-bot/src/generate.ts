@@ -8,7 +8,7 @@
 // Every path returns a result object rather than throwing: a vendor failure is
 // a pipeline decision (retry within caps, or park), not an exception.
 
-import { FLUX_MODEL_ID, IMAGE_COST_USD } from './config.js';
+import { FLUX_MODEL_ID, IMAGE_COST_USD, recraftCreditsToUsd } from './config.js';
 import type { AiLike, Concept, FetchLike, StyleAxis } from './types.js';
 
 export type GenerateResult =
@@ -161,14 +161,28 @@ export function createGenerator(deps: {
     });
   }
 
-  // NOT verified live, unlike Ideogram above — this shape is from Recraft's
-  // documentation only; no API key was obtainable this session (its Generate
-  // button is gated behind a prepaid API-units balance). Two things are
-  // explicitly unproven: whether `style: "vector_illustration"` actually
-  // returns SVG rather than a raster, and the exact response field names
-  // below. The native-SVG branch is kept anyway — unproven, not dead code —
-  // because if it does work it lets M2 skip Vectorizer.ai entirely
-  // (~$0.15/job against a $1 anchor).
+  // VERIFIED LIVE 2026-08-04 against the real API, as Ideogram above was on
+  // 2026-07-30. Two calls, each one `recraftv3` `vector_illustration` image.
+  // What was measured, replacing what this comment previously guessed from
+  // documentation:
+  //
+  //   * `style: "vector_illustration"` DOES return SVG, not a raster
+  //     (`image/svg+xml`, ~40-50 kB), and that SVG passes `checkTrueVector`
+  //     clean BOTH raw and after `sanitizeSvg` — zero violations either way,
+  //     no `<image>` element, no external references, sanitizer byte-identical.
+  //     THE NATIVE-SVG BYPASS IS REAL: whenever the winning concept came from
+  //     this axis, M2 skips the ~$0.20 Vectorizer.ai call — a fifth of the
+  //     whole $1 anchor. The raster branch below is now the unobserved one.
+  //   * THE REQUEST ID IS THE `x-recraft-requestid` RESPONSE HEADER. The body
+  //     has no `id` field at all (top-level keys: `created`, `credits`,
+  //     `data`), and `created` is a UNIX TIMESTAMP, not an id — the identical
+  //     trap already found and fixed one vendor up. `data[0].image_id` names
+  //     the OUTPUT ASSET, not the call, so it is a labelled fallback only.
+  //   * `credits` REPORTS WHAT THE VENDOR CHARGED (80 for one image). The
+  //     ledger bills from it rather than from a constant that drifts unseen.
+  //
+  // Still unobserved, and so still inferred: non-200 error bodies, the raster
+  // return, and any response that omits the header or the credit count.
   async function generateRecraft(prompt: string): Promise<GenerateResult> {
     const response = await deps.fetchImpl('https://external.api.recraft.ai/v1/images/generations', {
       method: 'POST',
@@ -186,23 +200,41 @@ export function createGenerator(deps: {
       };
     }
     // PAST THIS LINE THE VENDOR HAS BEEN BILLED — see `generateIdeogram`.
+    // `billed` is the PLANNING figure; it stands only until the body tells us
+    // what was really charged, and remains the value attributed by
+    // `billedAttempt`'s catch, which by definition never got to read a body.
     const billed = IMAGE_COST_USD.recraft;
     return billedAttempt(billed, async () => {
+      // VERIFIED LIVE 2026-08-04: the per-call id is this RESPONSE HEADER, and
+      // nothing in the body is one. Read before `json()` so a body that fails
+      // to parse cannot take the header down with it.
+      const headerRequestId = response.headers.get('x-recraft-requestid') ?? undefined;
       const body = (await response.json()) as {
-        id?: string;
+        created?: number;
+        credits?: number;
         data?: Array<{ url?: string; image_id?: string }>;
       } | null;
+      // WHAT THE VENDOR SAYS IT CHARGED, not what we planned for. Falls back
+      // to the planning constant on any unusable count — see
+      // `recraftCreditsToUsd` for why the fallback direction is upward.
+      const charged = recraftCreditsToUsd(body?.credits) ?? billed;
       const url = body?.data?.[0]?.url;
       if (!url) {
         return {
           ok: false,
           retryable: true,
           error: 'recraft returned no image url',
-          costUsd: billed,
+          costUsd: charged,
         };
       }
       const bytes = await fetchBytes(url);
-      const requestId = body?.id ?? body?.data?.[0]?.image_id;
+      // FALLBACK ONLY, AND IT IS AN ASSET ID, NOT A REQUEST ID. `image_id`
+      // names the image that was produced; the licence manifest and the
+      // dispute document need the id a VENDOR can look the CALL up by, which
+      // is what a payer takes to them. Kept so a response that somehow
+      // arrives without the header still records something traceable rather
+      // than nothing — but the header is what provenance actually rests on.
+      const requestId = headerRequestId ?? body?.data?.[0]?.image_id;
 
       // A vector-native return is the prize: it lets M2 skip Vectorizer.ai. When
       // the URL yields only an SVG, the PNG comes back EMPTY — the pipeline
@@ -213,7 +245,7 @@ export function createGenerator(deps: {
         if (text.includes('<svg')) {
           return {
             ok: true,
-            costUsd: IMAGE_COST_USD.recraft,
+            costUsd: charged,
             concept: {
               axisId: '',
               vendor: 'recraft',
@@ -227,12 +259,12 @@ export function createGenerator(deps: {
           ok: false,
           retryable: true,
           error: 'recraft asset was neither PNG nor SVG',
-          costUsd: billed,
+          costUsd: charged,
         };
       }
       return {
         ok: true,
-        costUsd: IMAGE_COST_USD.recraft,
+        costUsd: charged,
         concept: { axisId: '', vendor: 'recraft', vendorRequestId: requestId, png: bytes },
       };
     });

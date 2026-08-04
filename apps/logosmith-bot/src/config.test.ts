@@ -11,11 +11,13 @@ import {
   MAX_SPEND_USD,
   MIN_PHASH_HAMMING,
   OCR_SIMILARITY_THRESHOLD,
+  RECRAFT_CREDITS_PER_USD,
   SEED_PRICE_USD,
   botProfile,
   fallbackEstimate,
   pricingCalc,
   rateCard,
+  recraftCreditsToUsd,
   scorerConfig,
 } from './config.js';
 import { applyMigrations } from './testSupport.js';
@@ -111,6 +113,18 @@ describe('config', () => {
     // not discovered weeks later as "some jobs mysteriously deliver
     // `partial`" once the cap starts truncating regenerations that used to
     // complete.
+    //
+    // THIS IS A PLANNING INVARIANT, AND IT STAYS PROVABLE NOW THAT THE LEDGER
+    // BILLS RECRAFT FROM THE VENDOR'S REPORTED `credits` RATHER THAN FROM
+    // IMAGE_COST_USD. A cap has to be sized from figures known BEFORE any call
+    // is made, which is exactly what IMAGE_COST_USD still is; what the live
+    // reading changes is whether the ledger notices when reality diverges from
+    // the plan. It can only tighten the cap, never loosen it — an undercharge
+    // is credited as less, and an overcharge, previously invisible, now makes
+    // `decideSlotAction` stop sooner instead of letting the job quietly overrun
+    // by the unseen difference. (`MAX_SPEND_USD` was never a hard ceiling
+    // anyway: it is checked BEFORE each generation, so the call that crosses it
+    // completes — see its docstring in config.ts.)
     const attemptsPerSlot = MAX_REGENS_PER_SLOT + 1; // 1 initial + regens
     const axes = DEFAULT_AXES.slice(0, CONCEPT_COUNT);
     assert.equal(axes.length, CONCEPT_COUNT, 'fewer declared axes than concept slots');
@@ -135,6 +149,28 @@ describe('config', () => {
       Math.abs(margin) < 1e-9,
       `margin is $${margin.toFixed(2)}, not zero — the note above needs updating either way`,
     );
+  });
+
+  // The credits->USD ratio is DERIVED, not independently measured: Recraft
+  // publishes the credit COUNT it charged (measured `credits: 80` on both live
+  // probe calls, 2026-08-04) but not the credit PRICE, so the dollar half
+  // comes from reconciling that 80 against the documented per-image price
+  // already in IMAGE_COST_USD. This test IS that reconciliation — moving
+  // either constant without the other fails here rather than silently
+  // re-pricing every Recraft generation in the ledger.
+  it('reconciles the measured Recraft credit charge with the planning constant', () => {
+    assert.equal(RECRAFT_CREDITS_PER_USD, 1000);
+    assert.equal(recraftCreditsToUsd(80), IMAGE_COST_USD.recraft);
+  });
+
+  it('refuses a Recraft credit count it cannot trust, rather than billing zero', () => {
+    // Fails SAFE upward: the call site substitutes IMAGE_COST_USD.recraft for
+    // every `undefined` here. Billing $0.00 for a call the vendor charged for
+    // is what leaves the park -> unpark -> regenerate loop unbounded.
+    for (const bad of [undefined, null, 0, -1, NaN, Infinity, '80', {}, []]) {
+      assert.equal(recraftCreditsToUsd(bad), undefined, `credits=${JSON.stringify(bad)}`);
+    }
+    assert.equal(recraftCreditsToUsd(160), 0.16);
   });
 
   it('declares the §8 pack size contract', () => {

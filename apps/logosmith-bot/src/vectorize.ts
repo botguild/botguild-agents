@@ -10,9 +10,17 @@
 //
 // BOTH paths run the identical SVGO -> sanitizeSvg -> checkTrueVector
 // pipeline before a result is returned `ok: true`. A vector we didn't trace
-// is not automatically a vector we can ship: Recraft is unverified live (see
-// generate.ts's `generateRecraft` comment), so a native SVG earns no more
+// is not automatically a vector we can ship, so a native SVG earns no more
 // trust than one we paid Vectorizer.ai to produce.
+//
+// THAT GATE IS UNCONDITIONAL, AND THE LIVE PROBE IS NOT A REASON TO RELAX IT.
+// This comment used to rest the argument on Recraft being unverified. It was
+// verified on 2026-08-04 (see generate.ts's `generateRecraft`) and a real
+// vendor SVG passed `checkTrueVector` clean both raw and sanitized — which
+// says the bypass WORKS, not that the next SVG needs no checking. One
+// measured sample is not a contract: the artifact this bot warrants is a
+// true-vector logo.svg, so what ships is gated on every job whatever produced
+// it.
 //
 // Failure classification is deliberately NOT "any throw is retryable" (unlike
 // generate.ts's blanket outer catch-all). Two different failure classes exist

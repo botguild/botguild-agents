@@ -14,7 +14,7 @@ load-bearing — do not restate their reasoning here without reading them).
 
 Stack: Node 22 / TypeScript, Hono, Cloudflare Workers + Queues + Cron
 Triggers + D1 + KV + R2 + Workers AI, `pnpm` + Turborepo. Full test suite as
-of this writing: **486/486 passing, 112 suites** (`pnpm test` from this
+of this writing: **651/651 passing, 146 suites** (`pnpm test` from this
 directory; run the workspace-wide `pnpm -w build && pnpm -w typecheck &&
 pnpm -w lint` too before trusting a change).
 
@@ -23,22 +23,37 @@ pnpm -w lint` too before trusting a change).
 Read this section before the runbooks below — it changes how much you should
 trust a given failure.
 
-- **Recraft's adapter is unverified against the live API.** No Recraft API
-  key was obtainable during development (its dashboard's Generate button is
-  gated behind a prepaid API-units balance), so `src/generate.ts`'s
-  `generateRecraft` function is written from Recraft's published
-  documentation only, never exercised against a real response. It carries an
-  explicit `NOT verified live` comment at the call site. Two things are
-  specifically unproven: whether `style: "vector_illustration"` actually
-  returns SVG rather than a raster, and the exact response field names. **If
-  the `emblem` axis (the one Recraft-routed style) starts failing in a way
-  the `wordmark`/`lockup` axes (both Ideogram) do not, suspect the vendor
-  contract first, not this bot's handling of it.** When a real key is
-  obtained, make one live call and fix the adapter and its test fixture
-  together — do not leave a test asserting a shape the vendor does not
-  return (Ideogram went through exactly this process already; see the
-  `VERIFIED LIVE 2026-07-30` comments in `generate.ts` for what that looked
-  like).
+- **Recraft's adapter is now verified live (2026-08-04) — and it shipped
+  wrong for a while.** This entry used to say no Recraft key was obtainable
+  and that `src/generate.ts`'s `generateRecraft` was written from published
+  documentation only. A key arrived, the endpoint was probed twice, and
+  **three of the documented assumptions were wrong**; the adapter, its
+  fixtures and its comments were corrected together. What is now *measured*:
+
+  - `style: "vector_illustration"` **does** return SVG (`image/svg+xml`,
+    ~40–50 kB), and that SVG passes `checkTrueVector` clean **both raw and
+    after `sanitizeSvg`** — zero violations, no `<image>` element, no
+    external references. **The native-SVG bypass is real**, so a job whose
+    winning concept came from the `emblem` axis genuinely skips the ~$0.20
+    Vectorizer.ai call.
+  - The per-call request id is the **`x-recraft-requestid` response
+    header**. The success body has no `id` field at all (top-level keys:
+    `created`, `credits`, `data`), and `created` is a **Unix timestamp**,
+    not an id — the identical trap already found on Ideogram's leg.
+    `data[0].image_id` names the *output asset*, not the call, and is kept
+    only as a labelled fallback.
+  - `credits` reports **what the vendor actually charged** (80 for one
+    image). The FR-5 ledger now bills from that figure rather than from a
+    constant that drifts unobserved; `IMAGE_COST_USD.recraft` remains the
+    fallback and the planning figure `MAX_SPEND_USD` is sized against.
+
+  **Still unproven for this vendor**, so a failure here still points at our
+  handling before it points at the vendor: the credits→USD **ratio** is
+  derived (Recraft publishes the credit count, not the credit price — see
+  `RECRAFT_CREDITS_PER_USD` in `src/config.ts` for the reconciliation), the
+  **raster-return branch** was never observed (every live call returned
+  SVG), and neither the **non-200 error bodies** nor a response **missing
+  the header or the credit count** has ever been seen.
 
 - **Vectorizer.ai's credential shape is also unverified.** Vectorizer.ai's
   documented auth is HTTP Basic with `base64(apiId:apiSecret)`. This bot has
@@ -51,8 +66,11 @@ trust a given failure.
   **do not put just the secret half in `VECTORIZER_AI_TOKEN` and assume it
   works.** Get this wrong and every paid job that doesn't take the Recraft
   native-SVG short-circuit (i.e. every job whose winning concept came from
-  Ideogram) fails at the vectorize step. Verify this the first time a real
-  token is provisioned, before relying on it for a paying customer.
+  Ideogram) fails at the vectorize step — and since the bypass is now
+  confirmed to fire (see above), that is precisely the two-in-three of jobs
+  whose buyer picked `wordmark` or `lockup`, not an unknown fraction. Verify
+  this the first time a real token is provisioned, before relying on it for
+  a paying customer.
 
 - **The license manifest ships incomplete on purpose, not by omission.**
   `buildLicenseManifest` (`src/report.ts`) looks up each delivered image's
@@ -125,7 +143,7 @@ committed anywhere, and `.dev.vars` is gitignored.
 | `ANTHROPIC_API_KEY` | Haiku axis-prompt compilation |
 | `MODERATION_API_KEY` | FR-2 input content-safety screening (OpenAI omni-moderation, pinned model — see `src/moderation.ts`) |
 | `IDEOGRAM_API_KEY` | Ideogram 3.0 image generation (`wordmark`/`lockup` axes) — **verified live** |
-| `RECRAFT_API_KEY` | Recraft V3 image generation (`emblem` axis) — **unverified**, see above |
+| `RECRAFT_API_KEY` | Recraft V3 image generation (`emblem` axis) — **verified live 2026-08-04**, see above |
 | `VECTORIZER_AI_TOKEN` | Vectorizer.ai raster-to-vector conversion — **credential shape unverified**, see above |
 | `GOOGLE_FONTS_API_KEY` | Font-pairing lookup for `brand.json` |
 | `ADMIN_TOKEN` | Bearer-protects `POST /admin/register`; the route is disabled (503) if this is unset |

@@ -299,13 +299,70 @@ export const HAIKU_PRICING_PER_MTOK = {
   cacheRead: 0.1,
 } as const;
 
-/** Conservative flat per-image vendor costs for the FR-5 spend ledger (§11). */
+/**
+ * Conservative flat per-image vendor costs for the FR-5 spend ledger (§11).
+ *
+ * THESE ARE PLANNING FIGURES, AND FOR RECRAFT ALSO A FALLBACK. Recraft's live
+ * API reports what it actually charged on every 200 (see
+ * `recraftCreditsToUsd` below), and `generate.ts` bills the ledger from that
+ * report in preference to this table. This entry stays as (a) the value used
+ * when a response carries no usable credit count, and (b) the number the
+ * worst-case-burn invariant in `config.test.ts` sizes `MAX_SPEND_USD` against
+ * — a cap has to be chosen from a figure known BEFORE the calls are made.
+ *
+ * Reading the real charge STRENGTHENS that cap rather than weakening it: if a
+ * vendor ever bills above its planning figure, the ledger now sees the
+ * difference and `decideSlotAction` stops sooner, where before the overage was
+ * invisible and the cap under-bit by exactly the amount it could not see.
+ */
 export const IMAGE_COST_USD = {
   ideogram: 0.06,
   recraft: 0.08,
   flux: 0.001,
   vectorizer: 0.2,
 } as const;
+
+/**
+ * How many Recraft credits buy a dollar.
+ *
+ * WHERE THIS NUMBER COMES FROM, because it is DERIVED and not independently
+ * measured. Both live probe calls on 2026-08-04 (one `recraftv3`
+ * `vector_illustration` image, `n: 1`) reported `credits: 80` in the response
+ * body. Reconciling that measured count against the documented per-image price
+ * this file already carried — `IMAGE_COST_USD.recraft` = $0.08 — gives exactly
+ * $0.001 per credit, i.e. the 1000 below. The vendor publishes the credit
+ * COUNT, not the credit PRICE, so the price half rests on that reconciliation.
+ *
+ * `config.test.ts` pins the agreement (80 credits must equal
+ * `IMAGE_COST_USD.recraft`), so moving either constant without the other fails
+ * loudly rather than silently re-pricing the ledger. If Recraft reprices a
+ * credit, THIS is the constant that moves; the vendor's own `credits` field
+ * keeps reporting quantity correctly either way, which is the whole reason to
+ * read it instead of hardcoding a dollar figure that drifts unobserved.
+ */
+export const RECRAFT_CREDITS_PER_USD = 1000;
+
+/**
+ * What a Recraft response's `credits` field is worth in dollars, or
+ * `undefined` when the response reported no usable count.
+ *
+ * ONLY A POSITIVE FINITE NUMBER IS ACCEPTED, and the direction of that
+ * strictness is deliberate. Every rejected shape — absent, `0`, negative,
+ * `NaN`, a string, a nested object — falls back at the call site to
+ * `IMAGE_COST_USD.recraft`, i.e. to the conservative planning figure rather
+ * than to zero. UNDER-REPORTING SPEND IS THE DANGEROUS DIRECTION: a retryable
+ * failure deliberately consumes no FR-5 attempt, so `spendUsd` is the only
+ * thing bounding the park → unpark → regenerate → park loop, and it cannot
+ * bound spend it has been told was free.
+ */
+export function recraftCreditsToUsd(credits: unknown): number | undefined {
+  if (typeof credits !== 'number' || !Number.isFinite(credits) || credits <= 0) return undefined;
+  // Divide rather than multiply by a 0.001 literal: 80 / 1000 is the nearest
+  // double to 0.08 (i.e. `=== 0.08`), where 80 * 0.001 lands on 0.08000000000000002.
+  // The outer round mirrors pipeline.ts/report.ts's `roundUsd` for anything
+  // that does not divide cleanly.
+  return Math.round((credits / RECRAFT_CREDITS_PER_USD) * 1e6) / 1e6;
+}
 
 // --- Pack contract (§8) --------------------------------------------------------
 export const FAVICON_SIZES = [16, 32, 48, 180, 192, 512] as const;
