@@ -1,0 +1,41 @@
+{
+  "brandName": "JiffyApp",
+  "colors": [
+    {
+      "hex": "#14262c",
+      "share": 0.9924664215351761
+    },
+    {
+      "hex": "#47bcba",
+      "share": 0.003111979062131199
+    },
+    {
+      "hex": "#dadcdd",
+      "share": 0.0007827615828643454
+    },
+    {
+      "hex": "#a6adaf",
+      "share": 0.0006171774018738108
+    },
+    {
+      "hex": "#657075",
+      "share": 0.0005730216202763349
+    }
+  ],
+  "fonts": {
+    "heading": {
+      "family": "Roboto",
+      "category": "sans-serif",
+      "license": "See the specimen page for this family's licence.",
+      "url": "https://fonts.google.com/specimen/Roboto"
+    },
+    "body": {
+      "family": "Playfair Display",
+      "category": "serif",
+      "license": "See the specimen page for this family's licence.",
+      "url": "https://fonts.google.com/specimen/Playfair%2BDisplay"
+    },
+    "note": "Advisory recommendation only. Both families are served by Google Fonts; open each specimen page to confirm its licence before redistributing. Font choice is not covered by the warranty."
+  },
+  "licenseNote": "Colour codes are extracted from the delivered mark. The font pairing is an advisory recommendation and is not a warranted property of this delivery."
+}
