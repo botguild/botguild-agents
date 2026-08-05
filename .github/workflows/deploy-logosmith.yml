@@ -1,0 +1,82 @@
+name: Deploy LogoSmith
+
+# LogoSmith (apps/logosmith-bot) is a Cloudflare Worker deployed from
+# `develop` (the default branch), path-filtered to what actually ships in
+# its bundle. This is unlike the retired Fly bots (deploy-agents.yml, now
+# dead code, which deployed from `main`). Design:
+# docs/superpowers/specs/2026-08-05-logosmith-deploy-design.md
+on:
+  push:
+    branches: [develop]
+    paths:
+      - apps/logosmith-bot/**
+      - packages/agent-core/**
+      - packages/agent-core-workers/**
+      - .github/workflows/deploy-logosmith.yml
+  # Manual fallback: dependency-bump-only redeploys (pnpm-lock.yaml is
+  # deliberately not a trigger path) and the pre-merge bring-up run
+  # dispatched from the logosmith branch.
+  workflow_dispatch:
+
+# Queue deploys rather than overlap; never cancel a run mid-migration.
+concurrency:
+  group: deploy-logosmith
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Gate, migrate, deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The gate runs node-only tests; skip Playwright's ~150MB Chromium
+      # download that the workspace install would otherwise trigger.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup
+
+      # Self-contained gate — logosmith plus the workspace packages compiled
+      # into its bundle ("..." = the package and its workspace deps). Full
+      # repo CI runs in parallel on the same push; unrelated red jobs there
+      # neither block nor are blocked by this deploy.
+      - name: Typecheck (logosmith + deps)
+        run: pnpm --filter "@botguild/logosmith-bot..." typecheck
+
+      - name: Test (logosmith + deps)
+        run: pnpm --filter "@botguild/logosmith-bot..." test
+
+      # Migrations before deploy — new code must never meet an old schema.
+      # wrangler tracks applied migrations; a clean run is a no-op.
+      - name: Apply D1 migrations
+        run: pnpm --filter @botguild/logosmith-bot db:migrate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy Worker
+        run: pnpm --filter @botguild/logosmith-bot deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Smoke: the Worker's public URL lives only in wrangler.jsonc
+      # (WEBHOOK_BASE_URL) — extract it rather than duplicate it here. On
+      # failure the new version stays live; rollback is manual
+      # (`wrangler rollback`, see the README runbook).
+      - name: Smoke check /health
+        run: |
+          url="$(sed -n 's/.*"WEBHOOK_BASE_URL": *"\([^"]*\)".*/\1/p' apps/logosmith-bot/wrangler.jsonc)"
+          if [ -z "$url" ]; then
+            echo "WEBHOOK_BASE_URL not found in wrangler.jsonc" >&2
+            exit 1
+          fi
+          body="$(curl -sfS --retry 5 --retry-delay 5 --retry-all-errors "$url/health")"
+          echo "$body"
+          echo "$body" | grep -q '"botId": *"bot-logosmith"' || {
+            echo "/health body did not contain botId bot-logosmith" >&2
+            exit 1
+          }
