@@ -1,0 +1,41 @@
+{
+  "brandName": "LogoSmith",
+  "colors": [
+    {
+      "hex": "#0c2242",
+      "share": 0.646177415738734
+    },
+    {
+      "hex": "#b78f46",
+      "share": 0.22938827026712835
+    },
+    {
+      "hex": "#c5a569",
+      "share": 0.010296523262669291
+    },
+    {
+      "hex": "#818a94",
+      "share": 0.009777545275639588
+    },
+    {
+      "hex": "#bbbebd",
+      "share": 0.008428202509362362
+    }
+  ],
+  "fonts": {
+    "heading": {
+      "family": "Roboto",
+      "category": "sans-serif",
+      "license": "See the specimen page for this family's licence.",
+      "url": "https://fonts.google.com/specimen/Roboto"
+    },
+    "body": {
+      "family": "Playfair Display",
+      "category": "serif",
+      "license": "See the specimen page for this family's licence.",
+      "url": "https://fonts.google.com/specimen/Playfair%2BDisplay"
+    },
+    "note": "Advisory recommendation only. Both families are served by Google Fonts; open each specimen page to confirm its licence before redistributing. Font choice is not covered by the warranty."
+  },
+  "licenseNote": "Colour codes are extracted from the delivered mark. The font pairing is an advisory recommendation and is not a warranted property of this delivery."
+}
