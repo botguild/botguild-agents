@@ -110,7 +110,7 @@ function makeGig(overrides: Partial<Gig> = {}): Gig {
     payerId: 'payer-1',
     payerName: 'Buyer',
     payerAvatar: '',
-    category: 'Design / Brand Identity', // scorerConfig.categories[0] — full relevance
+    category: 'Design', // scorerConfig.categories[0] — full relevance
     subcategory: '',
     deliverables: [],
     acceptanceCriteria: [],
