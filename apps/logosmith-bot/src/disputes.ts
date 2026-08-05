@@ -77,6 +77,12 @@ export interface DisputeStageRecord {
   /** The FR-15 claim key — always computable from the contract id, so it is
    *  quoted even for a stage that was never claimed and can be searched for. */
   jobKey: string;
+  /**
+   * Which round this stage belongs to: 0 for the original delivery, 1 for the
+   * FR-18 warranty rebuild. A revision claims its own job row under its own
+   * key, with its own token, spend and audit trail.
+   */
+  revision: number;
   /** `null` when D1 holds no row under that key: the stage never ran. That is
    *  a recorded fact (a paid contract never claims `single`, and a contract
    *  disputed before selection never claims `vector`), not a missing record. */
@@ -163,6 +169,14 @@ export interface DisputeSelection {
    */
   inference: DisputeInference | null;
   m1DeliveredAt: string;
+  /** 0 for the original delivery, 1 for the FR-18 warranty rebuild. */
+  revision: number;
+  /**
+   * When the pack for THIS round was delivered, or `null` if it never was. The
+   * instant the FR-18 trigger slices the thread on, so a reader can check a
+   * rebuild request against the delivery it answers.
+   */
+  packDeliveredAt: string | null;
 }
 
 export interface DisputeAuditRow {
@@ -197,7 +211,32 @@ export interface DisputeEvidence {
   stages: DisputeStageRecord[];
   concepts: DisputeConcept[];
   licenses: LicenseManifest;
+  /**
+   * The ORIGINAL selection round (revision 0), or `null` if none was opened.
+   *
+   * READ THIS WITH `revisions`. On a contract that used its FR-18 rebuild, the
+   * pack the buyer actually holds is described by the LAST entry in
+   * `revisions`, not by this field — so `supersededByRevision` points at it,
+   * and is `null` only when this genuinely is the delivery in force. The field
+   * exists so that this object cannot be read as "what they have" without the
+   * pointer being right there; it is the same reason `evidenceGaps` names what
+   * is missing instead of leaving a null to be interpreted.
+   */
   selection: DisputeSelection | null;
+  /** Which later round superseded `selection`, or `null` when none did. */
+  supersededByRevision: number | null;
+  /**
+   * Every selection round beyond the original, oldest first — the FR-18
+   * rebuilds. Empty on a contract that never used one.
+   *
+   * A SEPARATE ARRAY RATHER THAN AN OVERWRITE. `winnerSlot`, `selectionSource`
+   * and the M1 instant are the record of a decision the buyer made, and a
+   * revision that re-pointed them in place would destroy the answer to "which
+   * concept did you deliver, and who chose it" — at the one moment it is being
+   * asked. Both rounds survive in D1 (migration 0005) and both are published
+   * here.
+   */
+  revisions: DisputeSelection[];
   inputScreening: ReportInputScreening;
   gateAudit: DisputeAuditRow[];
   evidenceUrls: string[];
@@ -209,9 +248,9 @@ export interface DisputeEvidence {
 // --- Deps ---------------------------------------------------------------------
 
 export interface DisputeEvidenceDeps {
-  jobs: Pick<JobStore, 'get' | 'listGateAudit'>;
+  jobs: Pick<JobStore, 'get' | 'listGateAudit' | 'listByContract'>;
   concepts: Pick<ConceptStore, 'list'>;
-  selection: Pick<SelectionStore, 'get'>;
+  selection: Pick<SelectionStore, 'listRevisions'>;
   /** Origin the deliverable and evidence-page URLs are built from. */
   publicBaseUrl: string;
   now?: () => Date;
@@ -588,14 +627,46 @@ export async function assembleDisputeEvidence(
   const now = deps.now ?? ((): Date => new Date());
   const base = deps.publicBaseUrl.replace(/\/$/, '');
 
-  const jobKeys = await Promise.all(
-    STAGES.map(async (stage) => ({ stage, jobKey: await buildJobKey(contractId, stage) })),
-  );
-  const stageRows = await Promise.all(
-    jobKeys.map(async ({ stage, jobKey }) => ({
+  // TWO SOURCES, UNIONED, AND BOTH HALVES ARE LOAD-BEARING.
+  //
+  // The three CANONICAL keys are computed, exactly as they always were, so a
+  // contract with nothing on record still files a well-formed response quoting
+  // the claim keys a reader can search for — a stage that never ran is
+  // reported as `job: null`, which is a fact, not a hole.
+  //
+  // Then every job row the TABLE ACTUALLY HOLDS is unioned in. That is what
+  // catches an FR-18 revision: its key is derived from a different string
+  // (`buildJobKey(contractId, stage, revision)`), so a document that only
+  // computed keys would have omitted the revision's job row, its spend, its
+  // audit trail and its evidence URLs entirely. Not as wrong data — as NO
+  // data, which is the worse failure, because nothing in the document would
+  // look incorrect while the round the payer is actually disputing went
+  // unmentioned.
+  const canonical = await Promise.all(
+    STAGES.map(async (stage) => ({
       stage,
+      revision: 0,
+      jobKey: await buildJobKey(contractId, stage),
+    })),
+  );
+  const canonicalKeys = new Set(canonical.map(({ jobKey }) => jobKey));
+  const heldRows = await deps.jobs.listByContract(contractId);
+  const jobKeys = [
+    ...canonical,
+    ...heldRows
+      .filter((row) => !canonicalKeys.has(row.jobKey))
+      .map((row) => ({ stage: row.stage, revision: row.revision, jobKey: row.jobKey })),
+  ];
+  const held = new Map(heldRows.map((row) => [row.jobKey, row]));
+
+  const stageRows = await Promise.all(
+    jobKeys.map(async ({ stage, revision, jobKey }) => ({
+      stage,
+      revision,
       jobKey,
-      row: await deps.jobs.get(jobKey),
+      // Already listed for the union, so a canonical key that IS held reuses
+      // that row rather than paying for a second read of the same record.
+      row: held.get(jobKey) ?? (await deps.jobs.get(jobKey)),
     })),
   );
   const trails = await Promise.all(
@@ -604,10 +675,12 @@ export async function assembleDisputeEvidence(
       rows: await deps.jobs.listGateAudit(jobKey),
     })),
   );
-  const [conceptRows, selectionRow] = await Promise.all([
+  const [conceptRows, selectionRows] = await Promise.all([
     deps.concepts.list(contractId),
-    deps.selection.get(contractId),
+    deps.selection.listRevisions(contractId),
   ]);
+  const selectionRow = selectionRows.find((row) => row.revision === 0) ?? null;
+  const laterRounds = selectionRows.filter((row) => row.revision > 0);
 
   const { merged, raw } = mergeAuditTrail(trails);
   const inputScreening = summarizeInputScreening(raw);
@@ -644,9 +717,10 @@ export async function assembleDisputeEvidence(
     contractId,
     assembledAt: now().toISOString(),
     note: EVIDENCE_NOTE,
-    stages: stageRows.map(({ stage, jobKey, row }) => ({
+    stages: stageRows.map(({ stage, revision, jobKey, row }) => ({
       stage,
       jobKey,
+      revision,
       job: row === null ? null : toJobRecord(row),
     })),
     concepts,
@@ -660,7 +734,26 @@ export async function assembleDisputeEvidence(
             selectionSource: selectionRow.source,
             inference: inference,
             m1DeliveredAt: selectionRow.m1DeliveredAt,
+            revision: selectionRow.revision,
+            packDeliveredAt: selectionRow.packDeliveredAt,
           },
+    // The pointer, derived from the rounds actually on record rather than
+    // assumed from a count — so it names the LAST round, whatever numbering a
+    // future scheme uses.
+    supersededByRevision:
+      laterRounds.length === 0 ? null : (laterRounds[laterRounds.length - 1]?.revision ?? null),
+    revisions: laterRounds.map((row) => ({
+      state: row.state,
+      winnerSlot: row.winnerSlot,
+      selectionSource: row.source,
+      // A rebuild is triggered by a strict whole-message parse of the buyer's
+      // own words (`parseRevisionRequest`) and never by a model reading, so
+      // there is no inference to report and a non-null here would imply one.
+      inference: null,
+      m1DeliveredAt: row.m1DeliveredAt,
+      revision: row.revision,
+      packDeliveredAt: row.packDeliveredAt,
+    })),
     inputScreening,
     gateAudit: merged,
     evidenceUrls: evidenceUrlsFor(base, stageRows),

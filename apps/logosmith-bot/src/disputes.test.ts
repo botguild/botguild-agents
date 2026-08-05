@@ -15,6 +15,8 @@ import {
   buildJobKey,
   createConceptStore,
   createJobStore,
+  type JobStore,
+  type SelectionStore,
   createSelectionStore,
   type ConceptUpsert,
 } from './jobs.js';
@@ -101,6 +103,9 @@ interface Seeded {
   posts: DisputeResponseInput[];
   conceptsKey: string;
   vectorKey: string;
+  /** The real stores, so an FR-18 test can drive a second round through them. */
+  jobs: JobStore;
+  selection: SelectionStore;
 }
 
 interface SeedOptions {
@@ -222,7 +227,7 @@ async function seed(options: SeedOptions = {}): Promise<Seeded> {
     logger: silentLogger,
     now: clock,
   };
-  return { db, deps, posts, conceptsKey, vectorKey };
+  return { db, deps, posts, conceptsKey, vectorKey, jobs, selection };
 }
 
 const gapMatching = (evidence: DisputeEvidence, pattern: RegExp): string[] =>
@@ -637,6 +642,10 @@ describe('assembleDisputeEvidence — the winner and how it was chosen', () => {
       // `buyer` source would imply a model was consulted when none was.
       inference: null,
       m1DeliveredAt: NOW.toISOString(),
+      // Task 29: every selection round carries which round it is and when its
+      // pack shipped. Revision 0, no pack delivered in this fixture.
+      revision: 0,
+      packDeliveredAt: null,
     });
   });
 
@@ -1109,5 +1118,116 @@ describe('createDisputeHandlers', () => {
       routed.onContractStatusChanged(statusEvent({ contractId: CONTRACT, newStatus: 'disputed' })),
       /mcp 503/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-18 rebuilds are IN the evidence document (Task 29).
+//
+// The failure this guards is an OMISSION, not wrong data. `assembleDisputeEvidence`
+// used to COMPUTE its three stage keys from the contract id; a revision's key is
+// derived from a different string, so its job row, spend, audit trail and
+// deliverable URLs would simply not have appeared — nothing in the document
+// would look incorrect while the round the payer is actually disputing went
+// unmentioned.
+// ---------------------------------------------------------------------------
+describe('assembleDisputeEvidence — a warranty rebuild is in the record', () => {
+  async function seedWithRebuild(): Promise<Seeded> {
+    const seeded = await seed();
+    const { jobs, selection } = seeded;
+    // `seed()` already selected concept 2; this only closes that round.
+    await selection.markPackDelivered(CONTRACT);
+
+    const revisionKey = await buildJobKey(CONTRACT, 'vector', 1);
+    await jobs.claimRevision({
+      jobKey: revisionKey,
+      contractId: CONTRACT,
+      stage: 'vector',
+      revision: 1,
+      maxRevisions: 1,
+    });
+    await jobs.saveCheckpoint(revisionKey, { slots: [], spendUsd: 0.2 });
+    await jobs.recordGateAudit({
+      jobKey: revisionKey,
+      contractId: CONTRACT,
+      slot: 3,
+      gate: 'revision',
+      result: 'accepted',
+      detail: { previousWinnerSlot: 2, winnerSlot: 3 },
+    });
+    await jobs.markDelivered(revisionKey, 'delivered');
+    await selection.openRevision({
+      contractId: CONTRACT,
+      revision: 1,
+      slot: 3,
+      source: 'buyer',
+      m1DeliveredAt: NOW.toISOString(),
+    });
+    await selection.markPackDelivered(CONTRACT, 1);
+    return seeded;
+  }
+
+  it('names the rebuild’s job row, which a computed-key scan would have missed', async () => {
+    const { deps } = await seedWithRebuild();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    const revisionKey = await buildJobKey(CONTRACT, 'vector', 1);
+    const entry = evidence.stages.find((stage) => stage.jobKey === revisionKey);
+    assert.ok(entry, 'the rebuild’s job row must appear in `stages`');
+    assert.equal(entry.revision, 1);
+    assert.equal(entry.job?.spentUsd, 0.2);
+    // Inline precondition: the rebuild key really is NOT one of the three
+    // canonical keys, so its presence proves the union and not a coincidence.
+    const canonical = await Promise.all(
+      (['concepts', 'vector', 'single'] as const).map((stage) => buildJobKey(CONTRACT, stage)),
+    );
+    assert.ok(!canonical.includes(revisionKey));
+  });
+
+  it('carries the rebuild’s audit trail into the merged record', async () => {
+    const { deps } = await seedWithRebuild();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    assert.ok(
+      evidence.gateAudit.some((entry) => entry.gate === 'revision' && entry.result === 'accepted'),
+      'the rebuild decision must be in the trail the payer is shown',
+    );
+  });
+
+  it('keeps BOTH rounds and points from the superseded one at the live one', async () => {
+    const { deps } = await seedWithRebuild();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    // The original decision survives intact — this is Task 23's constraint,
+    // asserted on the published document rather than only on the table.
+    assert.equal(evidence.selection?.revision, 0);
+    assert.equal(evidence.selection?.winnerSlot, 2);
+    assert.equal(evidence.supersededByRevision, 1);
+    assert.equal(evidence.revisions.length, 1);
+    assert.equal(evidence.revisions[0]?.winnerSlot, 3);
+    assert.equal(evidence.revisions[0]?.selectionSource, 'buyer');
+    // A rebuild is triggered by a strict parse, never a model reading, so
+    // claiming an inference beside it would be an unevidenced assertion.
+    assert.equal(evidence.revisions[0]?.inference, null);
+  });
+
+  it('publishes the rebuild’s deliverables, so the payer can fetch what they hold', async () => {
+    const { deps } = await seedWithRebuild();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    const revisionKey = await buildJobKey(CONTRACT, 'vector', 1);
+    const revisionRow = (await deps.jobs.listByContract(CONTRACT)).find(
+      (row) => row.jobKey === revisionKey,
+    )!;
+    assert.ok(
+      evidence.evidenceUrls.some((url) => url.includes(`${revisionRow.deliverableToken}/pack.zip`)),
+      'the pack the buyer actually holds must be linked',
+    );
+  });
+
+  it('reports no supersession on a contract that never used its rebuild', async () => {
+    const { deps } = await seed();
+    const evidence = await assembleDisputeEvidence(deps, CONTRACT);
+    assert.equal(evidence.supersededByRevision, null);
+    assert.deepEqual(evidence.revisions, []);
+    // And the canonical three keys are still quoted, unchanged — the property
+    // that lets a reader search for a stage that never ran.
+    assert.equal(evidence.stages.length, 3);
   });
 });

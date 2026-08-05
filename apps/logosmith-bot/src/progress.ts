@@ -22,12 +22,36 @@ function escapeHtml(text: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function conceptCard(concept: ConceptRow, token: string): string {
+/**
+ * The R2 key shape `/deliverables/:token/:file` can serve — the same pair of
+ * facts `resolveDeliverable` (index.ts) checks, asserted here on the STORED
+ * pointer rather than reconstructed from parts.
+ */
+const SERVABLE_CONCEPT_KEY = /^[0-9a-f]{64}\/concept-[1-3]\.png$/;
+
+function conceptCard(concept: ConceptRow): string {
   const score = concept.ocrScore === null ? '—' : concept.ocrScore.toFixed(2);
   const verdict = concept.ocrPass ? 'PASS' : 'REGENERATING';
-  const image = concept.r2Key
-    ? `<img src="/deliverables/${token}/concept-${concept.slot}.png" alt="Concept ${concept.slot}" width="320">`
-    : '<div class="pending">rendering…</div>';
+  // THE IMAGE URL COMES FROM `r2Key`, NOT FROM THIS PAGE'S OWN TOKEN.
+  //
+  // It used to be rebuilt as `/deliverables/${pageToken}/concept-${slot}.png`,
+  // which silently assumed the concept was written under the token of whatever
+  // job the URL resolved to. That is one job row per contract's worth of
+  // assumption, and FR-18 breaks it: a revision claims its own job row with its
+  // own token, so a page reached by one token would render the OTHER round's
+  // captions — the readback verdict, the score, the model's transcription —
+  // beside these images. A false claim on the page the buyer is pointed at to
+  // CHECK OUR WORK, which is this project's highest-severity class.
+  //
+  // `r2Key` is the pointer the pipeline actually wrote next to these bytes, so
+  // it cannot disagree with them. Validated rather than trusted: it is
+  // interpolated into HTML, and a row that does not name a servable object
+  // renders as pending instead of as a broken image (Task 21's rule — assert
+  // the artifact resolves, do not pin a string).
+  const image =
+    concept.r2Key && SERVABLE_CONCEPT_KEY.test(concept.r2Key)
+      ? `<img src="/deliverables/${concept.r2Key}" alt="Concept ${concept.slot}" width="320">`
+      : '<div class="pending">rendering…</div>';
   return [
     '<article>',
     `<h2>Concept ${concept.slot} — ${escapeHtml(concept.axisId)}</h2>`,
@@ -38,13 +62,21 @@ function conceptCard(concept: ConceptRow, token: string): string {
   ].join('');
 }
 
-/** The full HTML page. */
-export function renderProgressPage(job: JobRow, concepts: ConceptRow[]): string {
-  const token = job.deliverableToken ?? '';
+/**
+ * The full HTML page.
+ *
+ * `_job` is unread now that the image URLs come from each row's own `r2Key`
+ * rather than being rebuilt from this page's token. The parameter is KEPT
+ * rather than removed: the job row is what authorizes this render — `/p/:token`
+ * resolves it and 404s when there is none — and a signature that still names it
+ * says the page is scoped to one job even though the markup no longer reads a
+ * field off it.
+ */
+export function renderProgressPage(_job: JobRow, concepts: ConceptRow[]): string {
   const body =
     concepts.length === 0
       ? '<p class="pending">Generating concepts — this page updates automatically.</p>'
-      : concepts.map((concept) => conceptCard(concept, token)).join('\n');
+      : concepts.map((concept) => conceptCard(concept)).join('\n');
 
   return `<!doctype html>
 <html lang="en">

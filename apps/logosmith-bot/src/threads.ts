@@ -389,3 +389,118 @@ export function findSelectionIn(
   }
   return { selected: null, unavailable };
 }
+
+// --- FR-18 revision requests ---------------------------------------------------
+
+// A rebuild command with the marker in FRONT: "rebuild from concept 2",
+// "switch to concept 3", "swap to 1". The optional object ("it", "the pack",
+// "this pack") sits between the verb and the preposition, where it cannot
+// separate the marker from the slot reference.
+const REBUILD_OBJECT = String.raw`(?:it|this|that|the\s+pack|this\s+pack|the\s+logo)`;
+const REBUILD_VERB = String.raw`(?:re-?build|re-?do|re-?make|re-?generate\s+the\s+pack)`;
+const SWAP_VERB = String.raw`(?:switch|change|swap)`;
+const REBUILD_LEAD = String.raw`(?:${REBUILD_VERB}(?:\s+${REBUILD_OBJECT})?(?:\s+(?:from|with|using))?|${SWAP_VERB}(?:\s+${REBUILD_OBJECT})?\s+to)`;
+
+// A rebuild command with the marker BEHIND: "use concept 2 instead",
+// "go with concept 3 instead". The trailing `instead` is what makes these
+// rebuild commands rather than ordinary selections, so it is REQUIRED — the
+// same words without it are exactly `parseSelection`'s vocabulary and must not
+// reach this parser (see the doc comment).
+const INSTEAD_LEAD = String.raw`(?:use|go\s+with|going\s+with|make\s+it|build\s+(?:it\s+)?(?:from|with))`;
+
+const REVISION_LEADING_TEMPLATE = new RegExp(
+  `^${LEAD_SEP}*(?:${POLITE}${LEAD_SEP}+)*${REBUILD_LEAD}\\s+${SLOT_REFERENCE}(?:${SEP}*${POLITE})*${SEP}*$`,
+  'i',
+);
+
+const REVISION_INSTEAD_TEMPLATE = new RegExp(
+  `^${LEAD_SEP}*(?:${POLITE}${LEAD_SEP}+)*${INSTEAD_LEAD}\\s+${SLOT_REFERENCE}\\s+instead(?:${SEP}*${POLITE})*${SEP}*$`,
+  'i',
+);
+
+/**
+ * Parses free text into the concept slot an FR-18 revision should rebuild
+ * from, or null when the text is not — in its entirety — a recognized rebuild
+ * command. Never throws, for any input, for the reasons in `parseSelection`.
+ *
+ * SAME SHAPE AS `parseSelection`, AND DELIBERATELY A SEPARATE VOCABULARY.
+ * The whole trimmed message must match; there is no rejection list and no
+ * heuristic about which mention the buyer meant. What differs is that a bare
+ * slot reference is NEVER enough — an explicit rebuild marker is required,
+ * either leading ("rebuild from concept 2", "switch to 3") or as the fixed
+ * trailing word `instead` ("use concept 2 instead").
+ *
+ * WHY THE MARKER IS MANDATORY, and it is the whole safety argument here. This
+ * parser runs on messages posted AFTER a pack was delivered, where the ordinary
+ * thing a buyer writes is approval. `parseSelection` would read "concept 2" or
+ * "we love concept 2" as a pick — correct before delivery, catastrophic after
+ * it: LogoSmith would spend a conversion and re-deliver a pack nobody asked to
+ * change, then tell the buyer it had acted on a request they never made. So
+ * every accepted form here carries a word that means *change what you built*,
+ * and the vocabularies do not overlap: `use concept 2` is a selection and NOT a
+ * revision, while `use concept 2 instead` is a revision. A test asserts that
+ * every `parseSelection` fixture returns null here.
+ *
+ * NO MODEL FALLBACK, unlike FR-9's. The asymmetry runs the other way after
+ * delivery. A missed request costs a support message and the buyer can restate
+ * it; a false positive spends real money, overwrites a delivered pack and puts
+ * a claim in the record — "you asked us to rebuild" — that the buyer's own
+ * words do not support. `inferSelection.ts` exists because 61 of 68 plausible
+ * picks returned null and every one of those buyers waited 72 hours; there is
+ * no equivalent standing cost here, because nothing is blocked on the buyer
+ * answering.
+ *
+ * THE RULE FOR EXTENDING THIS is `parseSelection`'s, plus one: the addition
+ * must contain a word that means *change what was delivered*. Adding a phrase
+ * that is merely affirmative re-opens the exact hazard above.
+ */
+export function parseRevisionRequest(text: unknown): number | null {
+  if (typeof text !== 'string') return null;
+  const normalized = text.replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ').trim();
+  if (!normalized) return null;
+
+  const match =
+    REVISION_LEADING_TEMPLATE.exec(normalized) ?? REVISION_INSTEAD_TEMPLATE.exec(normalized);
+  if (!match) return null;
+
+  // As in `parseSelection`: the template constrains the shape, not the range.
+  const slot = Number(match[1]);
+  return slot >= 1 && slot <= 3 ? slot : null;
+}
+
+/** What a scoped scan for a rebuild command found. See `findRevisionRequestIn`. */
+export interface ScopedRevisionRequest {
+  /** The first parseable rebuild command naming a concept in `allowed`, else null. */
+  requested: number | null;
+  /** The first parseable rebuild command naming a concept NOT in `allowed`, else null. */
+  unavailable: number | null;
+}
+
+/**
+ * `findSelectionIn` for rebuild commands: the first buyer message that parses
+ * as a revision request naming a delivered concept, scanning past one that
+ * names a concept that cannot be built.
+ *
+ * First-wins, for `findSelectionIn`'s reason — `claimRevision` is itself
+ * first-write-wins, so a second command after the first has been acted on
+ * changes no persisted state, and taking the first keeps this function's answer
+ * consistent with what the store will actually hold. Bot messages are excluded
+ * before parsing: this bot writes the literal phrase `rebuild from concept N`
+ * into its own M2 note, so a sender-blind scan would read our instruction back
+ * as the buyer's request.
+ */
+export function findRevisionRequestIn(
+  messages: ThreadMessage[],
+  botId: string,
+  allowed: ReadonlySet<number>,
+): ScopedRevisionRequest {
+  let unavailable: number | null = null;
+  for (const message of messages) {
+    if (message.senderId === botId) continue;
+    const slot = parseRevisionRequest(message.body ?? '');
+    if (slot === null) continue;
+    if (allowed.has(slot)) return { requested: slot, unavailable };
+    unavailable ??= slot;
+  }
+  return { requested: null, unavailable };
+}

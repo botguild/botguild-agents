@@ -2,16 +2,20 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
 import { DEFAULT_AXES } from './axes.js';
+import { parseRevisionRequest } from './threads.js';
 import {
   CONCEPT_COUNT,
   FAVICON_SIZES,
   ICO_SIZES,
   IMAGE_COST_USD,
+  MAX_CONTRACT_LIFETIME_SPEND_USD,
   MAX_REGENS_PER_SLOT,
+  MAX_REVISIONS_PER_CONTRACT,
   MAX_SPEND_USD,
   MIN_PHASH_HAMMING,
   OCR_SIMILARITY_THRESHOLD,
   RECRAFT_CREDITS_PER_USD,
+  REVISION_POLL_MAX_DAYS,
   SEED_PRICE_USD,
   VECTORIZER_CREDITS_PER_USD,
   botProfile,
@@ -101,6 +105,34 @@ describe('config', () => {
     // LogoSmith cannot win anything, whatever SEED_PRICE_USD says.
     assert.ok(floor < 1, `bid floor ${floor.toFixed(2)} exceeds the live market`);
     assert.ok(floor > 0.3, `bid floor ${floor.toFixed(2)} is below cost-to-serve`);
+  });
+
+  it('keeps MAX_CONTRACT_LIFETIME_SPEND_USD at or above the worst legitimate contract', () => {
+    // Computed from the SAME constants the pipeline spends against, not
+    // restated by hand: stage 1's full FR-5 burn, plus stage 2's one
+    // conversion, plus the one FR-18 rebuild's one conversion. A vendor
+    // reprice or an added round fails HERE with a named test rather than
+    // silently refusing a rebuild the warranty terms promise.
+    //
+    // The FR-18 rebuild adds exactly one conversion and no generation: it
+    // re-packs a concept stage 1 already paid for. If that ever stops being
+    // true, this arithmetic is the first thing that has to change.
+    const worstCase = MAX_SPEND_USD + IMAGE_COST_USD.vectorizer + IMAGE_COST_USD.vectorizer;
+    assert.ok(
+      MAX_CONTRACT_LIFETIME_SPEND_USD >= worstCase,
+      `lifetime cap $${MAX_CONTRACT_LIFETIME_SPEND_USD.toFixed(2)} is below the worst legitimate ` +
+        `contract $${worstCase.toFixed(2)} — a buyer would be refused the rebuild they were promised`,
+    );
+    // It must also stay ABOVE the per-job cap, or the per-contract bound would
+    // bite before the per-job one and make MAX_SPEND_USD unreachable.
+    assert.ok(MAX_CONTRACT_LIFETIME_SPEND_USD > MAX_SPEND_USD);
+  });
+
+  it('grants exactly one warranty rebuild', () => {
+    assert.equal(MAX_REVISIONS_PER_CONTRACT, 1);
+    // The poll's SQL pre-filter must be looser than any plausible warranty
+    // window, because the AUTHORITY is contract.warrantyExpires, not this.
+    assert.ok(REVISION_POLL_MAX_DAYS >= 14);
   });
 
   it('never lets a capped job cost more than it earns', () => {
@@ -263,21 +295,43 @@ describe('migrations', () => {
 // THE WARRANTY MUST DESCRIBE WHAT THE BOT DOES.
 //
 // `warrantyTerms` is registered with the marketplace, and the delivery notes
-// repeat it, so it is a commitment rather than copy. It used to promise that a
-// failing artifact "is re-run free of charge, plus one revision round on the
-// selected mark" — and no re-run and no revision path exists anywhere in this
-// codebase. Task 23's ruling left that path deliberately unbuilt.
+// repeat it, so it is a commitment rather than copy. This guard has now caught
+// the text being wrong in BOTH directions, which is why it is INVERTED here
+// rather than deleted: it once promised a re-run and a revision round that
+// nothing implemented, and it then denied a revision after Task 29 built one.
+// A guard that only ever checks for over-promising cannot catch the second.
 // ---------------------------------------------------------------------------
 describe('botProfile.warrantyTerms promises only what is implemented', () => {
   const terms = botProfile.warrantyTerms ?? '';
 
-  it('promises no re-run and no revision round', () => {
+  it('offers the one rebuild that IS implemented, in the words the parser reads', () => {
+    // Not a string comparison: the instructed phrase has to be one
+    // `parseRevisionRequest` actually recognizes, so the terms are checked by
+    // running the parser over the instruction the terms give. Tightening the
+    // parser without updating this sentence fails here.
+    const instruction = /`(rebuild from concept [^`]+)`/.exec(terms)?.[1];
+    assert.ok(instruction, 'the terms must quote the phrase a buyer should send');
+    assert.equal(parseRevisionRequest(instruction.replace(/\bN\b/, '2')), 2);
+    assert.match(terms, /one rebuild per contract/i);
+    assert.match(terms, /warranty window/i);
+  });
+
+  it('still promises no re-run, no new concepts and no redesign', () => {
+    // The half Task 29 deliberately did NOT build. A §9 abort delivers nothing,
+    // so there is no artifact to warrant, and every abort leg reproduces its
+    // failure on retry — see the `warrantyTerms` comment in config.ts.
     for (const unimplemented of [/re-run free of charge/i, /revision round/i, /free of charge/i]) {
       assert.doesNotMatch(terms, unimplemented);
     }
     // Stated positively too, so the absence above cannot be satisfied by an
     // empty or gutted string.
-    assert.match(terms, /does not perform revisions/i);
+    assert.match(terms, /does not generate new concepts, redesign a mark/i);
+  });
+
+  it('names no fixed warranty duration, because the platform owns that window', () => {
+    // A constant here would drift from `contract.warrantyExpires`, which is
+    // what `withinWarrantyWindow` actually enforces.
+    assert.doesNotMatch(terms, /\b\d+\s*(?:day|days|week|weeks|month|months)\b/i);
   });
 
   it('names the three things the bot actually does', () => {

@@ -29,26 +29,49 @@ export const botProfile: BotConfig = {
   // §9 wording: readback threshold, vector parse, byte-verified dimensions,
   // ZIP integrity. NEVER trademark, NEVER taste.
   //
-  // THESE TERMS DESCRIBE WHAT THE BOT DOES, AND NOTHING ELSE. They used to
-  // promise that a failing artifact "is re-run free of charge, plus one
-  // revision round on the selected mark" — and no re-run and no revision path
-  // exists anywhere in this codebase (`grep -rn "revision"` returned only the
-  // promise itself). A warranty registered with the marketplace is a
-  // commitment, so it now states the three things that ARE implemented:
-  // pre-delivery gating, a permanent evidence record, and a dispute response
-  // built from that record. See the report accompanying this branch — building
-  // a real re-run/revision path is a product decision, not a copy fix, and
-  // reverting to the old wording without building it would be a false promise.
+  // THESE TERMS DESCRIBE WHAT THE BOT DOES, AND NOTHING ELSE. A warranty
+  // registered with the marketplace is a commitment, and this text has now been
+  // wrong in BOTH directions, so it is worth recording how it got here.
+  //
+  // It once promised that a failing artifact "is re-run free of charge, plus
+  // one revision round on the selected mark" while `grep -rn "revision"`
+  // returned only the promise itself. That was stripped rather than left
+  // unhonourable. Task 29 then built the part that is coherent to build, and
+  // ONLY that part — so the sentence about revisions is now an entitlement with
+  // an implementation (`resolveRevisionForContract` in sweeps.ts) rather than
+  // either a false promise or a silence.
+  //
+  // WHAT IT DELIBERATELY STILL DOES NOT PROMISE, and why:
+  //   - No re-run when nothing was delivered. §9 non-convergence, a winner-gate
+  //     abort and a pack-gate abort all deliver nothing, so there is no
+  //     delivered artifact to warrant; and every one of those failures is
+  //     deterministic or negatively correlated on retry (the readback gate is
+  //     driven by the brand name, so nine more attempts against the same string
+  //     is the worst bet in the system). The abort notes offer the three
+  //     remedies that DO work — see `WHAT_YOU_CAN_DO_NEXT` in pipeline.ts.
+  //   - No new concepts and no redesign. The revision rebuilds the pack from a
+  //     concept ALREADY generated and gated for this buyer. Regenerating would
+  //     cost up to the whole FR-5 budget again — 1.0x-3.9x the entire margin of
+  //     the job it is fixing, at the $1 anchor — and would also have to migrate
+  //     the `concepts` primary key, destroying the delivery evidence the
+  //     dispute document reads (Task 23's ruling).
+  //   - No fixed day count. The window is the PLATFORM's `warrantyExpires` on
+  //     the contract, not a constant in this file, so the terms cannot drift
+  //     from the window the marketplace actually enforces.
   warrantyTerms:
     'Every check named here runs BEFORE delivery, and an artifact that fails one is not ' +
     'shipped at all: the lettering of each delivered concept must read back against your brand ' +
     'name at the stated OCR threshold, logo.svg must pass a true-vector parse, every image must ' +
     'be at its exact contracted pixel dimensions, and the ZIP must be complete and readable. ' +
-    'For 14 days after delivery the evidence page, the JSON validation report and the per-image ' +
-    'license manifest remain available, recording every measurement behind those claims; if you ' +
-    'raise a dispute, LogoSmith files that complete record with the platform. LogoSmith does ' +
-    'not perform revisions or redesigns, and cannot cancel or refund a contract itself. ' +
-    'Trademark clearance is NOT performed and NOT warranted.',
+    'Within this contract’s warranty window you may change your mind once about which concept ' +
+    'the pack is built from: reply in the contract thread with `rebuild from concept N` and ' +
+    'LogoSmith rebuilds and re-delivers the full pack from another concept it already generated ' +
+    'and gated for you, free. That is one rebuild per contract. For the same window the ' +
+    'evidence page, the JSON validation report and the per-image license manifest remain ' +
+    'available, recording every measurement behind those claims; if you raise a dispute, ' +
+    'LogoSmith files that complete record with the platform. LogoSmith does not generate new ' +
+    'concepts, redesign a mark, or change a brief after delivery, and it cannot cancel or ' +
+    'refund a contract itself. Trademark clearance is NOT performed and NOT warranted.',
 };
 
 // --- Gig scoring -------------------------------------------------------------
@@ -231,6 +254,57 @@ export const MAX_REGENS_PER_SLOT = 2;
 export const MAX_SPEND_USD = 0.6;
 export const FREE_GIGS_PER_PAYER = 3;
 export const FREE_GIG_WINDOW_DAYS = 30;
+
+// --- FR-18 warranty revision --------------------------------------------------
+
+/**
+ * Revision ROUNDS a contract may ever use. Enforced structurally by
+ * `JobStore.claimRevision`'s single INSERT, never by a count-then-write.
+ */
+export const MAX_REVISIONS_PER_CONTRACT = 1;
+
+/**
+ * Every dollar this bot may ever spend on ONE contract, across every stage and
+ * every revision.
+ *
+ * WHY A SECOND CAP AT ALL, when `MAX_SPEND_USD` exists. That cap is per JOB
+ * ROW: it lives in `checkpoint.spendUsd`, which a new claim key resets to zero.
+ * That is CORRECT for a revision — a buyer is entitled to a whole budget, not
+ * the remainder of a spent one — and it is exactly why a second bound is
+ * needed. This branch has already shipped two independently-correct bounds that
+ * composed into an unmetered loop ($5.60 realized against a $1 anchor, ledger
+ * reading $0.60), because each was right about its own axis and nothing
+ * measured the total. This measures the total.
+ *
+ * DERIVED, NOT PICKED, from the same constants `MAX_SPEND_USD` is derived from
+ * — stage 1's full FR-5 burn, plus stage 2's one conversion, plus the one
+ * revision's one conversion:
+ *   0.60 + IMAGE_COST_USD.vectorizer + IMAGE_COST_USD.vectorizer = $1.00
+ * `config.test.ts` recomputes that from the constants and asserts this covers
+ * it, so a vendor reprice or an added round fails a named test rather than
+ * silently truncating a legitimate revision.
+ *
+ * Compared with `>`, NOT `>=`, for the reason `sweepParkedJobs` uses `>`: a
+ * contract that spends its full legitimate allowance lands EXACTLY on this
+ * figure, and `>=` would refuse the revision the terms promise it.
+ */
+export const MAX_CONTRACT_LIFETIME_SPEND_USD = 1.0;
+
+/**
+ * How far back the FR-18 revision poll looks for delivered packs.
+ *
+ * NOT THE WARRANTY WINDOW. The authority on whether a contract is still under
+ * warranty is the platform's own `contract.warrantyExpires`, checked per
+ * contract before anything is spent — a constant here would drift from the
+ * window the marketplace actually enforces, and the PRD's "14 days" is a
+ * description of that window, not a second source of it. This exists only to
+ * keep the SQL pre-filter bounded, so it is deliberately LOOSER than any
+ * plausible warranty and a contract admitted by it can still be refused.
+ */
+export const REVISION_POLL_MAX_DAYS = 30;
+
+/** The FR-17 audit gate the revision path records under (sweeps writes, disputes reads). */
+export const REVISION_GATE = 'revision';
 
 /** Failed moderation attempts before the buyer gets a thread status message (FR-2). */
 export const MODERATION_ATTEMPTS_BEFORE_NOTICE = 3;

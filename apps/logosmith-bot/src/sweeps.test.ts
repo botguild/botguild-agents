@@ -27,13 +27,19 @@ import {
   type JobStore,
   type SelectionStore,
 } from './jobs.js';
-import { findSelection, parseSelection, type ThreadMessage } from './threads.js';
+import {
+  findSelection,
+  parseRevisionRequest,
+  parseSelection,
+  type ThreadMessage,
+} from './threads.js';
 import {
   MAX_SELECTION_INFERENCES_PER_CONTRACT,
   type SelectionInference,
 } from './inferSelection.js';
 import {
   HAIKU_MODEL_ID,
+  MAX_CONTRACT_LIFETIME_SPEND_USD,
   MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
   SELECTION_TIMEOUT_HOURS,
@@ -42,6 +48,7 @@ import {
 import {
   decideDefaultSelection,
   maybePropose,
+  resolveRevisionForContract,
   resolveSelectionForContract,
   runDailySweep,
   runFifteenMinuteSweep,
@@ -172,6 +179,13 @@ interface Harness {
   breakNegotiation: { value: boolean };
   /** Contract ids whose thread read throws, standing in for a platform 5xx. */
   failThreadsFor: Set<string>;
+  /**
+   * What `getContract` returns, by contract id. EMPTY BY DEFAULT, and the
+   * client still throws for an unscripted id exactly as it always did — so
+   * every pre-existing test keeps proving that its path never calls
+   * `getContract`, and only the FR-18 tests, which must call it, script one.
+   */
+  contracts: Map<string, { status: string; warrantyExpires: string }>;
   /** Every gig handed to the prose-brief extractor, in order. */
   extractorCalls: ProseGig[];
   /** What the scripted extractor returns; a valid brief by default. */
@@ -209,6 +223,7 @@ async function makeHarness(): Promise<Harness> {
   const fetchedUrls: string[] = [];
   const breakNegotiation = { value: false };
   const failThreadsFor = new Set<string>();
+  const contracts = new Map<string, { status: string; warrantyExpires: string }>();
 
   // The prose-brief extractor stands in for a Haiku call. It succeeds by
   // default so the proposer-routing tests keep testing routing, and records
@@ -246,8 +261,10 @@ async function makeHarness(): Promise<Harness> {
       proposalsSent.push({ gigId, draft, proposer: tag });
       return { proposalId: `prop-${gigId}` };
     },
-    async getContract(): Promise<never> {
-      throw new Error('getContract: not scripted for these tests');
+    async getContract(contractId: string): Promise<unknown> {
+      const scripted = contracts.get(contractId);
+      if (!scripted) throw new Error('getContract: not scripted for these tests');
+      return { id: contractId, ...scripted };
     },
     async deliverMilestone(): Promise<never> {
       throw new Error('deliverMilestone: not scripted for these tests');
@@ -374,6 +391,7 @@ async function makeHarness(): Promise<Harness> {
     fetchedUrls,
     breakNegotiation,
     failThreadsFor,
+    contracts,
     extractorCalls,
     extractorResult,
     inferenceCalls,
@@ -559,6 +577,9 @@ describe('selection poll', () => {
       // pick beat the default rule rather than coinciding with it.
       source: 'buyer',
       m1DeliveredAt: m1At.toISOString(),
+      // Task 29 widened SelectionRow: which round, and when its pack shipped.
+      revision: 0,
+      packDeliveredAt: null,
     });
     assert.deepEqual(h.queueSent, [
       { contractId: 'c-buyer', jobKey: vectorJobKey, stage: 'vector' },
@@ -958,6 +979,9 @@ describe('selection fallback — an inferred pick', () => {
       winnerSlot: 2,
       source: 'inferred',
       m1DeliveredAt: m1At.toISOString(),
+      // Task 29 widened SelectionRow: which round, and when its pack shipped.
+      revision: 0,
+      packDeliveredAt: null,
     });
     assert.deepEqual(h.queueSent, [
       { contractId: 'c-infer', jobKey: await buildJobKey('c-infer', 'vector'), stage: 'vector' },
@@ -1804,3 +1828,379 @@ describe('15-minute sweep step isolation', () => {
     assert.equal((await h.selection.get('c-ok'))?.winnerSlot, 2);
   });
 });
+
+// ===============================================================================
+// FR-18 — the warranty rebuild (Task 29)
+//
+// THE PROPERTY THESE TESTS EXIST FOR, above every other: a rebuild must not
+// destroy the record of what was originally delivered. Task 23 ruled that any
+// revision scheme has to preserve the `concepts` and `gate_audit` rows, because
+// `assembleDisputeEvidence` reads them and losing them at the moment of a
+// dispute is the worst possible time. The shipped design walks around the
+// collision instead of migrating over it — a rebuild re-packs a concept that
+// already exists, so `concepts` is never written — and the first test below is
+// what holds that to be true rather than merely intended.
+// ===============================================================================
+
+const CONTRACT_UNDER_WARRANTY = {
+  status: 'under-warranty',
+  warrantyExpires: '2026-08-20T00:00:00.000Z',
+};
+
+/** A contract whose pack was delivered from `winner`, ready for a rebuild request. */
+async function seedDeliveredPack(
+  h: Harness,
+  args: { contractId: string; winner: number; delivered?: number[]; packAt: Date },
+): Promise<{ conceptsJobKey: string; vectorJobKey: string }> {
+  const { contractId, winner, packAt } = args;
+  const delivered = args.delivered ?? [1, 2, 3];
+  const m1At = new Date(packAt.getTime() - 2 * 60 * 60 * 1000);
+  const conceptsJobKey = await seedDeliveredM1(h, {
+    contractId,
+    delivered,
+    scores: Object.fromEntries(delivered.map((slot) => [slot, 0.9])),
+    m1At,
+  });
+  const vectorJobKey = await buildJobKey(contractId, 'vector');
+  await h.at(packAt, async () => {
+    // `seedDeliveredM1` books $1.20 of concept-stage spend — a figure sized for
+    // the PRD-era $2.50 cap, and one that on its own exceeds today's whole
+    // per-contract lifetime cap. Rescaled here to a realistic stage-1 burn
+    // ($0.20: 2 x Ideogram + 1 x Recraft, one attempt each) so these tests
+    // exercise the rebuild rather than the spend refusal. The refusal has its
+    // own test, which pushes the ledger over deliberately.
+    const stageOne = (await h.jobs.get(conceptsJobKey))!;
+    await h.jobs.saveCheckpoint(conceptsJobKey, { ...stageOne.checkpoint!, spendUsd: 0.2 });
+    await h.selection.select(contractId, winner, 'buyer');
+    await h.jobs.claim(vectorJobKey, contractId, 'vector');
+    await h.jobs.saveCheckpoint(vectorJobKey, { slots: [], spendUsd: 0.2 });
+    await h.jobs.markDelivered(vectorJobKey, 'delivered');
+    await h.selection.markPackDelivered(contractId);
+  });
+  h.contracts.set(contractId, CONTRACT_UNDER_WARRANTY);
+  return { conceptsJobKey, vectorJobKey };
+}
+
+const REBUILD_AT = new Date(BASE.getTime() + 24 * 60 * 60 * 1000);
+const PACK_AT = new Date(BASE.getTime() + 60 * 60 * 1000);
+
+describe('FR-18 warranty rebuild — the evidence of the first delivery survives it', () => {
+  it('never writes to `concepts`: every original row is byte-identical afterwards', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-rev', winner: 1, packAt: PACK_AT });
+
+    const before = await h.concepts.list('c-rev');
+    // Fixture precondition, inline: there really are three rows to lose.
+    assert.equal(before.length, 3);
+
+    h.threads.set('c-rev', [
+      buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+    ]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-rev'));
+
+    const after = await h.concepts.list('c-rev');
+    // deepEqual on the WHOLE row set, not a spot check: the Task 23 collision
+    // rewrote every column of every row, so anything less than total equality
+    // would let a partial overwrite through.
+    assert.deepEqual(after, before, 'a rebuild must not touch the concepts table');
+  });
+
+  it('leaves the original selection round readable beside the new one', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-rev', winner: 1, packAt: PACK_AT });
+    h.threads.set('c-rev', [
+      buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+    ]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-rev'));
+
+    const rounds = await h.selection.listRevisions('c-rev');
+    assert.equal(rounds.length, 2);
+    // The original still says slot 1 was chosen and that its pack shipped —
+    // the two facts a dispute over "which one did you deliver" turns on.
+    assert.equal(rounds[0]!.revision, 0);
+    assert.equal(rounds[0]!.winnerSlot, 1);
+    assert.equal(rounds[0]!.state, 'pack_delivered');
+    assert.ok(rounds[0]!.packDeliveredAt, 'the original delivery instant must survive');
+    assert.equal(rounds[1]!.revision, 1);
+    assert.equal(rounds[1]!.winnerSlot, 3);
+    assert.equal(rounds[1]!.state, 'winner_selected');
+  });
+
+  it('claims stage 2 again under a key that does not collide with the original', async () => {
+    const h = await makeHarness();
+    const { vectorJobKey } = await seedDeliveredPack(h, {
+      contractId: 'c-rev',
+      winner: 1,
+      packAt: PACK_AT,
+    });
+    h.threads.set('c-rev', [
+      buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+    ]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-rev'));
+
+    const revisionKey = await buildJobKey('c-rev', 'vector', 1);
+    assert.notEqual(revisionKey, vectorJobKey);
+    // The original stage-2 row is untouched and still delivered.
+    const originalRow = (await h.jobs.get(vectorJobKey))!;
+    assert.equal(originalRow.status, 'delivered');
+    assert.equal(originalRow.revision, 0);
+    // The revision has its own row, its own token and a FRESH spend ledger.
+    const revisionRow = (await h.jobs.get(revisionKey))!;
+    assert.equal(revisionRow.revision, 1);
+    assert.equal(revisionRow.spentUsd, 0);
+    assert.notEqual(revisionRow.deliverableToken, originalRow.deliverableToken);
+    assert.deepEqual(h.queueSent.at(-1), {
+      contractId: 'c-rev',
+      jobKey: revisionKey,
+      stage: 'vector',
+    });
+  });
+});
+
+describe('FR-18 warranty rebuild — what it refuses, and what it costs to refuse', () => {
+  const rebuildOnce = async (h: Harness, contractId: string, body: string): Promise<void> => {
+    h.threads.set(contractId, [buyerSays('m1', body, new Date(PACK_AT.getTime() + MINUTE))]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, contractId));
+  };
+
+  it('spends nothing on an ordinary thank-you, which is the whole reason for a separate parser', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-thanks', winner: 1, packAt: PACK_AT });
+    // Fixture precondition, inline and load-bearing: the strict SELECTION
+    // parser DOES read this as a pick of concept 2. If the revision path used
+    // that parser, this message would buy a conversion and re-deliver a pack
+    // nobody asked to change.
+    assert.equal(parseSelection('concept 2'), 2);
+    await rebuildOnce(h, 'c-thanks', 'concept 2');
+
+    assert.equal(h.queueSent.length, 0, 'an approval must not trigger a rebuild');
+    assert.equal(await h.selection.get('c-thanks', 1), null);
+    assert.deepEqual(h.messagesSent, []);
+  });
+
+  it('keeps the entitlement when the buyer names an undelivered concept, and says so', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, {
+      contractId: 'c-partial',
+      winner: 1,
+      delivered: [1, 2],
+      packAt: PACK_AT,
+    });
+    await rebuildOnce(h, 'c-partial', 'rebuild from concept 3');
+
+    assert.equal(h.queueSent.length, 0);
+    assert.equal(await h.selection.get('c-partial', 1), null);
+    const note = h.messagesSent.at(-1)!.body;
+    assert.match(note, /free rebuild has NOT been used/);
+    assert.match(note, /concept 1 and concept 2/);
+  });
+
+  it('keeps the entitlement when the buyer asks for the concept they already have', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-same', winner: 2, packAt: PACK_AT });
+    await rebuildOnce(h, 'c-same', 'rebuild from concept 2');
+
+    assert.equal(h.queueSent.length, 0);
+    assert.equal(await h.selection.get('c-same', 1), null);
+    assert.match(h.messagesSent.at(-1)!.body, /already have IS built from concept 2/);
+  });
+
+  it('refuses once the platform’s warranty window has closed', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-expired', winner: 1, packAt: PACK_AT });
+    h.contracts.set('c-expired', {
+      status: 'under-warranty',
+      // Expired one hour before the request is processed.
+      warrantyExpires: new Date(REBUILD_AT.getTime() - 60 * 60 * 1000).toISOString(),
+    });
+    await rebuildOnce(h, 'c-expired', 'rebuild from concept 3');
+
+    assert.equal(h.queueSent.length, 0);
+    assert.equal(await h.selection.get('c-expired', 1), null);
+  });
+
+  it('refuses on a contract state where a free rebuild is not appropriate', async () => {
+    for (const status of ['disputed', 'cancelled', 'refunded', 'warranty-expired']) {
+      const h = await makeHarness();
+      await seedDeliveredPack(h, { contractId: 'c-bad', winner: 1, packAt: PACK_AT });
+      h.contracts.set('c-bad', { ...CONTRACT_UNDER_WARRANTY, status });
+      await rebuildOnce(h, 'c-bad', 'rebuild from concept 3');
+      assert.equal(h.queueSent.length, 0, `status ${status} must not get a free rebuild`);
+    }
+  });
+
+  it('fails CLOSED when the contract records no readable warranty expiry', async () => {
+    // The alternative is a constant of our own, which would drift from the
+    // window the marketplace enforces. Not spending is the safe direction.
+    for (const warrantyExpires of ['', 'not-a-date', '12345']) {
+      const h = await makeHarness();
+      await seedDeliveredPack(h, { contractId: 'c-nowin', winner: 1, packAt: PACK_AT });
+      h.contracts.set('c-nowin', { status: 'under-warranty', warrantyExpires });
+      await rebuildOnce(h, 'c-nowin', 'rebuild from concept 3');
+      assert.equal(h.queueSent.length, 0, `expiry ${JSON.stringify(warrantyExpires)} must refuse`);
+    }
+  });
+
+  it('ignores a rebuild command posted BEFORE the pack it claims to answer', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-early', winner: 1, packAt: PACK_AT });
+    h.threads.set('c-early', [
+      buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() - MINUTE)),
+    ]);
+    // Inline precondition: the message really IS a rebuild command, so the
+    // slice is the only thing preventing it from taking effect.
+    assert.equal(parseRevisionRequest('rebuild from concept 3'), 3);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-early'));
+
+    assert.equal(h.queueSent.length, 0);
+  });
+
+  it('never reads its own instruction back as the buyer’s request', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-echo', winner: 1, packAt: PACK_AT });
+    h.threads.set('c-echo', [
+      botSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+    ]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-echo'));
+
+    assert.equal(h.queueSent.length, 0, 'the bot’s own M2 note must not trigger a rebuild');
+  });
+});
+
+describe('FR-18 warranty rebuild — the bounds', () => {
+  it('grants exactly one rebuild per contract, however many are requested', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-cap', winner: 1, packAt: PACK_AT });
+    h.threads.set('c-cap', [
+      buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+      buyerSays('m2', 'rebuild from concept 2', new Date(PACK_AT.getTime() + 2 * MINUTE)),
+    ]);
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-cap'));
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-cap'));
+    await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, 'c-cap'));
+
+    const rounds = await h.selection.listRevisions('c-cap');
+    assert.equal(rounds.length, 2, 'the original plus exactly one rebuild');
+    assert.equal(h.queueSent.length, 1, 'stage 2 is re-enqueued once, not once per sweep');
+    // First-wins, consistent with `claimRevision` being first-write-wins.
+    assert.equal(rounds[1]!.winnerSlot, 3);
+  });
+
+  it('holds the cap at concurrency, not just sequentially', async () => {
+    // The free-gig quota's C1 defect measured 12 concurrent attempts defeating
+    // a cap of 3 by exactly the attacker's concurrency. This is the same shape,
+    // driven through the same single-statement idiom.
+    const h = await makeHarness();
+    const granted = await Promise.all(
+      Array.from({ length: 12 }, async (_, index) =>
+        h.jobs.claimRevision({
+          jobKey: `key-${index}`,
+          contractId: 'c-race',
+          stage: 'vector',
+          revision: 1,
+          maxRevisions: 1,
+        }),
+      ),
+    );
+    assert.equal(
+      granted.filter((result) => result.granted).length,
+      1,
+      'twelve concurrent claims must yield exactly one revision',
+    );
+  });
+
+  it('is idempotent for its own key, so a queue retry resumes rather than being refused', async () => {
+    const h = await makeHarness();
+    const args = {
+      jobKey: 'key-a',
+      contractId: 'c-idem',
+      stage: 'vector' as const,
+      revision: 1,
+      maxRevisions: 1,
+    };
+    assert.deepEqual(await h.jobs.claimRevision(args), {
+      granted: true,
+      reason: 'fresh-claim',
+    });
+    assert.deepEqual(await h.jobs.claimRevision(args), {
+      granted: true,
+      reason: 'already-held',
+    });
+    // A DIFFERENT key on the same contract is the cap case, not a retry.
+    assert.deepEqual(await h.jobs.claimRevision({ ...args, jobKey: 'key-b' }), {
+      granted: false,
+      reason: 'cap-reached',
+    });
+  });
+
+  it('refuses a rebuild once the contract’s LIFETIME spend has passed its cap', async () => {
+    const h = await makeHarness();
+    const { vectorJobKey } = await seedDeliveredPack(h, {
+      contractId: 'c-spent',
+      winner: 1,
+      packAt: PACK_AT,
+    });
+    // Push the contract past the lifetime cap. The per-job MAX_SPEND_USD ledger
+    // cannot see this: the revision would claim a NEW job row whose own
+    // spendUsd starts at zero, which is exactly why the lifetime bound exists.
+    await h.jobs.saveCheckpoint(vectorJobKey, {
+      slots: [],
+      // 0.2 (concepts) + this = just over the cap. Asserted inline so the test
+      // cannot pass because some other fixture value drifted over the line.
+      spendUsd: MAX_CONTRACT_LIFETIME_SPEND_USD - 0.2 + 0.01,
+    });
+    const lifetime = (await h.jobs.listByContract('c-spent')).reduce((t, r) => t + r.spentUsd, 0);
+    assert.ok(
+      lifetime > MAX_CONTRACT_LIFETIME_SPEND_USD,
+      `fixture must exceed the cap, measured ${lifetime}`,
+    );
+    await rebuildRequest(h, 'c-spent');
+
+    assert.equal(h.queueSent.length, 0);
+    assert.equal(await h.selection.get('c-spent', 1), null);
+    assert.match(h.messagesSent.at(-1)!.body, /spending limit LogoSmith holds itself to/);
+  });
+
+  it('still grants a rebuild to a contract sitting EXACTLY on the lifetime cap', async () => {
+    // `>` not `>=`. A contract that spent its full legitimate allowance lands
+    // exactly on the figure, and refusing it would break the promise the terms
+    // make — the same boundary `sweepParkedJobs` gets right for MAX_SPEND_USD.
+    const h = await makeHarness();
+    const { vectorJobKey } = await seedDeliveredPack(h, {
+      contractId: 'c-exact',
+      winner: 1,
+      packAt: PACK_AT,
+    });
+    await h.jobs.saveCheckpoint(vectorJobKey, {
+      slots: [],
+      spendUsd: MAX_CONTRACT_LIFETIME_SPEND_USD - 0.2,
+    });
+    const lifetime = (await h.jobs.listByContract('c-exact')).reduce((t, r) => t + r.spentUsd, 0);
+    assert.equal(lifetime, MAX_CONTRACT_LIFETIME_SPEND_USD, 'fixture must land EXACTLY on the cap');
+    await rebuildRequest(h, 'c-exact');
+
+    assert.equal(h.queueSent.length, 1, 'exactly on the cap must still be granted');
+  });
+
+  it('polls daily, and drops a contract that has used its rebuild', async () => {
+    const h = await makeHarness();
+    await seedDeliveredPack(h, { contractId: 'c-poll', winner: 1, packAt: PACK_AT });
+    const deliveredAfter = new Date(PACK_AT.getTime() - MINUTE);
+    assert.equal((await h.selection.listAwaitingRevision(deliveredAfter)).length, 1);
+
+    await rebuildRequest(h, 'c-poll');
+    assert.equal(
+      (await h.selection.listAwaitingRevision(deliveredAfter)).length,
+      0,
+      'a contract that used its rebuild must leave the poll entirely',
+    );
+  });
+});
+
+/** Post the standard rebuild command and run one resolution pass. */
+async function rebuildRequest(h: Harness, contractId: string): Promise<void> {
+  h.threads.set(contractId, [
+    buyerSays('m1', 'rebuild from concept 3', new Date(PACK_AT.getTime() + MINUTE)),
+  ]);
+  await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, contractId));
+}

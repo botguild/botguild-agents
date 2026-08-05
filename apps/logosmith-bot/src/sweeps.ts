@@ -38,8 +38,12 @@ import { parseFaviconBrief, resolveBrief } from './brief.js';
 import {
   BRIEF_OUTAGE_PARK_REASON,
   HAIKU_MODEL_ID,
+  MAX_CONTRACT_LIFETIME_SPEND_USD,
+  MAX_REVISIONS_PER_CONTRACT,
   MAX_SPEND_USD,
   PARKED_GIVE_UP_HOURS,
+  REVISION_GATE,
+  REVISION_POLL_MAX_DAYS,
   SELECTION_GATE,
   SELECTION_INFERENCE_SELECTED,
   SELECTION_TIMEOUT_HOURS,
@@ -58,7 +62,12 @@ import {
   type SelectionStore,
 } from './jobs.js';
 import { MAX_SELECTION_INFERENCES_PER_CONTRACT, type SelectionInferrer } from './inferSelection.js';
-import { createThreadReader, findSelectionIn, type ThreadMessage } from './threads.js';
+import {
+  createThreadReader,
+  findRevisionRequestIn,
+  findSelectionIn,
+  type ThreadMessage,
+} from './threads.js';
 import type { FetchLike, JobMessage, SelectionSource } from './types.js';
 
 /** Structural queue seam — env.JOBS (`Queue<JobMessage>`) satisfies this shape. */
@@ -800,6 +809,320 @@ async function pollSelections(s: SweepServices): Promise<void> {
   }
 }
 
+// --- FR-18 warranty revision ---------------------------------------------------
+
+/** The one revision a contract may ever have. */
+const REVISION_NUMBER = 1;
+
+const REVISION_ACCEPTED_RESULT = 'accepted';
+const REVISION_UNBUILDABLE_RESULT = 'unbuildable-pick';
+const REVISION_ALREADY_BUILT_RESULT = 'already-built';
+const REVISION_REFUSED_RESULT = 'refused';
+
+/**
+ * Contract states in which a free rebuild is appropriate, as an ALLOW-LIST.
+ *
+ * The recurring lesson of this branch, applied where it would otherwise be
+ * tempting to write `status !== 'disputed'`. The states that must NOT get a
+ * rebuild are the ones where spending is wrong or the money is already gone —
+ * `disputed` (the evidence path owns that contract, and rebuilding mid-dispute
+ * changes the artifact under adjudication), `cancelled`, `refunded`,
+ * `warranty-expired` — and a blocklist of those four fails OPEN on the next
+ * status this platform invents. Enumerating the states where the work happened
+ * and the contract is still alive fails closed instead.
+ */
+const REBUILDABLE_CONTRACT_STATUSES: ReadonlySet<string> = new Set([
+  'active',
+  'delivered',
+  'acceptance-pending',
+  'accepted',
+  'completed',
+  'under-warranty',
+]);
+
+/**
+ * Is this contract still inside the warranty window the PLATFORM records?
+ *
+ * FAILS CLOSED ON AN UNREADABLE `warrantyExpires`, and that is deliberate
+ * rather than defensive. The alternative is a constant in our own config, which
+ * would drift from the window the marketplace actually enforces and could have
+ * us rebuilding for free on a contract whose warranty closed weeks ago. If this
+ * field comes back empty or non-ISO on real contracts, FR-18 never fires — a
+ * visible, loggable, correctable failure, where the opposite error is invisible
+ * spending. `Date.parse` leniency is closed the same way `parseInstant` closes
+ * it for the FR-9 slice: a bare number like `12345` parses to year 12345.
+ */
+function withinWarrantyWindow(
+  contract: { status?: string; warrantyExpires?: string },
+  now: Date,
+): { ok: true } | { ok: false; reason: string } {
+  const status = contract.status ?? '';
+  if (!REBUILDABLE_CONTRACT_STATUSES.has(status)) {
+    return { ok: false, reason: `contract status ${status || '(none)'} is not rebuildable` };
+  }
+  const expires = contract.warrantyExpires;
+  if (typeof expires !== 'string' || !expires.includes('T')) {
+    return { ok: false, reason: 'the contract records no readable warranty expiry' };
+  }
+  const at = Date.parse(expires);
+  if (!Number.isFinite(at)) {
+    return { ok: false, reason: 'the contract records no readable warranty expiry' };
+  }
+  return at > now.getTime()
+    ? { ok: true }
+    : { ok: false, reason: 'the warranty window has closed' };
+}
+
+/** Post `body` once per contract, deduped through the FR-17 revision trail. */
+async function noteRevisionOnce(
+  deps: SelectionResolutionDeps,
+  args: { contractId: string; jobKey: string; result: string; body: string; detail?: unknown },
+): Promise<void> {
+  const trail = await deps.jobs.listGateAudit(args.jobKey, REVISION_GATE);
+  if (trail.some((entry) => entry.result === args.result)) return;
+  // Message first, marker second — `noteUnselectablePick`'s ordering, for its
+  // reason: a failed send must leave no marker, so the buyer is not silently
+  // written off. One duplicate message is the cheaper failure.
+  await deps.client.sendMessage(args.contractId, args.body);
+  await deps.jobs.recordGateAudit({
+    jobKey: args.jobKey,
+    contractId: args.contractId,
+    gate: REVISION_GATE,
+    result: args.result,
+    detail: args.detail,
+  });
+}
+
+/**
+ * FR-18: rebuild the brand pack from another concept the buyer already has.
+ *
+ * WHAT THIS IS AND IS NOT. It re-runs stage 2 — vectorize, pack, gates, deliver
+ * — against a DIFFERENT already-generated concept. It does not generate,
+ * moderate or re-gate anything, and `concepts` is read-only on the whole path,
+ * which is what keeps Task 23's ruling satisfied without moving that table's
+ * primary key: the evidence of the original delivery cannot be overwritten by
+ * a revision that never writes to it.
+ *
+ * THE TRIGGER IS THE CONTRACT THREAD because that is what FR-18 specifies
+ * ("via the contract thread"). The platform does carry a first-class
+ * `WarrantyClaim` with its own status lifecycle, and it is the better trigger
+ * on paper — but `AgentClient` exposes no warranty methods (proven: `tsc` says
+ * `Property 'listWarranties' does not exist on type 'AgentClient'`), so wiring
+ * it would mean adding a cross-package REST method whose live shape nobody here
+ * has ever seen, at the exact seam the whole feature depends on. That is the
+ * unverified-vendor-contract risk this branch has paid for twice. The thread
+ * reader is already live-proven, so the specified trigger is also the safe one.
+ * If warranty claims later become readable, this function is the one to
+ * re-point; nothing else changes.
+ *
+ * ORDER IS LOAD-BEARING. Every refusal happens before `claimRevision`, so a
+ * refused request costs no entitlement; the claim happens before
+ * `openRevision`, so the CAP is taken before any state implies a rebuild is
+ * under way; and the enqueue happens last, so a crash anywhere leaves a state
+ * the next sweep re-derives rather than one it has to unwind. A claim taken
+ * whose selection row failed to write is recovered on the next pass —
+ * `claimRevision` answers `already-held` for its own key and the row is written
+ * then.
+ */
+export async function resolveRevisionForContract(
+  deps: SelectionResolutionDeps,
+  contractId: string,
+): Promise<void> {
+  const { jobs, selection, client, queue, botId } = deps;
+  const log = deps.logger.child({ contractId, revision: REVISION_NUMBER });
+  const now = clockOf(deps)();
+
+  const original = await selection.get(contractId, 0);
+  if (!original || original.state !== 'pack_delivered' || original.packDeliveredAt === null) {
+    log.debug({ state: original?.state ?? null }, 'revision skipped: no delivered pack');
+    return;
+  }
+  // Cheap short-circuit only. `claimRevision`'s single statement is the
+  // authority on the cap; this just keeps a finished contract from paying for a
+  // `getContract` and a thread read on every pass.
+  if ((await selection.get(contractId, REVISION_NUMBER)) !== null) {
+    log.debug('revision skipped: this contract has already used its rebuild');
+    return;
+  }
+
+  const revisionJobKey = await buildJobKey(contractId, 'vector', REVISION_NUMBER);
+
+  const contract = await client.getContract(contractId);
+  const window = withinWarrantyWindow(contract, now);
+  if (!window.ok) {
+    log.debug({ reason: window.reason }, 'revision skipped: outside the warranty window');
+    return;
+  }
+
+  const conceptsJobKey = await buildJobKey(contractId, 'concepts');
+  const stageOne = await jobs.get(conceptsJobKey);
+  const delivered = deliveredSlots(stageOne);
+  if (delivered.size === 0) {
+    log.debug('revision skipped: no delivered concept set is provable');
+    return;
+  }
+
+  const reader = createThreadReader({
+    apiUrl: deps.apiUrl,
+    apiKey: deps.apiKey,
+    fetchImpl: deps.fetchImpl ?? ((url, init): Promise<Response> => fetch(url, init)),
+  });
+  const messages = await reader.listMessages(contractId);
+
+  // Sliced on `pack_delivered_at`, for the reason the FR-9 slice exists: a
+  // rebuild command is a reply to a delivery, and a message posted before the
+  // pack existed cannot be one. Strictly after, and an unparseable timestamp
+  // yields NaN and drops out rather than being trusted.
+  const deliveredAt = parseInstant(original.packDeliveredAt);
+  const scoped = messages.filter((message) => parseInstant(message.createdAt) > deliveredAt);
+  const { requested, unavailable } = findRevisionRequestIn(scoped, botId, delivered);
+
+  // Named a concept that was never delivered. Told once, and the entitlement is
+  // NOT spent — the same reasoning as the FR-9 refused-pick note: we instructed
+  // an action, so a buyer who follows it and names the wrong number is owed the
+  // reason rather than silence.
+  if (unavailable !== null) {
+    const choices = [...delivered].sort((a, b) => a - b);
+    await noteRevisionOnce(deps, {
+      contractId,
+      jobKey: revisionJobKey,
+      result: REVISION_UNBUILDABLE_RESULT,
+      detail: { picked: unavailable, deliveredSlots: choices },
+      body: [
+        'LogoSmith could not act on that rebuild request.',
+        '',
+        `You asked for concept ${unavailable}, but concept ${unavailable} was not part of the ` +
+          `Milestone 1 delivery for this contract — the concepts delivered were ` +
+          `${choices.map((slot) => `concept ${slot}`).join(' and ')}. Reply with ` +
+          `\`rebuild from concept ${choices[0]}\` (or any of those) and the pack will be ` +
+          'rebuilt from it. Your free rebuild has NOT been used.',
+      ].join('\n'),
+    });
+  }
+
+  if (requested === null) return;
+
+  // Already what they have. Refused before any spend, and the entitlement is
+  // kept: charging a buyer's one rebuild for a no-op would be indefensible.
+  if (requested === original.winnerSlot) {
+    await noteRevisionOnce(deps, {
+      contractId,
+      jobKey: revisionJobKey,
+      result: REVISION_ALREADY_BUILT_RESULT,
+      detail: { picked: requested },
+      body:
+        `The pack you already have IS built from concept ${requested}, so there is nothing to ` +
+        'rebuild and your free rebuild has not been used. If you meant a different concept, ' +
+        'reply naming it and LogoSmith will rebuild from that one.',
+    });
+    return;
+  }
+
+  // THE LIFETIME BOUND. `MAX_SPEND_USD` lives in `checkpoint.spendUsd`, which a
+  // new claim key resets to zero — correct for a revision, and exactly why this
+  // second bound has to exist. Two independently-correct bounds composed into
+  // an unmetered loop once on this branch ($5.60 realized against a $1 anchor),
+  // because each was right about its own axis and nothing measured the total.
+  // `>` not `>=`, so a contract that spent its full legitimate allowance and
+  // landed exactly on the figure still gets the rebuild it was promised.
+  const spentSoFar = (await jobs.listByContract(contractId)).reduce(
+    (total, row) => total + row.spentUsd,
+    0,
+  );
+  if (spentSoFar > MAX_CONTRACT_LIFETIME_SPEND_USD) {
+    log.error(
+      { spentSoFar, cap: MAX_CONTRACT_LIFETIME_SPEND_USD },
+      'revision refused: contract lifetime spend is already past the cap',
+    );
+    await noteRevisionOnce(deps, {
+      contractId,
+      jobKey: revisionJobKey,
+      result: REVISION_REFUSED_RESULT,
+      detail: { reason: 'lifetime-spend', spentSoFar, cap: MAX_CONTRACT_LIFETIME_SPEND_USD },
+      body:
+        'LogoSmith cannot rebuild this pack automatically. The work already done on this ' +
+        'contract has reached the spending limit LogoSmith holds itself to, and it will not ' +
+        'quietly exceed it. Nothing further has been generated and no additional work is being ' +
+        'claimed. If you raise a dispute, LogoSmith files its complete evidence record — every ' +
+        'gate result, transcription and measurement — with the platform.',
+    });
+    return;
+  }
+
+  const claim = await jobs.claimRevision({
+    jobKey: revisionJobKey,
+    contractId,
+    stage: 'vector',
+    revision: REVISION_NUMBER,
+    maxRevisions: MAX_REVISIONS_PER_CONTRACT,
+  });
+  if (!claim.granted) {
+    log.info({ reason: claim.reason }, 'revision refused: contract is at its revision cap');
+    return;
+  }
+
+  await selection.openRevision({
+    contractId,
+    revision: REVISION_NUMBER,
+    slot: requested,
+    source: 'buyer',
+    // The ORIGINAL M1 instant, carried forward: this column means "when were
+    // the concepts delivered", and the concepts a revision rebuilds from are
+    // stage 1's. Writing `now` here would claim a delivery that never happened.
+    m1DeliveredAt: original.m1DeliveredAt,
+  });
+
+  await jobs.recordGateAudit({
+    jobKey: revisionJobKey,
+    contractId,
+    slot: requested,
+    gate: REVISION_GATE,
+    result: REVISION_ACCEPTED_RESULT,
+    detail: {
+      previousWinnerSlot: original.winnerSlot,
+      winnerSlot: requested,
+      deliveredSlots: [...delivered].sort((a, b) => a - b),
+      packDeliveredAt: original.packDeliveredAt,
+      warrantyExpires: contract.warrantyExpires ?? null,
+      spentBeforeUsd: spentSoFar,
+    },
+  });
+
+  log.info(
+    { from: original.winnerSlot, to: requested, spentSoFar },
+    'warranty rebuild accepted; stage 2 re-enqueued',
+  );
+  await queue.send({ contractId, jobKey: revisionJobKey, stage: 'vector' });
+}
+
+/**
+ * The daily FR-18 poll.
+ *
+ * DAILY, NOT EVERY FIFTEEN MINUTES, and the difference is the whole cost
+ * argument. A rebuild request is not time-critical — nothing is blocked on it
+ * and the window is measured in days — while a 15-minute poll would read the
+ * thread of every delivered contract ~1,344 times over a 14-day warranty. Once
+ * a day is ~14 reads per contract, and a contract that uses its rebuild leaves
+ * the query entirely (`listAwaitingRevision`'s NOT EXISTS).
+ */
+async function pollRevisions(s: SweepServices): Promise<void> {
+  const deliveredAfter = new Date(
+    clockOf(s)().getTime() - REVISION_POLL_MAX_DAYS * 24 * 60 * 60 * 1000,
+  );
+  for (const row of await s.selection.listAwaitingRevision(deliveredAfter)) {
+    try {
+      await resolveRevisionForContract(s, row.contractId);
+    } catch (err) {
+      // Per contract, not per step: this sweep runs once a DAY, so one failing
+      // contract must not cost every remaining one another twenty-four hours.
+      s.logger.warn(
+        { err, contractId: row.contractId },
+        'revision poll failed for this contract; retrying tomorrow',
+      );
+    }
+  }
+}
+
 // --- Parked jobs --------------------------------------------------------------
 
 /**
@@ -1083,5 +1406,11 @@ export async function runDailySweep(s: SweepServices): Promise<void> {
     }
   } catch (err) {
     s.logger.error({ err }, 'daily sweep: stuck-claim recovery step failed; continuing');
+  }
+
+  try {
+    await pollRevisions(s);
+  } catch (err) {
+    s.logger.error({ err }, 'daily sweep: FR-18 revision poll failed; continuing');
   }
 }

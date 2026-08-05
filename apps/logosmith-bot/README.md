@@ -14,7 +14,7 @@ load-bearing — do not restate their reasoning here without reading them).
 
 Stack: Node 22 / TypeScript, Hono, Cloudflare Workers + Queues + Cron
 Triggers + D1 + KV + R2 + Workers AI, `pnpm` + Turborepo. Full test suite as
-of this writing: **714/714 passing, 162 suites** (`pnpm test` from this
+of this writing: **756/756 passing, 170 suites** (`pnpm test` from this
 directory; run the workspace-wide `pnpm -w build && pnpm -w typecheck &&
 pnpm -w lint` too before trusting a change).
 
@@ -152,26 +152,43 @@ longer among them.
   and the Google Fonts pairing in `brand.json` are advisory outputs, not
   warranted ones.
 
-- **There is no re-run and no revision round, and the warranty no longer
-  claims one.** `botProfile.warrantyTerms` and both delivery notes used to
-  promise that a failing artifact "is re-run free of charge, plus one
-  revision round on the selected mark". Nothing implements either: there is
-  no thread trigger and no code path that mints a per-revision claim key
-  (`grep -rn "revision" src/ --include '*.ts'` outside the tests returns only
-  prose). Task 23 left that path deliberately unbuilt, because any scheme has
-  to preserve the original `concepts` and `gate_audit` rows and the obvious
-  one collides with them on the primary key — losing the evidence of what was
-  delivered at the moment of a dispute.
+- **There is ONE warranty rebuild, and it re-packs — it does not
+  regenerate.** Inside the contract's warranty window a buyer may reply
+  `rebuild from concept N` and LogoSmith rebuilds and re-delivers the whole
+  pack from another concept it **already generated and gated** for them
+  (FR-18, `resolveRevisionForContract` in `src/sweeps.ts`). One per contract,
+  enforced structurally by `JobStore.claimRevision`'s single-statement
+  INSERT — never a count-then-write, which is not a cap.
 
-  The terms now describe what the bot does do: every stated check runs
-  **before** delivery and a failing artifact is not shipped at all; the
-  evidence page, validation report and license manifest stay available with
-  every measurement behind those claims; and a dispute gets that complete
-  record filed (`assembleDisputeEvidence`). `freeGigs.test.ts`'s FR-18 suite
-  characterises what a re-run *would* inherit if one is ever built — a fresh
-  FR-5 cap and no free-gig quota cost — and constructs the claim key itself.
-  Do not read it as evidence that anything triggers one. **Building the
-  re-run/revision path is an open product decision.**
+  **`concepts` is read-only on the entire rebuild path, and that is the
+  design, not an accident.** Task 23 ruled that any revision scheme must
+  preserve the original `concepts` and `gate_audit` rows, because
+  `assembleDisputeEvidence` reads them and losing them at the moment of a
+  dispute is the worst possible time. Re-packing an existing concept walks
+  around that collision instead of migrating over it: migration 0005 moves
+  only `selection` (composite PK `(contract_id, revision)`, so both rounds
+  survive and both are published in the dispute document) and adds a
+  `revision` column to `jobs`. A regenerating revision would need the
+  `concepts` primary key to move — re-read Task 23 before attempting it.
+
+  **What is deliberately NOT built: a free re-run when nothing was
+  delivered.** The PRD's free re-run covers a *delivered* artifact that fails
+  one of the four warranted gates — and all four gate before delivery, so that
+  population is ~0 by construction and any instance is a bug in our own gate
+  rather than a buyer remedy. The §9 non-convergence, winner-gate and
+  pack-gate aborts deliver nothing, so there is no artifact to warrant, and
+  every one of them is deterministic or negatively correlated on retry (the
+  readback gate is driven by the brand name, so nine more attempts against the
+  same string is the worst bet in the system). Those seven terminal notes
+  still offer only the three remedies that work — see `WHAT_YOU_CAN_DO_NEXT`.
+
+  **The window is the platform's, not ours.** `withinWarrantyWindow` reads
+  `contract.warrantyExpires` and **fails closed** when it is absent or
+  unparseable: a constant in `config.ts` would drift from the window the
+  marketplace actually enforces, and not spending is the safe direction. If
+  real contracts come back with an empty `warrantyExpires`, FR-18 never fires
+  — visible in the logs, and correctable — where the opposite error is
+  invisible spending.
 
 - **A buyer's concept pick can be resolved by a model, and the record says
   when it was.** `parseSelection` (`src/threads.ts`) is a deliberately strict

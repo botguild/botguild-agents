@@ -664,11 +664,61 @@ interface M2NoteInput {
   winnerAxisId: string;
   selectionSource: SelectionSource;
   vectorSource: 'recraft-native' | 'vectorizer';
+  /** 0 for the original delivery, 1 for the one FR-18 warranty rebuild. */
+  revision: number;
+  /**
+   * Delivered concepts OTHER than the winner — the only ones a rebuild can be
+   * offered from. Derived from stage 1's checkpoint, not from `concepts`: a
+   * slot demoted by the FR-6 distinctness gate keeps `ocr_pass = 1` and so
+   * survives in the table while never having been shown to the buyer, and
+   * naming it here would offer a rebuild from a concept they never saw.
+   */
+  otherSlots: number[];
   gates: PackGateReport;
   packUrl: string;
   reportUrl: string;
   licensesUrl: string;
   progressUrl: string;
+}
+
+/**
+ * The FR-18 paragraph, and it says something DIFFERENT once the entitlement is
+ * spent — because at that point the first version becomes an instruction no
+ * code path can honour, which is the exact H3 defect four notes on this branch
+ * were already stripped of.
+ *
+ * The instructed phrase is the one `parseRevisionRequest` recognizes, quoted
+ * verbatim. If that parser is ever tightened, this string is what stops being
+ * true, and `pipeline.test.ts` asserts the note's own instruction round-trips
+ * through the parser rather than pinning the literal — Task 21's rule: assert
+ * the artifact resolves, do not compare a string.
+ */
+function revisionParagraph(revision: number, otherSlots: number[]): string {
+  if (revision > 0) {
+    return (
+      'This was the free rebuild included with your warranty, so it is the last one on this ' +
+      'contract. Everything else in the warranty still stands: the checks above all ran before ' +
+      'this delivery, and the evidence page, validation report and license manifest stay ' +
+      'available for the rest of the window.'
+    );
+  }
+  if (otherSlots.length === 0) {
+    // Nothing else was delivered, so there is no other concept to rebuild from
+    // and offering one would be the H3 defect again. Say nothing about it.
+    return (
+      'The checks above all ran BEFORE this delivery, and a pack failing any of them is not ' +
+      'shipped at all.'
+    );
+  }
+  const choices = otherSlots.map((slot) => `concept ${slot}`).join(' or ');
+  return (
+    `CHANGED YOUR MIND? Within this contract’s warranty window you can have the whole pack ` +
+    `rebuilt once, free, from either of the other concepts LogoSmith already generated and ` +
+    `gated for you — ${choices}. Reply in this thread with ` +
+    `\`rebuild from concept ${otherSlots[0]}\` and it will be rebuilt and re-delivered. ` +
+    `That is one rebuild per contract, and LogoSmith does not generate new concepts or change ` +
+    `the brief.`
+  );
 }
 
 /**
@@ -717,13 +767,15 @@ function buildM2Note(input: M2NoteInput): string {
     `Per-image license manifest: ${input.licensesUrl}`,
     `Evidence page: ${input.progressUrl}`,
     '',
+    revisionParagraph(input.revision, input.otherSlots),
+    '',
     'Warranty: every check above ran BEFORE this delivery, and a pack failing any of them is ' +
-      'not shipped at all — that is the guarantee, and it is why this pack exists rather than a ' +
-      'promise to fix one later. For 14 days the evidence page, validation report and license ' +
-      'manifest above stay available with every measurement behind those claims, and LogoSmith ' +
-      'files that complete record if you raise a dispute. LogoSmith does not perform revisions ' +
-      'or redesigns. The font pairing is advisory, not warranted. Trademark clearance is NOT ' +
-      'performed and NOT warranted.',
+      'not shipped at all — that is the guarantee. For the rest of this contract’s warranty ' +
+      'window the evidence page, validation report and license manifest above stay available ' +
+      'with every measurement behind those claims, and LogoSmith files that complete record if ' +
+      'you raise a dispute. LogoSmith does not generate new concepts, redesign a mark, or ' +
+      'change a brief after delivery. The font pairing is advisory, not warranted. Trademark ' +
+      'clearance is NOT performed and NOT warranted.',
   ].join('\n');
 }
 
@@ -771,6 +823,73 @@ function buildPackFailureNote(
     `Evidence page: ${progressUrl}`,
     WHAT_YOU_CAN_DO_NEXT,
   ].join('\n');
+}
+
+/** How the finished pack reached the buyer. Recorded in the FR-17 trail. */
+export type PackDeliveryRoute = 'milestone' | 'thread-fallback';
+
+/**
+ * Deliver the brand pack, and — on a REVISION only — fall back to posting the
+ * same links into the contract thread if the milestone delivery is refused.
+ *
+ * THE UNVERIFIED FACT THIS EXISTS FOR, stated the way the Recraft and
+ * Vectorizer adapters state theirs: **it is not known whether this platform
+ * accepts a second `deliverMilestone` on a milestone that is already
+ * `delivered` or `accepted`.** `ContractMilestone.status` reaches both, a
+ * contract carries exactly two milestones (`milestoneIdForStage`), and a
+ * revision therefore has no third milestone of its own to deliver into. That
+ * question was NOT settled by a live call: this session held read-only against
+ * a production marketplace throughout, and finding out would have meant writing
+ * to a real contract.
+ *
+ * So the code is written so that either answer works. The milestone delivery is
+ * ATTEMPTED — if the platform allows it, the revision arrives exactly as the
+ * original did, which is the better outcome and needs no special case. If it is
+ * refused, the buyer still gets every file, because the pack, the report and
+ * the licenses are already in R2 under this job's own token and the note
+ * carries their URLs. What must never happen is the third outcome: files
+ * written, buyer told nothing, job marked delivered.
+ *
+ * REVISION 0 IS DELIBERATELY NOT WRAPPED. The original delivery's failure
+ * handling is load-bearing and proven — it throws, the queue retries, and a
+ * genuinely broken delivery reaches the DLQ alert. Swallowing that into a
+ * thread post would convert a retryable infra fault on a paid first delivery
+ * into a silent degradation, which is a strictly worse trade than the one being
+ * made here. Only the revision, whose milestone may be legitimately closed,
+ * takes the fallback.
+ *
+ * A FALLBACK THAT ITSELF FAILS RE-THROWS THE ORIGINAL ERROR, not the second
+ * one: the milestone refusal is the fact worth surfacing, and the thread post
+ * failing on top of it is a symptom of the same outage.
+ */
+async function deliverPack(
+  config: PipelineConfig,
+  input: {
+    contractId: string;
+    milestoneId: string;
+    revision: number;
+    note: string;
+    attachments: string[];
+    log: { warn: (obj: unknown, msg: string) => void };
+  },
+): Promise<PackDeliveryRoute> {
+  const { contractId, milestoneId, revision, note, attachments, log } = input;
+  try {
+    await config.client.deliverMilestone(contractId, milestoneId, { note, attachments });
+    return 'milestone';
+  } catch (err) {
+    if (revision === 0) throw err;
+    log.warn(
+      { err, milestoneId, revision },
+      'milestone delivery refused for a revision; posting the pack links to the thread instead',
+    );
+    try {
+      await config.client.sendMessage(contractId, note);
+    } catch {
+      throw err;
+    }
+    return 'thread-fallback';
+  }
 }
 
 // --- Stage 1 -----------------------------------------------------------------
@@ -1298,6 +1417,19 @@ export async function runVectorStage(
   const token = job.deliverableToken;
   if (!token) throw new Error(`job ${jobKey} has no deliverable token`);
 
+  // WHICH ROUND THIS IS (FR-18). Read off the JOB ROW, never off the queue
+  // message: `job_key` is a hash that nothing can recover a revision from, and
+  // a message field could disagree with the row a redelivery re-reads. Revision
+  // 0 is the original delivery and every value below is what it always was.
+  //
+  // A revision does NOT re-read `concepts` differently, and that is the whole
+  // design: it rebuilds the pack from a concept stage 1 already generated and
+  // gated, so `concepts` stays read-only across the entire revision path and
+  // the Task 23 collision is never reached. What IS per-round is the selection
+  // row (which concept won this round, and who chose it) and this job's own
+  // token, checkpoint and audit trail.
+  const revision = job.revision;
+
   // Stage 1's row is read up front because two different things need it: it is
   // the brief of record (see `resolveBrief` below), and it owns the capability
   // token the concept PNGs were written under.
@@ -1320,9 +1452,11 @@ export async function runVectorStage(
   // recorded, so a missing selection is an ordering fault — throw and let the
   // queue's retries (then the DLQ alert) surface it, rather than inventing a
   // winner or silently no-opping a contract the buyer has paid for.
-  const selectionRow = await selection.get(contractId);
+  const selectionRow = await selection.get(contractId, revision);
   if (!selectionRow || selectionRow.winnerSlot === null || selectionRow.source === null) {
-    throw new Error(`contract ${contractId} has no selected winner to build a pack from`);
+    throw new Error(
+      `contract ${contractId} has no selected winner to build a pack from (revision ${revision})`,
+    );
   }
   const winnerSlot = selectionRow.winnerSlot;
 
@@ -1611,20 +1745,36 @@ export async function runVectorStage(
   const packUrl = deliverableUrl('pack.zip');
   const reportUrl = deliverableUrl('report.json');
   const licensesUrl = deliverableUrl('licenses.json');
-  await client.deliverMilestone(contractId, milestoneId, {
-    note: buildM2Note({
-      brief,
-      winnerSlot,
-      winnerAxisId: winner.axisId,
-      selectionSource: selectionRow.source,
-      vectorSource: vector.source,
-      gates: pack.gates,
-      packUrl,
-      reportUrl,
-      licensesUrl,
-      progressUrl,
-    }),
-    attachments: [packUrl, reportUrl, licensesUrl, progressUrl],
+  // The concepts M1 actually delivered, minus the one just built — read from
+  // stage 1's checkpoint for the reason on `M2NoteInput.otherSlots`. Absent
+  // (stage 1's row is gone), nothing is offered rather than guessed at.
+  const otherSlots = (stageOne?.checkpoint?.slots ?? [])
+    .filter((slot) => slot.status === 'passed' && slot.slot !== winnerSlot)
+    .map((slot) => slot.slot)
+    .sort((a, b) => a - b);
+
+  const note = buildM2Note({
+    brief,
+    winnerSlot,
+    winnerAxisId: winner.axisId,
+    selectionSource: selectionRow.source,
+    vectorSource: vector.source,
+    revision,
+    otherSlots,
+    gates: pack.gates,
+    packUrl,
+    reportUrl,
+    licensesUrl,
+    progressUrl,
+  });
+  const attachments = [packUrl, reportUrl, licensesUrl, progressUrl];
+  const deliveryRoute = await deliverPack(config, {
+    contractId,
+    milestoneId,
+    revision,
+    note,
+    attachments,
+    log,
   });
   await jobs.recordGateAudit({
     jobKey,
@@ -1637,9 +1787,16 @@ export async function runVectorStage(
       selectionSource: selectionRow.source,
       vectorSource: vector.source,
       spendUsd: checkpoint.spendUsd,
+      revision,
+      // WHICH ROUTE THE FILES ACTUALLY TOOK. Recorded because it is not
+      // knowable in advance whether the platform accepts a second delivery on
+      // an already-accepted milestone (see `deliverPack`), and a dispute reader
+      // is entitled to know whether the pack arrived as a milestone delivery or
+      // as a thread post carrying the same links.
+      deliveryRoute,
     },
   });
-  await selection.markPackDelivered(contractId);
+  await selection.markPackDelivered(contractId, revision);
   await jobs.markDelivered(jobKey, 'delivered');
   log.info({ winnerSlot, vectorSource: vector.source }, 'brand pack delivered');
   return { outcome: 'delivered' };

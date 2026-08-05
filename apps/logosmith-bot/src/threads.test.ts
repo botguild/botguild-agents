@@ -1,6 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createThreadReader, findSelection, findSelectionIn, parseSelection } from './threads.js';
+import {
+  createThreadReader,
+  findRevisionRequestIn,
+  findSelection,
+  findSelectionIn,
+  parseRevisionRequest,
+  parseSelection,
+} from './threads.js';
 import type { ThreadMessage } from './threads.js';
 import type { FetchLike } from './types.js';
 
@@ -653,5 +660,177 @@ describe('findSelectionIn', () => {
       findSelectionIn([buyer('m1', 'looks great, thanks!')], 'bot-logosmith', new Set([1, 2])),
       { selected: null, unavailable: null },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FR-18 — `parseRevisionRequest` (Task 29)
+//
+// A SECOND allow-list with a DIFFERENT vocabulary, and the separation is the
+// safety property. This parser runs on messages posted AFTER a pack was
+// delivered, where the ordinary thing a buyer writes is approval — so if it
+// accepted anything `parseSelection` accepts, "concept 2" or "we love concept
+// 2" would buy a conversion and re-deliver a pack nobody asked to change.
+// ---------------------------------------------------------------------------
+
+describe('parseRevisionRequest', () => {
+  it('reads the instructed form and its close variants', () => {
+    for (const [text, expected] of [
+      ['rebuild from concept 2', 2],
+      ['Rebuild from concept 3', 3],
+      ['rebuild from #1', 1],
+      ['rebuild concept 3', 3],
+      ['re-build from concept 2', 2],
+      ['rebuild it from concept 1', 1],
+      ['rebuild the pack from concept 2', 2],
+      ['rebuild with concept 3', 3],
+      ['rebuild using concept 2', 2],
+      ['redo from concept 1', 1],
+      ['switch to concept 2', 2],
+      ['change to concept 3', 3],
+      ['swap to 1', 1],
+      ['use concept 2 instead', 2],
+      ['go with concept 3 instead', 3],
+      ['please rebuild from concept 2', 2],
+      ['rebuild from concept 2, thanks', 2],
+    ] as const) {
+      assert.equal(parseRevisionRequest(text), expected, text);
+    }
+  });
+
+  it('NEVER reads an ordinary approval or selection as a rebuild request', () => {
+    // THE LOAD-BEARING TEST. Every one of these is something a satisfied buyer
+    // plausibly writes after delivery, and several of them are exactly what
+    // `parseSelection` is built to accept.
+    for (const text of [
+      'concept 2',
+      '#2',
+      '2',
+      'we love concept 2',
+      "I'll take concept 2",
+      'go with concept 2',
+      'use concept 2',
+      'make it concept 2',
+      'my choice is concept 2',
+      'yes, concept 2 please',
+      'concept 2, thanks',
+      'perfect, thank you',
+      'looks great',
+    ]) {
+      assert.equal(parseRevisionRequest(text), null, text);
+    }
+  });
+
+  it('accepts NOTHING that `parseSelection` accepts — the vocabularies cannot overlap', () => {
+    // Driven off `parseSelection` itself rather than a hand-written list, so a
+    // future widening of the SELECTION parser cannot silently start triggering
+    // paid rebuilds. Any string both parsers read is a defect by construction.
+    const probes = [
+      'concept 1',
+      'concept 2',
+      'concept 3',
+      '#3',
+      '1',
+      'yes, concept 2',
+      "we'll take concept 3",
+      'let’s go with concept 1',
+      'my pick is concept 2',
+      'give me concept 3 please',
+      'pick 2',
+      'choose concept 1',
+      'use concept 2',
+      'make it 3',
+    ];
+    const overlap = probes.filter(
+      (text) => parseSelection(text) !== null && parseRevisionRequest(text) !== null,
+    );
+    assert.deepEqual(overlap, [], 'a string both parsers read would rebuild on an approval');
+    // Non-vacuity: the probe list really is full of things the selection
+    // parser reads, so the empty overlap above means something.
+    assert.ok(
+      probes.filter((text) => parseSelection(text) !== null).length >= 12,
+      'the probe list must actually be selectable, or the overlap check is vacuous',
+    );
+  });
+
+  it('rejects a rebuild request wrapped in anything it does not recognize', () => {
+    for (const text of [
+      "don't rebuild from concept 2",
+      'no need to rebuild from concept 2',
+      'should I rebuild from concept 2?',
+      'rebuild from concept 2 but make it blue',
+      'can you rebuild from concept 2 and change the font',
+      'why did you rebuild from concept 2',
+      '> rebuild from concept 2',
+      'rebuild from concept 2 or concept 3',
+      'use concept 2', // the `instead` marker is what makes it a rebuild
+      'rebuild',
+      'rebuild from concept 4',
+      'rebuild from concept 0',
+    ]) {
+      assert.equal(parseRevisionRequest(text), null, text);
+    }
+  });
+
+  it('never throws, whatever it is handed', () => {
+    for (const value of [null, undefined, 42, {}, [], Symbol('x'), 'rebuild from concept 2']) {
+      assert.doesNotThrow(() => parseRevisionRequest(value as unknown));
+    }
+  });
+});
+
+describe('findRevisionRequestIn', () => {
+  const msg = (id: string, senderId: string, body: string): ThreadMessage => ({
+    id,
+    senderId,
+    body,
+    createdAt: '2026-08-01T00:00:00.000Z',
+  });
+  const ALL = new Set([1, 2, 3]);
+
+  it('excludes the bot’s own messages, whatever they happen to say', () => {
+    // THE FIXTURE MUST PARSE, or this test proves nothing. The first version of
+    // it used the bot's real note wording ("Reply with `rebuild from concept
+    // 2`..."), which `parseRevisionRequest` correctly returns null for on its
+    // own — so deleting the sender filter entirely left the test green. That is
+    // the vacuous-test failure this project keeps finding, and it was caught
+    // here by mutation, not by reading.
+    //
+    // Asserted inline: the body really is a rebuild command, so the sender
+    // filter is the ONLY thing that can be suppressing it.
+    assert.equal(parseRevisionRequest('rebuild from concept 2'), 2);
+    const found = findRevisionRequestIn(
+      [msg('m0', 'bot-1', 'rebuild from concept 2')],
+      'bot-1',
+      ALL,
+    );
+    assert.deepEqual(found, { requested: null, unavailable: null });
+    // Positive control: the identical body from the BUYER is read.
+    assert.equal(
+      findRevisionRequestIn([msg('m0', 'buyer', 'rebuild from concept 2')], 'bot-1', ALL).requested,
+      2,
+    );
+  });
+
+  it('scans past a request naming an undelivered concept and reports it separately', () => {
+    const found = findRevisionRequestIn(
+      [msg('m1', 'buyer', 'rebuild from concept 3'), msg('m2', 'buyer', 'rebuild from concept 2')],
+      'bot-1',
+      new Set([1, 2]),
+    );
+    assert.deepEqual(found, { requested: 2, unavailable: 3 });
+  });
+
+  it('takes the FIRST usable request, matching claimRevision’s first-write-wins', () => {
+    const found = findRevisionRequestIn(
+      [msg('m1', 'buyer', 'rebuild from concept 3'), msg('m2', 'buyer', 'rebuild from concept 2')],
+      'bot-1',
+      ALL,
+    );
+    // Inline, so a parser change that drained either fixture fails loudly here
+    // rather than turning this into a tautology.
+    assert.equal(parseRevisionRequest('rebuild from concept 3'), 3);
+    assert.equal(parseRevisionRequest('rebuild from concept 2'), 2);
+    assert.equal(found.requested, 3);
   });
 });

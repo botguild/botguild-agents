@@ -8,6 +8,7 @@ import { MIN_SOURCE_PX, parseLogoBrief, type BriefResult } from './brief.js';
 import {
   FREE_GIGS_PER_PAYER,
   FREE_GIG_WINDOW_DAYS,
+  MAX_REVISIONS_PER_CONTRACT,
   IMAGE_COST_USD,
   MAX_REGENS_PER_SLOT,
   MAX_SPEND_USD,
@@ -1697,23 +1698,22 @@ describe('processJobMessage — the free stage is routed, not refused', () => {
 });
 
 // ---------------------------------------------------------------------------
-// FR-18 — the properties a warranty re-run WOULD inherit. NOT SHIPPED.
+// FR-18 — the properties the SHIPPED warranty rebuild inherits (Task 29).
 //
-// READ THIS BEFORE TRUSTING THE NAME BELOW. There is no warranty re-run in this
-// bot: no thread trigger, and no code path that mints a `#revision-N` claim key
-// — the test constructs that key itself. `grep -rn "revision" src/ --include
-// '*.ts'` outside the tests returns only prose. Task 23's ruling deliberately
-// left the whole path unbuilt (any scheme must preserve the original `concepts`
-// and `gate_audit` rows, which the obvious one collides with), and the
-// buyer-facing copy no longer promises it.
+// This suite used to construct a `#revision-1` claim key and then run
+// `runConceptStage` under it against the REAL contract id — which silently
+// overwrote all three `concepts` rows on PK (contract_id, slot) and asserted
+// nothing about their survival. That is precisely the collision Task 23 ruled
+// unacceptable, sitting inside the test named after the constraint.
 //
-// What these tests DO establish is real and worth keeping: IF such a path is
-// ever built on a per-revision claim key, it inherits a fresh FR-5 cap and
-// consumes no free-gig allowance. They characterise a design constraint for
-// whoever builds it. They are not evidence that anything triggers it.
+// The shipped rebuild does not regenerate anything: it re-packs a concept that
+// already exists, claiming a `vector` stage under a revision key. So the two
+// properties this suite always characterised — a fresh FR-5 cap, and no cost to
+// the free-gig quota — are asserted against THAT claim, and the property the
+// old test quietly violated is now the first assertion in it.
 // ---------------------------------------------------------------------------
 
-describe('a warranty re-run would inherit a fresh cap and no quota cost (FR-18, path unbuilt)', () => {
+describe('the FR-18 rebuild inherits a fresh cap, costs no quota, and keeps the evidence', () => {
   const AXES: StyleAxis[] = [
     { id: 'wordmark', label: 'wordmark', prompt: 'p1', vendor: 'ideogram' },
     { id: 'lockup', label: 'lockup', prompt: 'p2', vendor: 'ideogram' },
@@ -1841,7 +1841,7 @@ describe('a warranty re-run would inherit a fresh cap and no quota cost (FR-18, 
     return { config, jobKey, jobs, quota, generated: () => generated, db };
   }
 
-  it('re-runs generation under a fresh FR-5 cap and consumes no free-gig allowance', async () => {
+  it('re-packs under a fresh FR-5 cap, consumes no allowance, and preserves every concept row', async () => {
     const first = await setupPaid(CONTRACT_ID);
     await runConceptStage(first.config, {
       contractId: CONTRACT_ID,
@@ -1849,38 +1849,62 @@ describe('a warranty re-run would inherit a fresh cap and no quota cost (FR-18, 
       stage: 'concepts',
     });
     const firstJob = (await first.jobs.get(first.jobKey))!;
-    // Precondition: the original round really did spend, so "fresh" below is a
-    // statement about a budget that had something to inherit.
+    // Precondition: the original round really did spend and really did record
+    // three concepts, so "fresh" and "preserved" below both have something to
+    // be statements about.
     assert.equal(firstJob.outcome, 'delivered');
     assert.ok(firstJob.checkpoint!.spendUsd > 0, 'the original round must have spent something');
+    const conceptsBefore = await createConceptStore(first.db).list(CONTRACT_ID);
+    assert.equal(conceptsBefore.length, 3);
 
-    // The warranty re-run is a NEW claim against the same contract — a fresh
-    // job row, so a fresh checkpoint, so the FR-5 caps restart at full rather
-    // than resuming a budget the buyer already exhausted (FR-18: "under a fresh
-    // FR-5-sized cap, free").
-    const revision = await withDb(first.db, `${CONTRACT_ID}#revision-1`);
-    assert.notEqual(revision.jobKey, first.jobKey);
-    const revisionRow = (await revision.jobs.get(revision.jobKey))!;
-    assert.equal(revisionRow.checkpoint, null);
-    assert.equal(revisionRow.spentUsd, 0, 'the re-run starts from a fresh cap');
-
-    await runConceptStage(revision.config, {
+    // THE SHIPPED CLAIM. A rebuild is a `vector` stage under a revision key —
+    // a new job row, so a fresh checkpoint, so the FR-5 caps restart at full
+    // rather than resuming a budget the buyer already exhausted.
+    const revisionKey = await buildJobKey(CONTRACT_ID, 'vector', 1);
+    assert.notEqual(revisionKey, first.jobKey);
+    const claim = await first.jobs.claimRevision({
+      jobKey: revisionKey,
       contractId: CONTRACT_ID,
-      jobKey: revision.jobKey,
-      stage: 'concepts',
+      stage: 'vector',
+      revision: 1,
+      maxRevisions: MAX_REVISIONS_PER_CONTRACT,
     });
-    const revisionJob = (await revision.jobs.get(revision.jobKey))!;
-    assert.equal(revisionJob.outcome, 'delivered');
-    assert.equal(
-      revisionJob.checkpoint!.spendUsd,
-      firstJob.checkpoint!.spendUsd,
-      'the re-run got the same full budget the original had',
-    );
-    assert.equal(revision.generated(), 3, 'and generated a full fresh set');
+    assert.deepEqual(claim, { granted: true, reason: 'fresh-claim' });
 
-    // The whole point: a free warranty re-run is free to the BUYER without
+    const revisionRow = (await first.jobs.get(revisionKey))!;
+    assert.equal(revisionRow.revision, 1);
+    assert.equal(revisionRow.checkpoint, null);
+    assert.equal(revisionRow.spentUsd, 0, 'the rebuild starts from a fresh cap');
+    assert.notEqual(
+      revisionRow.deliverableToken,
+      (await first.jobs.get(first.jobKey))!.deliverableToken,
+      'the rebuild writes its artifacts under its own token, never over the originals',
+    );
+
+    // THE TASK 23 CONSTRAINT, ASSERTED RATHER THAN INTENDED. deepEqual on the
+    // whole row set: the collision this suite used to contain rewrote every
+    // column of every row, so anything less would let a partial overwrite pass.
+    assert.deepEqual(
+      await createConceptStore(first.db).list(CONTRACT_ID),
+      conceptsBefore,
+      'a rebuild must not touch the concepts table the dispute document reads',
+    );
+
+    // The whole point: a free warranty rebuild is free to the BUYER without
     // being charged against the free-gig funnel's abuse guard. The throwing
-    // `record` above proves nothing wrote; this proves nothing was counted.
-    assert.equal(await revision.quota.countRecent(PAYER_ID, FREE_GIG_WINDOW_DAYS), 0);
+    // quota store above proves nothing wrote; this proves nothing was counted.
+    assert.equal(await first.quota.countRecent(PAYER_ID, FREE_GIG_WINDOW_DAYS), 0);
+
+    // And it is ONE rebuild: a second claim on the same contract is refused.
+    assert.deepEqual(
+      await first.jobs.claimRevision({
+        jobKey: await buildJobKey(CONTRACT_ID, 'vector', 2),
+        contractId: CONTRACT_ID,
+        stage: 'vector',
+        revision: 2,
+        maxRevisions: MAX_REVISIONS_PER_CONTRACT,
+      }),
+      { granted: false, reason: 'cap-reached' },
+    );
   });
 });

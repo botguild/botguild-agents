@@ -23,9 +23,26 @@ export async function sha256Hex(input: string): Promise<string> {
  * The FR-15 claim key. Stage-suffixed because one contract runs two stages and
  * the `milestone.funded` payload carries no milestone id: stage 1 is triggered
  * by funding, stage 2 by selection/acceptance, and they must claim separately.
+ *
+ * REVISION 0 IS BYTE-IDENTICAL TO THE PRE-FR-18 KEY, and that is load-bearing
+ * rather than tidy: every job row, `gate_audit` row and R2 prefix already
+ * written is addressed by `sha256(contractId):stage`, and a scheme that changed
+ * that string would orphan all of it — including the audit trail
+ * `assembleDisputeEvidence` reads. So the revision is folded into the HASHED
+ * INPUT and only for revisions above zero, which is also the construction
+ * `freeGigs.test.ts`'s FR-18 suite has characterised since Task 23.
+ *
+ * A revision key must never collide with a plain contract id. `#` cannot appear
+ * in a platform contract id, so `${contractId}#revision-1` is unreachable as a
+ * contract id in its own right and the two namespaces cannot meet.
  */
-export async function buildJobKey(contractId: string, stage: JobStage): Promise<string> {
-  return `${await sha256Hex(contractId)}:${stage}`;
+export async function buildJobKey(
+  contractId: string,
+  stage: JobStage,
+  revision = 0,
+): Promise<string> {
+  const subject = revision === 0 ? contractId : `${contractId}#revision-${revision}`;
+  return `${await sha256Hex(subject)}:${stage}`;
 }
 
 /**
@@ -43,6 +60,14 @@ export interface JobRow {
   jobKey: string;
   contractId: string;
   stage: JobStage;
+  /**
+   * Which FR-18 round this job belongs to — 0 for the original delivery, 1 for
+   * the one warranty revision. Read off the ROW rather than carried on the
+   * queue message, so there is one source of truth: `job_key` is a hash and
+   * nothing can recover a revision number from it, and a `JobMessage` field
+   * could disagree with the row a redelivery re-reads.
+   */
+  revision: number;
   deliverableToken: string | null;
   status: JobStatus;
   outcome: JobOutcome | null;
@@ -70,6 +95,7 @@ interface RawJobRow {
   job_key: string;
   contract_id: string;
   stage: JobStage;
+  revision: number;
   deliverable_token: string | null;
   status: JobStatus;
   outcome: JobOutcome | null;
@@ -91,6 +117,7 @@ const toJobRow = (raw: RawJobRow): JobRow => ({
   jobKey: raw.job_key,
   contractId: raw.contract_id,
   stage: raw.stage,
+  revision: raw.revision,
   deliverableToken: raw.deliverable_token,
   status: raw.status,
   outcome: raw.outcome,
@@ -150,8 +177,45 @@ export interface GateAuditRow {
 
 export interface JobStore {
   claim(jobKey: string, contractId: string, stage: JobStage): Promise<ClaimDecision>;
+  /**
+   * Claim a job for an FR-18 revision round, capped at `maxRevisions` DISTINCT
+   * revisions per contract. Returns whether this contract holds the revision
+   * afterwards — whether this call took it or an earlier one already had.
+   *
+   * SEPARATE FROM `claim` BECAUSE THE CAP IS THE POINT. `claim` is an
+   * unconditional INSERT whose only gate is the primary key; this one has to
+   * refuse a SECOND revision, and a count-then-insert is not a cap. The window
+   * between the two reads is the entire latency of everything in between, and
+   * every concurrent request that enters inside it passes the check — measured
+   * on this codebase's own free-gig quota at 12 concurrent attempts defeating a
+   * cap of 3, i.e. an overrun equal to the attacker's concurrency rather than
+   * one. This is `CONSUME_ALLOWANCE_SQL`'s idiom, for that reason.
+   *
+   * `RETURNING job_key` + `first()` rather than a rows-changed count: real D1
+   * answers `{ meta: { changes } }` and `createMemoryD1` (node:sqlite) answers
+   * `{ changes }`, and `D1Like.run()` is typed `Promise<unknown>` precisely so
+   * nothing depends on either.
+   */
+  claimRevision(input: {
+    jobKey: string;
+    contractId: string;
+    stage: JobStage;
+    revision: number;
+    maxRevisions: number;
+  }): Promise<{ granted: boolean; reason: 'fresh-claim' | 'already-held' | 'cap-reached' }>;
   get(jobKey: string): Promise<JobRow | null>;
   getByToken(token: string): Promise<JobRow | null>;
+  /**
+   * Every job row for a contract, oldest first.
+   *
+   * Exists because `assembleDisputeEvidence` used to COMPUTE its three stage
+   * keys from the contract id, which silently omitted any job whose key it
+   * could not derive — and a revision's key is derived from a different string.
+   * The omission would not have read as wrong data in the evidence document; it
+   * would have read as no data, which is worse. Listing what the table HOLDS
+   * cannot drift from what was written.
+   */
+  listByContract(contractId: string): Promise<JobRow[]>;
   setInProgress(
     jobKey: string,
     fields: { kind: JobKind; gigId: string; payerId: string; briefJson: string },
@@ -221,6 +285,26 @@ const toGateAuditRow = (raw: RawGateAuditRow): GateAuditRow => ({
   createdAt: raw.created_at,
 });
 
+/**
+ * The FR-18 revision cap as ONE statement — see `JobStore.claimRevision`.
+ *
+ * `COUNT(DISTINCT revision)`, NOT `COUNT(*)`. The cap is on REVISION ROUNDS,
+ * not on job rows: today a revision claims exactly one row (`vector`), but a
+ * revision that ever claimed two stages would otherwise count as two rounds and
+ * the buyer would silently lose the entitlement the terms promise them.
+ * `revision > 0` excludes the original delivery, which is not a revision.
+ *
+ * SQLite (and therefore D1) evaluates a statement under a single write lock, so
+ * the subquery and the INSERT it gates cannot interleave with another writer.
+ * The cap holds at any concurrency.
+ */
+const CLAIM_REVISION_SQL = `INSERT INTO jobs
+     (job_key, contract_id, stage, revision, deliverable_token, status, created_at, updated_at)
+   SELECT ?, ?, ?, ?, ?, 'claimed', ?, ?
+   WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE job_key = ?)
+     AND (SELECT COUNT(DISTINCT revision) FROM jobs WHERE contract_id = ? AND revision > 0) < ?
+   RETURNING job_key`;
+
 export function createJobStore(db: D1Like, now: () => Date = () => new Date()): JobStore {
   const touch = (): string => now().toISOString();
 
@@ -249,9 +333,12 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
       try {
         await db
           .prepare(
-            'INSERT INTO jobs (job_key, contract_id, stage, deliverable_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO jobs (job_key, contract_id, stage, revision, deliverable_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           )
-          .bind(jobKey, contractId, stage, randomDeliverableToken(), 'claimed', ts, ts)
+          // `revision` is bound explicitly rather than left to the column
+          // DEFAULT: this is the ORIGINAL-round claim, and a schema edit that
+          // dropped the default would otherwise make it silently insert NULL.
+          .bind(jobKey, contractId, stage, 0, randomDeliverableToken(), 'claimed', ts, ts)
           .run();
         return { action: 'enqueue', reason: 'fresh-claim' };
       } catch (err) {
@@ -260,6 +347,43 @@ export function createJobStore(db: D1Like, now: () => Date = () => new Date()): 
         if (!row) throw err;
         return decideOnConflict(row);
       }
+    },
+
+    async claimRevision({ jobKey, contractId, stage, revision, maxRevisions }) {
+      const ts = touch();
+      const inserted = await db
+        .prepare(CLAIM_REVISION_SQL)
+        .bind(
+          jobKey,
+          contractId,
+          stage,
+          revision,
+          randomDeliverableToken(),
+          ts,
+          ts,
+          jobKey,
+          contractId,
+          maxRevisions,
+        )
+        .first<{ job_key: string }>();
+      if (inserted !== null) return { granted: true, reason: 'fresh-claim' };
+      // Nothing went in. Two stable, opposite reasons — this exact job was
+      // already claimed (a queue retry or a webhook redelivery, which must be
+      // granted so the work can resume), or the contract is at its revision cap
+      // (refuse). Both are settled by the time we ask, so this read cannot race
+      // the way a pre-insert check would.
+      const existing = await get(jobKey);
+      return existing === null
+        ? { granted: false, reason: 'cap-reached' }
+        : { granted: true, reason: 'already-held' };
+    },
+
+    async listByContract(contractId) {
+      const { results } = await db
+        .prepare('SELECT * FROM jobs WHERE contract_id = ? ORDER BY created_at ASC, job_key ASC')
+        .bind(contractId)
+        .all<RawJobRow>();
+      return results.map(toJobRow);
     },
 
     async setInProgress(jobKey, fields) {
@@ -522,35 +646,90 @@ export function createConceptStore(db: D1Like, now: () => Date = () => new Date(
 
 export interface SelectionRow {
   contractId: string;
+  /** 0 for the original delivery, 1 for the one FR-18 warranty revision. */
+  revision: number;
   state: 'concepts_delivered' | 'winner_selected' | 'pack_delivered';
   winnerSlot: number | null;
   source: SelectionSource | null;
   m1DeliveredAt: string;
+  /**
+   * When the pack for THIS round was delivered, or null while it has not been.
+   * Written at exactly one site (`markPackDelivered`) and never touched again.
+   *
+   * Its own column rather than a read of `updated_at`, because `select()`
+   * touches `updated_at` too — so on any row that was selected and then
+   * delivered, `updated_at` measures the last write of any kind rather than the
+   * delivery. That is the identical mistake migration 0002 records being made
+   * with `parked_since`; the revision trigger slices the contract thread on
+   * this instant, so an approximate answer would let a message posted BEFORE
+   * the pack existed be read as a reply to it.
+   */
+  packDeliveredAt: string | null;
 }
 
 export interface SelectionStore {
   open(contractId: string): Promise<void>;
-  get(contractId: string): Promise<SelectionRow | null>;
-  select(contractId: string, slot: number, source: SelectionSource): Promise<void>;
-  markPackDelivered(contractId: string): Promise<void>;
+  /** The row for one round. Defaults to revision 0 — the original delivery. */
+  get(contractId: string, revision?: number): Promise<SelectionRow | null>;
+  /** Every round for a contract, oldest first. Evidence reads this; nothing else should. */
+  listRevisions(contractId: string): Promise<SelectionRow[]>;
+  select(
+    contractId: string,
+    slot: number,
+    source: SelectionSource,
+    revision?: number,
+  ): Promise<void>;
+  markPackDelivered(contractId: string, revision?: number): Promise<void>;
+  /**
+   * Open an FR-18 revision round with its winner ALREADY DECIDED.
+   *
+   * A revision round does not re-run selection: the buyer named the concept in
+   * the message that triggered it, and there is nothing further to wait for. So
+   * the row is inserted straight at `winner_selected` rather than passing
+   * through `concepts_delivered` — which also keeps it out of
+   * `listAwaitingSelection`, so the FR-9 72-hour default rule can never fire on
+   * a revision and auto-pick a re-pack the buyer never asked for.
+   */
+  openRevision(input: {
+    contractId: string;
+    revision: number;
+    slot: number;
+    source: SelectionSource;
+    m1DeliveredAt: string;
+  }): Promise<void>;
   /** Contracts still at `concepts_delivered` whose M1 is older than the cutoff. */
   listAwaitingSelection(olderThan: Date): Promise<SelectionRow[]>;
+  /**
+   * Delivered packs that could still attract an FR-18 revision request: the
+   * LATEST round is `pack_delivered`, it was delivered since `deliveredAfter`,
+   * and the contract has not already used a revision.
+   *
+   * SCOPED IN SQL RATHER THAN FILTERED IN THE CALLER, because the caller is a
+   * cron sweep and each candidate costs a `getContract` plus a thread read. An
+   * unscoped "every contract that ever delivered" list would grow without
+   * bound and be re-read every pass forever.
+   */
+  listAwaitingRevision(deliveredAfter: Date): Promise<SelectionRow[]>;
 }
 
 interface RawSelectionRow {
   contract_id: string;
+  revision: number;
   state: SelectionRow['state'];
   winner_slot: number | null;
   source: SelectionSource | null;
   m1_delivered_at: string;
+  pack_delivered_at: string | null;
 }
 
 const toSelectionRow = (raw: RawSelectionRow): SelectionRow => ({
   contractId: raw.contract_id,
+  revision: raw.revision,
   state: raw.state,
   winnerSlot: raw.winner_slot,
   source: raw.source,
   m1DeliveredAt: raw.m1_delivered_at,
+  packDeliveredAt: raw.pack_delivered_at,
 });
 
 export function createSelectionStore(
@@ -563,23 +742,45 @@ export function createSelectionStore(
       const ts = touch();
       await db
         .prepare(
-          `INSERT INTO selection (contract_id, state, m1_delivered_at, updated_at)
-           VALUES (?, 'concepts_delivered', ?, ?)
-           ON CONFLICT(contract_id) DO NOTHING`,
+          `INSERT INTO selection (contract_id, revision, state, m1_delivered_at, updated_at)
+           VALUES (?, 0, 'concepts_delivered', ?, ?)
+           ON CONFLICT(contract_id, revision) DO NOTHING`,
         )
         .bind(contractId, ts, ts)
         .run();
     },
 
-    async get(contractId) {
+    async get(contractId, revision = 0) {
       const raw = await db
-        .prepare('SELECT * FROM selection WHERE contract_id = ?')
-        .bind(contractId)
+        .prepare('SELECT * FROM selection WHERE contract_id = ? AND revision = ?')
+        .bind(contractId, revision)
         .first<RawSelectionRow>();
       return raw ? toSelectionRow(raw) : null;
     },
 
-    async select(contractId, slot, source) {
+    async listRevisions(contractId) {
+      const { results } = await db
+        .prepare('SELECT * FROM selection WHERE contract_id = ? ORDER BY revision ASC')
+        .bind(contractId)
+        .all<RawSelectionRow>();
+      return results.map(toSelectionRow);
+    },
+
+    async openRevision({ contractId, revision, slot, source, m1DeliveredAt }) {
+      const ts = touch();
+      await db
+        .prepare(
+          `INSERT INTO selection
+             (contract_id, revision, state, winner_slot, source, m1_delivered_at, selected_at,
+              updated_at)
+           VALUES (?, ?, 'winner_selected', ?, ?, ?, ?, ?)
+           ON CONFLICT(contract_id, revision) DO NOTHING`,
+        )
+        .bind(contractId, revision, slot, source, m1DeliveredAt, ts, ts)
+        .run();
+    },
+
+    async select(contractId, slot, source, revision = 0) {
       // Conditional on the current state: the first selection wins, so a buyer
       // reply arriving after the default rule already fired cannot silently
       // re-point M2 at a different concept.
@@ -587,28 +788,59 @@ export function createSelectionStore(
         .prepare(
           `UPDATE selection SET state = 'winner_selected', winner_slot = ?, source = ?,
              selected_at = ?, updated_at = ?
-           WHERE contract_id = ? AND state = 'concepts_delivered'`,
+           WHERE contract_id = ? AND revision = ? AND state = 'concepts_delivered'`,
         )
-        .bind(slot, source, touch(), touch(), contractId)
+        .bind(slot, source, touch(), touch(), contractId, revision)
         .run();
     },
 
-    async markPackDelivered(contractId) {
+    async markPackDelivered(contractId, revision = 0) {
+      // `pack_delivered_at` is written HERE and nowhere else — that single
+      // write site is what lets the FR-18 trigger slice the thread on it (see
+      // `SelectionRow.packDeliveredAt`).
+      const ts = touch();
       await db
         .prepare(
-          `UPDATE selection SET state = 'pack_delivered', updated_at = ?
-           WHERE contract_id = ? AND state = 'winner_selected'`,
+          `UPDATE selection SET state = 'pack_delivered', pack_delivered_at = ?, updated_at = ?
+           WHERE contract_id = ? AND revision = ? AND state = 'winner_selected'`,
         )
-        .bind(touch(), contractId)
+        .bind(ts, ts, contractId, revision)
         .run();
     },
 
     async listAwaitingSelection(olderThan) {
+      // `revision = 0` is not a filter that could be dropped: only the original
+      // round is ever opened at `concepts_delivered`, so a revision row can
+      // never appear here — but stating it means the FR-9 default rule can
+      // never reach a revision even if `openRevision` were later changed.
       const { results } = await db
         .prepare(
-          "SELECT * FROM selection WHERE state = 'concepts_delivered' AND m1_delivered_at < ?",
+          `SELECT * FROM selection
+           WHERE revision = 0 AND state = 'concepts_delivered' AND m1_delivered_at < ?`,
         )
         .bind(olderThan.toISOString())
+        .all<RawSelectionRow>();
+      return results.map(toSelectionRow);
+    },
+
+    async listAwaitingRevision(deliveredAfter) {
+      // Three conditions, and the third is the one that matters: a contract
+      // that has ALREADY used its revision leaves the poll entirely rather than
+      // being re-read every pass for the rest of the warranty window. The
+      // authority on the cap is still `claimRevision`'s single statement — this
+      // is an index-friendly pre-filter, not a check.
+      const { results } = await db
+        .prepare(
+          `SELECT s.* FROM selection s
+           WHERE s.state = 'pack_delivered'
+             AND s.pack_delivered_at IS NOT NULL
+             AND s.pack_delivered_at >= ?
+             AND NOT EXISTS (
+               SELECT 1 FROM selection r WHERE r.contract_id = s.contract_id AND r.revision > 0
+             )
+           ORDER BY s.pack_delivered_at ASC`,
+        )
+        .bind(deliveredAfter.toISOString())
         .all<RawSelectionRow>();
       return results.map(toSelectionRow);
     },

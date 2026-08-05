@@ -29,6 +29,7 @@ import {
 } from './jobs.js';
 import type { ModerationClient } from './moderation.js';
 import { parseLogoBrief, type BriefResult } from './brief.js';
+import { parseRevisionRequest } from './threads.js';
 import type { ProseGig } from './proseBrief.js';
 import { renderSvgToPng } from './pack/render.js';
 import { ensureResvgReady } from './pack/wasm.js';
@@ -262,6 +263,12 @@ interface Harness {
   selection: SelectionStore;
   r2: MemoryR2;
   deliveries: Delivery[];
+  /**
+   * Make `deliverMilestone` refuse, standing in for a platform that will not
+   * accept a second delivery on an already-accepted milestone. Off by default,
+   * so no pre-existing test changes behaviour.
+   */
+  failDeliverMilestone: { value: boolean };
   messages: string[];
   /** Axis id per generator call, in call order. */
   generated: string[];
@@ -349,6 +356,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
 
   const deliveries: Delivery[] = [];
   const messages: string[] = [];
+  const failDeliverMilestone = { value: false };
   const client = {
     getContract: async (id: string) => ({
       id,
@@ -365,6 +373,9 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
       milestoneId: string,
       payload: { note: string; attachments?: string[] },
     ) => {
+      if (failDeliverMilestone.value) {
+        throw new Error('milestone is already accepted; a second delivery was refused');
+      }
       deliveries.push({
         contractId,
         milestoneId,
@@ -446,6 +457,7 @@ async function setup(options: SetupOptions = {}): Promise<Harness> {
     r2,
     deliveries,
     messages,
+    failDeliverMilestone,
     generated,
     fetches,
     axisCompilations: () => axisCompilations,
@@ -2032,7 +2044,10 @@ describe('runVectorStage — vendor and gate failures never deliver', () => {
   });
 
   it('aborts when the winning concept has gone missing from R2', async () => {
-    const h = await setupVector({ winner: 1 });
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
     h.r2.objects.delete(`${h.token}/concept-1.png`);
 
     assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'aborted' });
@@ -2129,3 +2144,151 @@ describe('processJobMessage', () => {
 function axisFixture(axisId: string): string {
   return ['leftHalf', 'topHalf', 'checker'][SLOT_OF[axisId]! - 1]!;
 }
+
+// ---------------------------------------------------------------------------
+// FR-18 — the M2 note and the rebuild delivery (Task 29)
+// ---------------------------------------------------------------------------
+
+/** Deliver M2, then set the contract up for a warranty rebuild of `to`. */
+async function rebuildTo(
+  h: VectorHarness,
+  to: number,
+): Promise<{ revisionKey: string; revisionToken: string }> {
+  await h.selection.markPackDelivered(CONTRACT_ID);
+  const revisionKey = await buildJobKey(CONTRACT_ID, 'vector', 1);
+  const claim = await h.jobs.claimRevision({
+    jobKey: revisionKey,
+    contractId: CONTRACT_ID,
+    stage: 'vector',
+    revision: 1,
+    maxRevisions: 1,
+  });
+  assert.equal(claim.granted, true);
+  await h.selection.openRevision({
+    contractId: CONTRACT_ID,
+    revision: 1,
+    slot: to,
+    source: 'buyer',
+    m1DeliveredAt: new Date().toISOString(),
+  });
+  const revisionToken = (await h.jobs.get(revisionKey))!.deliverableToken!;
+  return { revisionKey, revisionToken };
+}
+
+describe('the M2 note offers the rebuild it can actually perform', () => {
+  it('names the other delivered concepts, in words the parser reads back', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    await runVectorStage(h.config, h.vectorMessage);
+    const note = h.deliveries.at(-1)!.note;
+
+    // NOT a string pin. The instruction the note gives has to be one
+    // `parseRevisionRequest` accepts, so the note is checked by running the
+    // parser over its own words — tightening the parser fails HERE, loudly,
+    // instead of leaving the buyer an instruction nothing can honour.
+    const instruction = /`(rebuild from concept \d)`/.exec(note)?.[1];
+    assert.ok(instruction, 'the note must quote a rebuild instruction');
+    const parsed = parseRevisionRequest(instruction);
+    assert.ok(parsed !== null && parsed !== 1, 'the instruction must name a DIFFERENT concept');
+    assert.match(note, /one rebuild per contract/i);
+  });
+
+  it('says the rebuild is the last one, and offers no further rebuild', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    await runVectorStage(h.config, h.vectorMessage);
+    const { revisionKey } = await rebuildTo(h, 2);
+
+    await runVectorStage(h.config, {
+      contractId: CONTRACT_ID,
+      jobKey: revisionKey,
+      stage: 'vector',
+    });
+    const note = h.deliveries.at(-1)!.note;
+    assert.match(note, /free rebuild included with your warranty/i);
+    assert.doesNotMatch(
+      note,
+      /`rebuild from concept/,
+      'a spent entitlement must not be re-offered',
+    );
+  });
+
+  it('builds the rebuild from the NEW winner and writes it under its own token', async () => {
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    await runVectorStage(h.config, h.vectorMessage);
+    const originalPack = h.r2.objects.get(`${h.vectorToken}/pack.zip`)!.bytes;
+
+    const { revisionKey, revisionToken } = await rebuildTo(h, 2);
+    assert.deepEqual(
+      await runVectorStage(h.config, {
+        contractId: CONTRACT_ID,
+        jobKey: revisionKey,
+        stage: 'vector',
+      }),
+      {
+        outcome: 'delivered',
+      },
+    );
+
+    // The original artifacts are untouched — the buyer's first download link
+    // keeps working, and the dispute document still links what was delivered.
+    assert.deepEqual(h.r2.objects.get(`${h.vectorToken}/pack.zip`)!.bytes, originalPack);
+    assert.ok(h.r2.objects.has(`${revisionToken}/pack.zip`), 'the rebuild gets its own objects');
+    assert.ok(h.r2.objects.has(`${revisionToken}/report.json`));
+
+    // And the new report names the new winner and the revision's own claim key.
+    const report = JSON.parse(
+      new TextDecoder().decode(h.r2.objects.get(`${revisionToken}/report.json`)!.bytes),
+    ) as { winner: { slot: number }; idempotencyKeys: { vector: string } };
+    assert.equal(report.winner.slot, 2);
+    assert.equal(report.idempotencyKeys.vector, revisionKey);
+  });
+
+  it('posts the pack to the thread when a second milestone delivery is refused', async () => {
+    // The platform may or may not accept a second `deliverMilestone` on an
+    // already-accepted milestone — unverified, deliberately, because finding
+    // out means writing to a real contract. Either answer has to work.
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    await runVectorStage(h.config, h.vectorMessage);
+    const { revisionKey, revisionToken } = await rebuildTo(h, 2);
+
+    const deliveriesBefore = h.deliveries.length;
+    h.failDeliverMilestone.value = true;
+    assert.deepEqual(
+      await runVectorStage(h.config, {
+        contractId: CONTRACT_ID,
+        jobKey: revisionKey,
+        stage: 'vector',
+      }),
+      { outcome: 'delivered' },
+    );
+    assert.equal(h.deliveries.length, deliveriesBefore, 'the milestone delivery was refused');
+    // The buyer still gets every file: the objects are in R2 and the thread
+    // message carries their URLs.
+    assert.ok(h.r2.objects.has(`${revisionToken}/pack.zip`));
+    const posted = h.messages.at(-1)!;
+    assert.match(posted, new RegExp(`${revisionToken}/pack\\.zip`));
+  });
+
+  it('does NOT swallow a failed FIRST delivery — that must still retry', async () => {
+    // Revision 0's failure handling is load-bearing: it throws, the queue
+    // retries, and a genuinely broken delivery reaches the DLQ alert.
+    const h = await setupVector({
+      winner: 1,
+      vectorizer: fakeVectorizer({ ok: true, svg: TRACED_SVG, source: 'vectorizer', costUsd: 0.2 }),
+    });
+    h.failDeliverMilestone.value = true;
+    await assert.rejects(() => runVectorStage(h.config, h.vectorMessage));
+    assert.deepEqual(h.messages, [], 'the original delivery must not degrade to a thread post');
+  });
+});
