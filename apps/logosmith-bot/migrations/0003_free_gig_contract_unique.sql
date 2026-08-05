@@ -1,0 +1,23 @@
+-- One free-gig allowance per contract, enforced by the database.
+--
+-- WHY UNIQUE AND NOT JUST AN INDEX. `QuotaStore.consume` is idempotent per
+-- contract today because of a `NOT EXISTS (SELECT 1 ... WHERE contract_id = ?)`
+-- clause inside its INSERT. That clause is correct, but it is the ONLY thing
+-- standing between a queue retry and a payer being charged twice for one job —
+-- a property that important should be structural, not a subquery someone can
+-- refactor away without the schema noticing. With this constraint, a second row
+-- for one contract is impossible regardless of what the application does.
+--
+-- WHY IT ALSO MATTERS FOR COST. Every free job runs three lookups against this
+-- table: `holdsAllowance` at the stage entry, `holdsAllowance` again inside
+-- `consume`, and the `NOT EXISTS` subquery — the last of those inside the write
+-- statement, holding the write lock while it scans. `free_gig_usage` is
+-- append-only, never pruned, and its growth is attacker-influenced: a full scan
+-- measured 9.5 ms at 200k rows, and on D1 a full scan bills every row it reads.
+-- This turns all three into index lookups.
+--
+-- Safe on an existing database: nothing has ever written two rows for one
+-- contract_id, because the NOT EXISTS clause has been there since the column
+-- was first written. (`idx_free_gig_payer` in 0001 stays — it serves
+-- `countRecent`, whose predicate is payer_id + created_at.)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_free_gig_contract ON free_gig_usage (contract_id);

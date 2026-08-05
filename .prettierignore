@@ -18,3 +18,16 @@ CLAUDE.md
 bots/**/*.md
 docs/**/*.md
 .github/**/*.md
+
+# Committed sample RUN OUTPUT — the exact bytes the bot produced and a buyer
+# would receive. Reformatting them would make the samples disagree with the
+# deliverable they exist to document, and every regeneration would reintroduce
+# the diff. Only `pack/` is generated; the hand-written READMEs, the briefs and
+# `run-live.ts` alongside it stay formatted.
+apps/logosmith-bot/samples/*/pack/
+
+# Git-ignored SDD working directory (plan ledgers, task briefs and reports).
+# CI never sees it — it is not committed — so leaving it unignored here made
+# `pnpm format:check` report ~107 failures locally that do not exist in CI, and
+# every agent on this branch had to stop and explain the discrepancy.
+.superpowers/

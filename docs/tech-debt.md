@@ -1,5 +1,23 @@
 # Tech Debt
 
+## CI Still Builds Retired Fly Bots; Workers Apps Have No Config Check
+
+**Area:** `.github/workflows/ci.yml` (docker-build matrix) + the five Workers apps
+
+**Recorded 2026-08-05** (while adding `deploy-logosmith.yml`): the
+`docker-build` matrix still hadolints and builds Docker images for the three
+retired Fly bots (sentinel/flow/verifier) on every push — CI minutes spent on
+apps that no longer deploy anywhere (`deploy-agents.yml` is disabled dead
+code). Meanwhile the other five Workers apps (jiffyapp-bot/-dispatch,
+thumbforge-bot/-probe, voicewright-bot) get no `wrangler deploy --dry-run`
+config/bundle check in CI at all; logosmith-bot is the only one with a deploy
+pipeline.
+
+**Options when picked up:** drop the retired bots from the docker-build matrix
+(or remove the matrix and `deploy-agents.yml` together); add a matrixed
+`wrangler deploy --dry-run` CI job for the Workers apps; clone
+`deploy-logosmith.yml` per Workers bot as each goes live.
+
 ## Bots Un-restartable Mid-Contract (Platform 409 Profile Lock) — MITIGATED, platform fix pending
 
 **Area:** `packages/agent-core/src/registration.ts` + platform `PATCH /bots/:id`

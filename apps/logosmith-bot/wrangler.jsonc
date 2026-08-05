@@ -1,0 +1,78 @@
+// LogoSmith Worker configuration (PRD §7).
+//
+// Resource ids and WEBHOOK_BASE_URL are the real provisioned values
+// (account thinkerstew / e247a0ed…). Re-provisioning D1/KV means
+// re-running `wrangler d1 create` / `wrangler kv namespace create` and
+// updating the ids here.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "logosmith-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  // Required by agent-core's Buffer use (client.ts data:-URL attachments).
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // The deployed Worker's public URL (evidence links, progress page,
+    // webhook registration).
+    "WEBHOOK_BASE_URL": "https://logosmith-bot.thinkerstew.workers.dev",
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "logosmith",
+      "database_id": "05dc401f-0681-4de1-bba9-1fcbf2252628",
+    },
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "CACHE",
+      "id": "4f94212b423e46558e8d825c82969966",
+    },
+  ],
+
+  "r2_buckets": [{ "binding": "DELIVERABLES", "bucket_name": "logosmith-deliverables" }],
+
+  // Workers AI: Llama 4 Scout vision (OCR gate) + FLUX.2 [klein] (free taster).
+  // Account binding — no API key.
+  "ai": { "binding": "AI" },
+
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "logosmith-jobs" }],
+    "consumers": [
+      {
+        "queue": "logosmith-jobs",
+        // One job stage per invocation — pixmap work is memory-bound (§12).
+        "max_batch_size": 1,
+        // Transient errors only; vendor outages park in D1 instead of
+        // burning retries (FR-2).
+        "max_retries": 3,
+        "dead_letter_queue": "logosmith-jobs-dlq",
+      },
+      {
+        // DLQ consumer: one operator alert per poisoned message (§12 runbook —
+        // replay by re-enqueueing to logosmith-jobs; claims make it safe).
+        "queue": "logosmith-jobs-dlq",
+        "max_batch_size": 10,
+        "max_retries": 0,
+      },
+    ],
+  },
+
+  "triggers": {
+    // */15: gig-poll + negotiation + thread-selection poll + parked re-enqueue
+    //        + reputation refresh. 0 6: stuck-claim sweep.
+    "crons": ["*/15 * * * *", "0 6 * * *"],
+  },
+
+  "observability": { "enabled": true },
+
+  // Secrets (via `wrangler secret put <NAME>`; see .dev.vars.example):
+  //   BOTGUILD_API_URL, BOTGUILD_API_KEY, BOTGUILD_BOT_ID, ANTHROPIC_API_KEY,
+  //   MODERATION_API_KEY, IDEOGRAM_API_KEY, RECRAFT_API_KEY,
+  //   VECTORIZER_AI_TOKEN, GOOGLE_FONTS_API_KEY, ADMIN_TOKEN
+  // The platform-issued webhook signing secret is NOT a wrangler secret — it is
+  // captured at registration and persisted in D1 (§10.2).
+}

@@ -1,0 +1,613 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { checkTrueVector, sanitizeSvg } from './vector.js';
+
+const TRUE_VECTOR =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+  '<path d="M10 10 H90 V90 H10 Z" fill="#0F3D3E"/>' +
+  '<circle cx="50" cy="50" r="20" fill="#E8C39E"/></svg>';
+
+describe('checkTrueVector', () => {
+  it('passes a paths-and-shapes-only SVG with a viewBox', () => {
+    const result = checkTrueVector(TRUE_VECTOR);
+    assert.equal(result.pass, true);
+    assert.deepEqual(result.violations, []);
+    assert.equal(result.census.path, 1);
+    assert.equal(result.census.shape, 1);
+    assert.equal(result.census.hasViewBox, true);
+  });
+
+  it('fails an SVG that wraps a raster in an <image> element', () => {
+    const result = checkTrueVector(
+      '<svg viewBox="0 0 10 10"><image href="data:image/png;base64,iVBOR"/></svg>',
+    );
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /image/.test(v)));
+  });
+
+  it('fails an SVG with a raster href on any element', () => {
+    const result = checkTrueVector(
+      '<svg viewBox="0 0 10 10"><path d="M0 0" fill="url(data:image/png;base64,x)"/></svg>',
+    );
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /raster/i.test(v)));
+  });
+
+  it('fails an SVG containing <text> (outlined paths only)', () => {
+    const result = checkTrueVector('<svg viewBox="0 0 10 10"><text x="0" y="0">Hi</text></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /text/.test(v)));
+  });
+
+  it('fails <foreignObject> and <script>', () => {
+    for (const body of ['<foreignObject><div/></foreignObject>', '<script>alert(1)</script>']) {
+      const result = checkTrueVector(`<svg viewBox="0 0 10 10">${body}</svg>`);
+      assert.equal(result.pass, false, body);
+    }
+  });
+
+  it('fails an event-handler attribute', () => {
+    const result = checkTrueVector(
+      '<svg viewBox="0 0 10 10"><path d="M0 0" onload="steal()"/></svg>',
+    );
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /event/i.test(v)));
+  });
+
+  it('fails an SVG with no viewBox', () => {
+    const result = checkTrueVector('<svg><path d="M0 0"/></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+  });
+});
+
+describe('sanitizeSvg', () => {
+  it('strips script elements and their contents', () => {
+    const out = sanitizeSvg(
+      '<svg viewBox="0 0 1 1"><script>alert(1)</script><path d="M0 0"/></svg>',
+    );
+    assert.ok(!/script/i.test(out));
+    assert.ok(/<path/.test(out));
+  });
+
+  it('strips foreignObject blocks', () => {
+    const out = sanitizeSvg(
+      '<svg viewBox="0 0 1 1"><foreignObject><div>x</div></foreignObject><path d="M0 0"/></svg>',
+    );
+    assert.ok(!/foreignObject/i.test(out));
+    assert.ok(/<path/.test(out));
+  });
+
+  it('strips on* event attributes but keeps legitimate ones', () => {
+    const out = sanitizeSvg(
+      '<svg viewBox="0 0 1 1"><path d="M0 0" onclick="x()" fill="#fff"/></svg>',
+    );
+    assert.ok(!/onclick/i.test(out));
+    assert.ok(/fill="#fff"/.test(out));
+    assert.ok(/d="M0 0"/.test(out));
+  });
+
+  it('produces output that passes the gate it defends', () => {
+    const dirty =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+      '<script>x()</script><path d="M10 10 H90 V90 H10 Z" onmouseover="y()" fill="#000"/></svg>';
+    assert.equal(checkTrueVector(sanitizeSvg(dirty)).pass, true);
+  });
+});
+
+describe('namespace-prefix bypass regression tests (critical)', () => {
+  it('CRITICAL: raw gate detects namespace-prefixed <ns1:script>', () => {
+    const probe =
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:ns1="http://www.w3.org/2000/svg" ' +
+      'viewBox="0 0 10 10"><ns1:script>alert(document.domain)</ns1:script><path d="M0 0 L1 1" ' +
+      'fill="#000"/></svg>';
+    // Raw gate must detect and reject the ns1:script
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns1:script');
+    assert.ok(rawResult.violations.some((v) => /script/i.test(v)));
+    // Sanitize+gate: sanitize strips the ns1:script, so gate passes on cleaned output
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(
+      gatedResult.pass,
+      true,
+      'after sanitize, ns1:script is removed so gate should pass',
+    );
+  });
+
+  it('CRITICAL: raw gate detects namespace-prefixed <ns1:foreignObject>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<ns1:foreignObject xmlns:ns1="http://www.w3.org/2000/svg">' +
+      '<div xmlns="http://www.w3.org/1999/xhtml" onclick="evil()">x</div>' +
+      '</ns1:foreignObject><path d="M0 0 L1 1" fill="#000"/></svg>';
+    // Raw gate must reject on both foreignObject and onclick
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns1:foreignObject');
+    assert.ok(
+      rawResult.violations.some((v) => /foreignObject/i.test(v)),
+      'should detect foreignObject in violations',
+    );
+    // Sanitize removes the ns1:foreignObject entirely (it's a dangerous element), so gate passes
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, true, 'sanitize removes foreignObject, leaving clean output');
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <ns1:image> raster bypass', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<ns1:image xmlns:ns1="http://www.w3.org/2000/svg" href="https://evil.example.com/raster.png"/>' +
+      '<path d="M0 0 L1 1" fill="#000"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'ns1:image should fail even with a legitimate path sibling');
+  });
+
+  it('rejects javascript: href in <a> element', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<a href="javascript:alert(document.cookie)"><circle cx="5" cy="5" r="2"/></a></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'javascript: href should fail');
+    assert.ok(result.violations.some((v) => /javascript:/i.test(v)));
+  });
+
+  it('rejects lowercase "viewbox=" (case-sensitive per XML)', () => {
+    const probe = '<svg viewbox="0 0 10 10"><path d="M0 0 L1 1" fill="#000"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false, 'lowercase viewbox should not satisfy the gate');
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+  });
+
+  it('positive guard: realistic vendor SVG with defs/gradients/clipPath must PASS', () => {
+    // A realistic SVG using all allowlisted elements should pass
+    const vendor =
+      '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+      '<defs>' +
+      '<linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="0%">' +
+      '<stop offset="0%" style="stop-color:rgb(255,255,0);stop-opacity:1" />' +
+      '<stop offset="100%" style="stop-color:rgb(255,0,0);stop-opacity:1" />' +
+      '</linearGradient>' +
+      '<clipPath id="clip"><rect x="10" y="10" width="80" height="80"/></clipPath>' +
+      '</defs>' +
+      '<title>My Logo</title>' +
+      '<g clip-path="url(#clip)">' +
+      '<path d="M 10 10 L 90 90" stroke="url(#grad1)" stroke-width="2"/>' +
+      '<path d="M 90 10 L 10 90" stroke="url(#grad1)" stroke-width="2"/>' +
+      '</g>' +
+      '</svg>';
+    const result = checkTrueVector(vendor);
+    assert.equal(
+      result.pass,
+      true,
+      `vendor SVG should pass; got violations: ${result.violations.join(', ')}`,
+    );
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <ns2:style>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><ns2:style xmlns:ns2="http://www.w3.org/2000/svg">*{fill:red}</ns2:style><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject ns2:style
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns2:style');
+    assert.ok(
+      rawResult.violations.some((v) => /style/i.test(v)),
+      'violation should name style element',
+    );
+    // After sanitize, ns2:style is still there (not a dangerous element in the stripped list)
+    // but allowlist rejects it
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'ns2:style should fail the gate (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /style/i.test(v)));
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <ns9:iframe>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><ns9:iframe xmlns:ns9="http://www.w3.org/2000/svg" src="https://evil.example.com/x"/><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject ns9:iframe
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject ns9:iframe');
+    assert.ok(
+      rawResult.violations.some((v) => /iframe/i.test(v)),
+      'violation should name iframe element',
+    );
+    // After sanitize, ns9:iframe remains but should still fail
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'ns9:iframe should fail the gate (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /iframe/i.test(v)));
+  });
+
+  it('CRITICAL: rejects namespace-prefixed <weird:animateTransform>', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><weird:animateTransform xmlns:weird="http://www.w3.org/2000/svg" xlink:href="#x"/><path d="M0 0 L1 1"/></svg>';
+    // Raw gate must reject weird:animateTransform
+    const rawResult = checkTrueVector(probe);
+    assert.equal(rawResult.pass, false, 'raw gate should reject weird:animateTransform');
+    assert.ok(
+      rawResult.violations.some((v) => /animateTransform/i.test(v)),
+      'violation should name animateTransform',
+    );
+    // After sanitize, weird:animateTransform remains but should still fail
+    const sanitized = sanitizeSvg(probe);
+    const gatedResult = checkTrueVector(sanitized);
+    assert.equal(gatedResult.pass, false, 'weird:animateTransform should fail (not in allowlist)');
+    assert.ok(gatedResult.violations.some((v) => /animateTransform/i.test(v)));
+  });
+
+  it('positive guard: vendor SVG with metadata+RDF must PASS after sanitize (metadata stripped)', () => {
+    // Vendor metadata with RDF: raw gate may reject due to rdf:RDF and dc:title,
+    // but sanitize removes the metadata subtree, leaving clean output.
+    // Test only the sanitize→gate sequence.
+    const vendorWithMetadata =
+      '<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">' +
+      '<metadata>' +
+      '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">' +
+      '<rdf:Description>' +
+      '<dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">My Logo</dc:title>' +
+      '</rdf:Description>' +
+      '</rdf:RDF>' +
+      '</metadata>' +
+      '<defs><linearGradient id="g1"><stop offset="0%"/></linearGradient></defs>' +
+      '<path d="M 10 10 L 90 90" stroke="url(#g1)" stroke-width="2"/>' +
+      '</svg>';
+    // After sanitize: metadata subtree is stripped, leaving only defs + path + viewBox
+    const sanitized = sanitizeSvg(vendorWithMetadata);
+    const result = checkTrueVector(sanitized);
+    assert.equal(
+      result.pass,
+      true,
+      `vendor SVG with metadata should pass after sanitize; got violations: ${result.violations.join(', ')}`,
+    );
+  });
+});
+
+describe('external-reference regression tests (critical — allow-list the FORM, not a scheme blocklist)', () => {
+  it('CRITICAL: rejects a <style> rule smuggling an external url() — TWO mechanisms fire at once', () => {
+    // The exact reproduction: a CSS rule referencing an outside origin,
+    // applied via a class selector rather than a direct attribute. Both the
+    // allowlist (<style> is not a recognized element) AND the new
+    // fragment-only reference check (the url() text inside the <style>
+    // block is found by the same whole-document scan that finds one in any
+    // other attribute) reject this independently — neither depends on the
+    // other, which is exactly why the laundered form two tests down still
+    // fails even once the <style> tag itself is gone.
+    const probe =
+      '<svg viewBox="0 0 10 10"><style>.a{fill:url(https://evil.example.com/track.svg)}</style>' +
+      '<path class="a" d="M0 0 L1 1"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(
+      result.violations.some((v) => /non-vector element: <style>/i.test(v)),
+      'the allowlist must reject the <style> tag itself',
+    );
+    assert.ok(
+      result.violations.some((v) => /non-fragment reference/i.test(v)),
+      'the whole-document url() scan must ALSO reject the smuggled reference, independent of the allowlist',
+    );
+  });
+
+  it('CRITICAL: rejects the LAUNDERED form — url() inlined onto an allowed element, <style> gone', () => {
+    // This is what SVGO's inlineStyles plugin (part of preset-default)
+    // produces from the probe above: the <style> tag is deleted, the rule
+    // becomes an inline `style=` attribute on the <path> it targeted. The
+    // <style> exclusion in the allowlist can no longer catch this — it never
+    // sees a <style> tag. This is what the fragment-only check exists to
+    // catch, and it must also catch vendor markup that arrives in this shape
+    // NATIVELY, with no <style> tag ever involved at any point.
+    const laundered =
+      '<svg viewBox="0 0 10 10"><path d="m0 0 1 1" ' +
+      'style="fill:url(https://evil.example.com/track.svg)"/></svg>';
+    const result = checkTrueVector(laundered);
+    assert.equal(result.pass, false, 'laundered inline style= must still be rejected');
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+  });
+
+  it('CRITICAL: rejects <use href="..."> pointing at an external document', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><defs><path id="p" d="M0 0 L1 1"/></defs>' +
+      '<use href="https://evil.example.com/other.svg#x"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+  });
+
+  it('CRITICAL: rejects an external xlink:href on a gradient', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10"><defs>' +
+      '<linearGradient id="g1" xlink:href="https://evil.example.com/other.svg#grad"/>' +
+      '</defs><path d="M0 0 L1 1" fill="url(#g1)"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+  });
+
+  it('rejects a protocol-relative external reference with no explicit scheme', () => {
+    const probe =
+      '<svg viewBox="0 0 10 10">' +
+      '<path d="M0 0 L1 1" style="fill:url(//evil.example.com/x.svg)"/></svg>';
+    const result = checkTrueVector(probe);
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+  });
+
+  describe('CRITICAL (round 2 review) — schemes that need no "//" at all', () => {
+    // Per the WHATWG URL Standard, the six "special" schemes (http, https,
+    // ws, wss, ftp, file) do not require "//" — the parser inserts it:
+    // new URL('https:evil.example.com/x').href === 'https://evil.example.com/x'
+    // (verified against Node's own URL implementation before writing this).
+    // A regex requiring a literal "//" — the previous round's EXTERNAL_REF_RE
+    // — never sees this as a match, so it shipped. The fragment-only
+    // allowlist below closes it by construction: "https:evil.example.com/x"
+    // simply does not start with "#", full stop, no scheme reasoning at all.
+    const NO_SLASH_URL = 'https:evil.example.com/x.svg#y';
+
+    it('rejects href="https:evil.example.com/x.svg#y" (no "//")', () => {
+      const probe = `<svg viewBox="0 0 10 10"><use href="${NO_SLASH_URL}"/><path d="M0 0 L1 1"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects xlink:href="https:evil.example.com/x.svg#y" (no "//")', () => {
+      const probe =
+        `<svg viewBox="0 0 10 10"><defs><linearGradient id="g1" xlink:href="${NO_SLASH_URL}"/>` +
+        '</defs><path d="M0 0 L1 1" fill="url(#g1)"/></svg>';
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects url(https:evil.example.com/x.svg#y) (no "//")', () => {
+      const probe = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" style="fill:url(${NO_SLASH_URL})"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+  });
+
+  describe('CRITICAL (round 2 review) — ASCII tab/newline inside the scheme', () => {
+    // The WHATWG URL parser's OWN first preprocessing step is "remove all
+    // ASCII tab or newline from input" — wherever they occur, not just at
+    // the ends. new URL('h\tttps://evil.example.com/x').href ===
+    // 'https://evil.example.com/x' (verified before writing this). A
+    // contiguous-match regex never sees "h\tttps://" as "https://". The
+    // fragment-only allowlist strips tab/newline the same way BEFORE
+    // judging the value, so this closes by the same construction as above.
+    const TAB_IN_SCHEME = 'h\tttps://evil.example.com/x';
+
+    it('rejects href="h<TAB>ttps://evil.example.com/x"', () => {
+      const probe = `<svg viewBox="0 0 10 10"><use href="${TAB_IN_SCHEME}"/><path d="M0 0 L1 1"/></svg>`;
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+
+    it('rejects url(https:<TAB>//evil.example.com/x) (tab straight after the colon)', () => {
+      const probe =
+        '<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" ' +
+        'style="fill:url(https:\t//evil.example.com/x)"/></svg>';
+      const result = checkTrueVector(probe);
+      assert.equal(result.pass, false);
+      assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+    });
+  });
+
+  it('positive guard: xlink:href gradient chains, clip-path, and mask references still pass', () => {
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="base"><stop offset="0%"/></linearGradient>' +
+      '<linearGradient id="g1" xlink:href="#base"/>' +
+      '<clipPath id="c"><rect width="5" height="5"/></clipPath>' +
+      '<mask id="m"><rect width="10" height="10" fill="#fff"/></mask>' +
+      '</defs><g clip-path="url(#c)" mask="url(#m)">' +
+      '<path d="M0 0 L1 1" fill="url(#g1)"/></g></svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `legitimate internal references must not be flagged; got: ${result.violations.join(', ')}`,
+    );
+  });
+
+  it('positive guard: quoted, whitespace-padded, and uppercase fragment forms all still pass', () => {
+    // A literal apostrophe, not an HTML entity: checkTrueVector is a raw
+    // string scan, not an entity-decoding parser, so "&#39;" would reach it
+    // as the five literal characters "&#39;" — not a quote at all — and
+    // prove nothing about url('#id') handling.
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="g1"><stop offset="0%"/></linearGradient>' +
+      '</defs>' +
+      '<path d="M0 0 L1 1" style="fill:url(\'#g1\')"/>' + // single-quoted
+      '<path d="M1 1 L2 2" style="fill:url( #g1 )"/>' + // whitespace-padded
+      '<path d="M2 2 L3 3" style="fill:URL(#g1)"/>' + // uppercase function name
+      '<use HREF="#g1"/>' + // uppercase attribute name
+      '</svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `quoted/padded/uppercase fragment forms must not be flagged; got: ${result.violations.join(', ')}`,
+    );
+  });
+
+  it('positive guard: same-document fragment references are NOT external and still pass', () => {
+    // url(#id), href="#id" — the ordinary, extremely common way an SVG
+    // references its OWN <defs>. Must not be swept up by the new check.
+    const legit =
+      '<svg viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><defs>' +
+      '<linearGradient id="g1"><stop offset="0%"/></linearGradient>' +
+      '</defs><use href="#g1"/><path d="M0 0 L1 1" style="fill:url(#g1)"/></svg>';
+    const result = checkTrueVector(legit);
+    assert.equal(
+      result.pass,
+      true,
+      `internal fragment refs must not be flagged; got: ${result.violations.join(', ')}`,
+    );
+  });
+
+  describe('CRITICAL — an unterminated url( HID the url() that followed it', () => {
+    // THE HOLE IS A SKIPPED CAPTURE, NOT AN INACCURATE ONE, and that
+    // distinction is why it survived a review round. The Task 20 ledger
+    // derived "the captured value is a prefix of the real value, so a `#`
+    // prefix means the real value is a fragment" and concluded no external
+    // reference could be smuggled through the paren gap. That invariant is
+    // TRUE — and it is about the fidelity of one capture, while the defect is
+    // that a second capture is never taken at all.
+    //
+    // `URL_FN_RE` was greedy to the next `)` and `matchAll` resumes after the
+    // WHOLE match, so `url(#g` swallowed the document up to the next paren and
+    // every `url()` inside that span went unexamined. The swallowing capture
+    // starts with `#`, reads as a pure fragment, and the gate passed.
+    //
+    // `url(#g` at end-of-input is a valid CSS <url-token>, so a renderer
+    // paints one fragment and FETCHES ONE EXTERNAL URL — the exact impact
+    // Task 20's Critical 1 closed, re-opened.
+    const EVIL = 'https://evil.example.com/x';
+
+    const probes: Array<[string, string]> = [
+      [
+        'a second url() in the SAME element, behind an unterminated first',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(#g" clip-path="url(${EVIL})"/></svg>`,
+      ],
+      [
+        'a url() in a LATER element, behind an unterminated first',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(#g"/><rect fill="url(${EVIL})"/></svg>`,
+      ],
+      [
+        'an unterminated url( with no closing paren anywhere in the document',
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" style="fill:url(${EVIL}"/></svg>`,
+      ],
+    ];
+
+    for (const [name, probe] of probes) {
+      it(`rejects ${name}`, () => {
+        // The fixture is only a test of this defect if it CONTAINS the
+        // reference — assert that inline, so a future edit that rewrites the
+        // probe into something harmless fails loudly instead of passing
+        // vacuously.
+        assert.ok(probe.includes(EVIL), 'fixture must actually carry the external reference');
+        const result = checkTrueVector(probe);
+        assert.equal(result.pass, false);
+        assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+      });
+    }
+
+    it('CONTROL: the same external url() with no unterminated url( in front was always caught', () => {
+      // Proves the probes above differ from the control by exactly the
+      // swallowing prefix, and nothing else.
+      const control = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1" fill="url(${EVIL})"/></svg>`;
+      assert.equal(checkTrueVector(control).pass, false);
+    });
+
+    // FOUND WHILE CONFIRMING THAT href WAS *UN*AFFECTED — IT WAS NOT.
+    //
+    // `HREF_ATTR_RE` consumes too, and its `\1` backreference means one
+    // unmatched quote re-pairs every quote after it. This needs NO malformed
+    // markup: `<desc>` and `<title>` are allow-listed, and their TEXT may
+    // legally contain a raw `"`. `sanitizeSvg` strips neither.
+    it('rejects an external href hidden behind an unmatched quote in allow-listed text', () => {
+      const probes = [
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><desc>href="#g</desc>` +
+          `<use href="${EVIL}.svg"/></svg>`,
+        `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><title>see href='#g</title>` +
+          `<use xlink:href='${EVIL}.svg'/></svg>`,
+      ];
+      for (const probe of probes) {
+        assert.ok(probe.includes(EVIL), 'fixture must carry the external reference');
+        const result = checkTrueVector(probe);
+        assert.equal(result.pass, false, probe);
+        assert.ok(result.violations.some((v) => /non-fragment reference/i.test(v)));
+      }
+    });
+
+    it('still accepts a same-document fragment whose value merely contains "#"-free noise', () => {
+      // The Task 20 prefix invariant, still true and still load-bearing: this
+      // whole value starts with `#`, so it resolves same-document and must not
+      // be rejected.
+      const legit = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><use href="#g and more"/></svg>`;
+      assert.equal(checkTrueVector(legit).pass, true);
+    });
+
+    it('DISCLOSED OVER-REJECTION: an href value that itself embeds an external href= is refused', () => {
+      // `href="#g href='https://evil…'"` resolves as ONE same-document
+      // fragment, so a renderer would not fetch it, and the per-occurrence
+      // scan refuses it anyway — it has no XML parser and cannot tell a nested
+      // `href=` inside a value from a real second attribute.
+      //
+      // Kept deliberately: the fail-closed direction, at the cost of a value
+      // shape no optimizer or vector vendor emits. Pinned here so the
+      // trade-off is a recorded decision rather than a surprise.
+      const odd = `<svg viewBox="0 0 10 10"><path d="M0 0 L1 1"/><use href="#g href='${EVIL}'"/></svg>`;
+      assert.equal(checkTrueVector(odd).pass, false);
+    });
+
+    it('stays linear on adversarial megabyte documents rather than rescanning per occurrence', () => {
+      // The per-occurrence rescan is only safe because two PURE captures
+      // cannot overlap: a pure capture holds exactly one `#`, at its own
+      // start, so a later reference beginning inside it could not also begin
+      // with one. The loop therefore either stops at the first impure capture
+      // or walks a partition of the document. `freeGigs.ts` hands this gate a
+      // buyer-supplied SVG of up to 10 MB, so this is a reachable input, and
+      // a quadratic scan there is a Worker CPU-limit denial of service.
+      const head = '<svg viewBox="0 0 1 1"><path d="M0 0"/>';
+      const cases: Array<[string, boolean]> = [
+        [`${head}<g style="${'url('.repeat(260_000)})"/></svg>`, false],
+        [`${head}<g style="${'url(#g)'.repeat(150_000)}"/></svg>`, true],
+        [`${head}<desc>${'href="'.repeat(180_000)}</desc></svg>`, false],
+        [`${head}${'<use href="#a"/>'.repeat(70_000)}</svg>`, true],
+      ];
+      const started = performance.now();
+      for (const [svg, expected] of cases) {
+        assert.ok(svg.length > 1_000_000, 'fixture must be big enough to expose quadratic cost');
+        assert.equal(checkTrueVector(svg).pass, expected);
+      }
+      assert.ok(
+        performance.now() - started < 5_000,
+        'the reference scan must not be quadratic in document length',
+      );
+    });
+  });
+});
+
+describe('viewBox value validation (critical — presence alone was not enough)', () => {
+  it('CRITICAL: rejects viewBox="bogus" even though the attribute is present', () => {
+    const result = checkTrueVector('<svg viewBox="bogus"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+    assert.equal(result.census.hasViewBox, false);
+  });
+
+  it('rejects a viewBox with the wrong number of components', () => {
+    const result = checkTrueVector('<svg viewBox="0 0 10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.pass, false);
+    assert.ok(result.violations.some((v) => /viewBox/.test(v)));
+  });
+
+  it('accepts a comma-separated viewBox', () => {
+    const result = checkTrueVector('<svg viewBox="0,0,10,10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.census.hasViewBox, true);
+  });
+
+  it('accepts negative and decimal viewBox components', () => {
+    const result = checkTrueVector('<svg viewBox="-5 -5.5 10.25 10"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(result.census.hasViewBox, true);
+  });
+
+  it('IMPORTANT (round 2 review): accepts scientific-notation components — spec-legal, was a false rejection', () => {
+    // SVG's own <number> grammar permits an exponent. Before this fix,
+    // VIEWBOX_NUMBER_RE had no exponent support, so a well-formed,
+    // spec-legal logo with this (unusual but valid) viewBox would fail to
+    // ship — a false rejection, the opposite failure mode from the Criticals
+    // in the sibling describe block above.
+    const result = checkTrueVector('<svg viewBox="0 0 1e2 1e2"><path d="M0 0 L1 1"/></svg>');
+    assert.equal(
+      result.census.hasViewBox,
+      true,
+      "exponent notation is legal per SVG's <number> grammar and must not be rejected",
+    );
+    assert.equal(result.pass, true);
+  });
+});

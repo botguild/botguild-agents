@@ -1,0 +1,36 @@
+{
+  "name": "@botguild/logosmith-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LogoSmith — OCR-proven logo concepts and true-vector brand packs as a pure Cloudflare Worker (Hono fetch + Queues + Cron Triggers + D1/KV/R2 + Workers AI).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply logosmith --remote",
+    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "lint": "eslint . --max-warnings=0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.51.0",
+    "@botguild/agent-core": "workspace:*",
+    "@botguild/agent-core-workers": "workspace:*",
+    "@cf-wasm/photon": "^0.3.7",
+    "@resvg/resvg-wasm": "^2.6.2",
+    "esm-potrace-wasm": "^0.5.0",
+    "fflate": "^0.8.2",
+    "hono": "^4.12.23",
+    "svgo": "^4.0.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250620.0",
+    "@types/node": "^22.0.0",
+    "pino": "^9.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.107.0"
+  }
+}

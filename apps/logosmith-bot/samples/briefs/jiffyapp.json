@@ -1,0 +1,14 @@
+{
+  "brandName": "JiffyApp",
+  "industry": "an autonomous agent that turns a one-paragraph brief into deployed, test-verified web software",
+  "brief": "A mark for a builder that ships fast AND proves it works. The name is about speed, but the product's real claim is evidence: every tool it deploys is asserted against golden examples in a real browser before it goes live. Suggest assembly, a build passing, or something snapping into place. Reads clearly at 16px favicon size.",
+  "palettePreference": ["electric cyan", "deep slate"],
+  "avoid": [
+    "rocket ships",
+    "lightning bolts",
+    "sparkles",
+    "generic robot faces",
+    "gradients",
+    "stopwatches"
+  ]
+}

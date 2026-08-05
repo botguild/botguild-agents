@@ -9,7 +9,7 @@ on this GitHub plan).
 | Branch | Purpose | Default? |
 |---|---|---|
 | `develop` | Integration branch — every epic/feature lands here first | **yes** (GitHub default) |
-| `main` | Release branch — only release-ready commits; pushes here trigger Fly.io deploys | no |
+| `main` | Release branch — only release-ready commits (the retired Fly bots used to deploy from here) | no |
 | `epic/eN-<slug>` | Long-lived branch for a whole epic that contains multiple stories | branched off `develop`; merges back to `develop` |
 | `feature/<slug>` | Short-lived branch for a single story or bugfix | branched off `develop`; merges back to `develop` |
 | `release/<version>` | Optional — a stabilization branch when a release needs final polish | branched off `develop`; merges to both `main` and `develop` |
@@ -77,7 +77,12 @@ release from `develop` will silently regress it.
 - All required checks (lint, typecheck, test, docker-build × 3) must be green
   before merging — but this is enforced by reviewer convention and the PR
   status panel, not by GitHub branch protection.
-- The deploy workflow (`deploy-agents.yml`) triggers only on push to `main`.
+- `deploy-agents.yml` (the retired Fly bots' main-triggered deploy) is disabled
+  dead code. The live deploy workflow is `deploy-logosmith.yml`: it
+  auto-deploys the LogoSmith Worker on pushes to `develop` that touch its app
+  subtree, the shared `packages/`, or the workflow file — gated on its own
+  logosmith-scoped typecheck + tests (full CI runs in parallel and is not a
+  dependency).
 
 ## FAQ
 
@@ -88,7 +93,12 @@ and let `develop` absorb integration risk.
 
 **Why not a "develop is the deploy branch" model?**
 Because Fly.io deploys money-spending production. The mental model "what's on
-main is what's in production" is the easiest invariant to defend.
+main is what's in production" is the easiest invariant to defend. That
+reasoning applied to the retired Fly bots; the LogoSmith Worker (2026-08)
+deliberately deviates and deploys from `develop`, path-filtered and
+self-gated — atomic Workers deploys plus a per-app test gate make the smaller
+blast radius an acceptable trade for not running a release branch per Worker
+bot.
 
 **Can I push directly to `develop`?**
 Technically yes, no rules block it. Don't — every change should ride a
