@@ -304,6 +304,10 @@ wrangler d1 create logosmith
 wrangler kv namespace create CACHE
 wrangler r2 bucket create logosmith-deliverables   # if it doesn't already exist
 
+# Both queues too — `wrangler deploy` binds them but does NOT create them.
+wrangler queues create logosmith-jobs
+wrangler queues create logosmith-jobs-dlq
+
 # 2. Set WEBHOOK_BASE_URL in wrangler.jsonc's "vars" to this Worker's real
 #    public URL (or your custom domain) — it is baked into every deliverable
 #    link, progress-page URL, and the webhook registration call itself.
@@ -346,6 +350,23 @@ not skip it and assume it will silently start working immediately.
 Sanity-check the deploy with `GET /health` — it should return
 `{"status": ..., "botId": "bot-logosmith", ...}`, with a `reputation` field
 once the cron has run at least once.
+
+### CI auto-deploy (GitHub Actions)
+
+Steps 3 and 5 also run automatically: `.github/workflows/deploy-logosmith.yml`
+applies migrations and deploys on every push to `develop` that touches
+`apps/logosmith-bot/`, `packages/agent-core/`, `packages/agent-core-workers/`,
+or the workflow file itself — gated on a logosmith-scoped typecheck + test
+run, and finished with the same `GET /health` sanity check. It needs two
+GitHub repo secrets: `CLOUDFLARE_API_TOKEN` (the "Edit Cloudflare Workers"
+token template, plus D1 Edit) and `CLOUDFLARE_ACCOUNT_ID`. The workflow can
+also be dispatched manually (Actions → Deploy LogoSmith) for redeploys no
+trigger path covers — e.g. a dependency bump that only changes
+`pnpm-lock.yaml` — and for the pre-merge bring-up run from the `logosmith`
+branch.
+
+If the smoke check fails, the newly deployed version **stays live** — roll
+back by hand with `wrangler rollback` (run in `apps/logosmith-bot/`).
 
 ## DLQ replay runbook
 
