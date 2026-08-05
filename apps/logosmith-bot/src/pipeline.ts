@@ -655,6 +655,17 @@ function gateLines(gates: PackGateReport): string[] {
             .join('; ')}.`),
     `- favicon.ico parse-back: ${gates.ico.pass ? `PASS — lists ${gates.ico.sizes.join(', ')}` : `FAIL — ${gates.ico.reason ?? 'unreadable'}`}.`,
     `- ZIP completeness: ${gates.zip.pass ? `PASS — ${gates.zip.present.length} entries` : `FAIL — ${gates.zip.reasons.join('; ')}`}.`,
+    // Named to the buyer, pass or fall back. A favicon rendered from the whole
+    // lockup is legible to nobody at 16 px, and the one thing worse than
+    // shipping one is shipping one without saying so.
+    `- Favicon source: ${
+      gates.favicon.source === 'mark-crop'
+        ? `mark cropped from your logo — ${(gates.favicon.coverage * 100).toFixed(0)}% of the ` +
+          `icon is mark, and the lettering readback found no wordmark on it` +
+          (gates.favicon.text.status === 'ok' ? '.' : ` (readback ${gates.favicon.text.status}).`)
+        : `the whole logo, scaled down — ${gates.favicon.reason ?? 'no reason recorded'}.`
+    }`,
+    `- Favicon ink: ${gates.favicon.ink.pass ? 'PASS' : 'FAIL'} — ${gates.favicon.ink.opaquePixels ?? 'undecodable'} opaque pixels in ${gates.favicon.ink.file}.`,
   ];
 }
 
@@ -1653,6 +1664,11 @@ export async function runVectorStage(
     brandName: brief.brandName,
     sources: config.sources,
     fonts,
+    // The favicon mark is DERIVED by geometry and REFUTED by this: a favicon
+    // that still reads back as the brand name is the whole lockup shrunk to
+    // 32 px, which is what this bot shipped until the JiffyApp sample showed
+    // it. One extra vision call per delivery, on a model already in the stage.
+    ocr: services.ocrGate,
   });
 
   // --- Step 9: pack gates ------------------------------------------------------

@@ -171,10 +171,27 @@ const toPixmap = async (png: Uint8Array, sources: Awaited<ReturnType<typeof node
   });
 
   log('\n── 5. vectorise ────────────────────────────────────────────');
-  const vec = await vectorizer.toVector({ png: winner.png, nativeSvg: winner.nativeSvg });
+  // CACHED FOR THE SAME REASON THE CONCEPTS ARE. A Vectorizer.ai trace is
+  // $0.20 and is not deterministic — a re-run returns a slightly different
+  // path set — so re-buying it both spends money and silently changes the
+  // committed sample out from under whatever the re-run was meant to show.
+  // Delete this file to buy a fresh trace on purpose.
+  const vectorPath = `${OUT}/concepts/vector-${winner.axis.id}.svg`;
+  const vec = existsSync(vectorPath)
+    ? ({
+        ok: true,
+        svg: readFileSync(vectorPath, 'utf8'),
+        source: 'vectorizer',
+        costUsd: 0,
+      } as const)
+    : await vectorizer.toVector({ png: winner.png, nativeSvg: winner.nativeSvg });
   if (!vec.ok) throw new Error(`vectorise failed: ${vec.error}`);
   spend += vec.costUsd;
-  log(`  ${vec.source}  $${vec.costUsd}  ${(vec.svg.length / 1024).toFixed(1)}KB`);
+  if (!existsSync(vectorPath)) writeFileSync(vectorPath, vec.svg);
+  log(
+    `  ${vec.source}  $${vec.costUsd}${vec.costUsd === 0 ? ' (cached — already paid)' : ''}  ` +
+      `${(vec.svg.length / 1024).toFixed(1)}KB`,
+  );
 
   // The documented gap: only the emblem axis routes to Recraft, so ~2 of 3
   // buyers receive a TRACED raster rather than a native vector. Trace one
@@ -197,7 +214,17 @@ const toPixmap = async (png: Uint8Array, sources: Awaited<ReturnType<typeof node
     fetchImpl: fetch as never,
     apiKey: process.env.GOOGLE_FONTS_API_KEY!,
   });
-  const pack = await buildPack({ svg: vec.svg, brandName: brief.brandName, sources, fonts });
+  const pack = await buildPack({
+    svg: vec.svg,
+    brandName: brief.brandName,
+    sources,
+    fonts,
+    // The same gate stage 1 read the lettering with, pointed at the favicon to
+    // prove the OPPOSITE: a favicon that reads back as the brand name is the
+    // whole lockup shrunk to 32 px. Passing it here is what makes this sample
+    // exercise the shipped path rather than a degraded one.
+    ocr: ocrGate,
+  });
   for (const [name, bytes] of Object.entries(pack.files))
     writeFileSync(`${OUT}/pack/${name}`, bytes);
   writeFileSync(`${OUT}/${brief.brandName.toLowerCase()}-brand-pack.zip`, pack.zip);
@@ -207,6 +234,28 @@ const toPixmap = async (png: Uint8Array, sources: Awaited<ReturnType<typeof node
     `  gates pass: ${pack.gates.pass}  violations: ${JSON.stringify(pack.gates.vector.violations)}`,
   );
   log(`  palette: ${pack.brand.colors.map((c) => c.hex).join(' ')}`);
+
+  const fav = pack.gates.favicon;
+  log('\n── 7. favicon derivation ───────────────────────────────────');
+  log(`  source: ${fav.source}${fav.reason ? ` — ${fav.reason}` : ''}`);
+  if (fav.crop)
+    log(
+      `  crop: ${fav.crop.size}x${fav.crop.size} at ${fav.crop.x},${fav.crop.y} of a ` +
+        `${fav.crop.probeWidth}x${fav.crop.probeHeight} analysis render`,
+    );
+  log(`  components: ${fav.textComponents} lettering, ${fav.markComponents} mark candidate(s)`);
+  log(`  mark coverage of the icon: ${(fav.coverage * 100).toFixed(1)}%`);
+  log(
+    `  ink: ${fav.ink.opaquePixels} opaque px in ${fav.ink.file} (${fav.ink.pass ? 'PASS' : 'FAIL'})`,
+  );
+  log(
+    `  lettering readback: ${fav.text.status}` +
+      (fav.text.status === 'ok'
+        ? ` "${fav.text.transcription}" ${fav.text.letteringChars} chars, ` +
+          `${(fav.text.brandSimilarity ?? 0).toFixed(2)} vs the brand name — ` +
+          `${fav.text.pass ? 'no wordmark on the favicon' : 'STILL READS AS THE WORDMARK'}`
+        : ''),
+  );
 
   log(`\n══ REAL VENDOR SPEND THIS RUN: $${spend.toFixed(3)} ═══════════\n`);
 })().catch((e: Error) => {

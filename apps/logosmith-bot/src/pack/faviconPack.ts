@@ -198,7 +198,7 @@ export async function decodeRasterSource(bytes: Uint8Array): Promise<Dimensions 
  * margin of 33 px against the most degenerate real artwork and 290 against a
  * realistic sparse one.
  */
-const INK_PROBE_PX = 512;
+export const INK_PROBE_PX = 512;
 
 /** Pixels whose alpha byte is non-zero, over a tightly-packed RGBA buffer. */
 function countOpaque(rgba: Uint8Array): number {

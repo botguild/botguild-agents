@@ -43,7 +43,7 @@ import {
 } from './gates/index.js';
 import type { ConceptRow, GateAuditRow } from './jobs.js';
 import { MODERATION_MODEL, MODERATION_VENDOR, type ModerationVerdict } from './moderation.js';
-import type { PackGateReport } from './pack/index.js';
+import type { FaviconMarkReport, PackGateReport } from './pack/index.js';
 import type { SelectionSource } from './types.js';
 
 // --- Validation report --------------------------------------------------------
@@ -180,6 +180,58 @@ export interface ReportModeration {
   images: ReportImageModeration[] | null;
 }
 
+/**
+ * WHERE THE FAVICONS CAME FROM, said out loud in the evidence pack.
+ *
+ * A favicon carries almost no detail and essentially never carries text, so
+ * the pack derives a MARK from the winning logo rather than downscaling the
+ * whole lockup — and when it cannot, it keeps the old whole-logo behaviour.
+ * Both outcomes are legitimate; only one of them is what the buyer wants, and
+ * a delivery that quietly took the second while the report implied the first
+ * is precisely the silent degradation this document exists to make impossible.
+ *
+ * `letteringReadback` is the interesting field. It is the same pinned vision
+ * model §9 uses to prove the CONCEPTS carry the brand name, pointed at the
+ * favicon to prove the opposite: a favicon that reads back as the brand name
+ * is a shrunken lockup. Measured on the JiffyApp delivery, the icon this
+ * replaced read back "Jiffyapp" at similarity 1.00.
+ */
+export interface ReportFavicon {
+  /** `mark-crop` (a mark was found and verified) or `whole-logo` (fallback). */
+  source: 'mark-crop' | 'whole-logo';
+  /** The window taken out of the logo, in analysis-pixel space; null on fallback. */
+  crop: { x: number; y: number; size: number; probeWidth: number; probeHeight: number } | null;
+  /** Why the fallback was taken. `null` exactly when `source` is `mark-crop`. */
+  reason: string | null;
+  /** Components the geometry read as lettering and excluded from the mark. */
+  textComponents: number;
+  /** Mark-candidate components left after that exclusion. */
+  markComponents: number;
+  /**
+   * Share of the delivered icon that is mark rather than background.
+   *
+   * REPORTED BECAUSE `inkOpaquePixels` DOES NOT DISCRIMINATE ON EVERY LOGO. A
+   * logo that paints an opaque field behind its artwork saturates the alpha
+   * count at every size, so the ink gate proves the icon draws and nothing
+   * more. Coverage is the number that moved on JiffyApp: 12.1% -> 36.7% at
+   * 16 px, while opaque pixels stayed at 256/256 on both sides.
+   */
+  coverage: number;
+  /** Task 23's ink gate, re-run on the delivered `icon-512.png`. */
+  inkOpaquePixels: number | null;
+  inkPass: boolean;
+  letteringReadback: {
+    /** `not-run` means no gate was supplied — an absent check, not a passed one. */
+    status: 'ok' | 'not-run' | 'unavailable';
+    transcription: string | null;
+    letteringChars: number | null;
+    brandSimilarity: number | null;
+    /** True when nothing refuted the crop. `unavailable`/`not-run` cannot refute. */
+    pass: boolean;
+  };
+  pass: boolean;
+}
+
 export interface ReportCaps {
   /**
    * The FR-5 cap on CONCEPT-STAGE image generation — the only spend it governs.
@@ -220,6 +272,7 @@ export interface ValidationReport {
   dimensions: ReportDimension[];
   ico: ReportIco;
   zip: ReportZip;
+  favicon: ReportFavicon;
   moderation: ReportModeration;
   caps: ReportCaps;
   idempotencyKeys: ReportIdempotencyKeys;
@@ -403,6 +456,33 @@ function toReportZip(zip: ZipGateResult): ReportZip {
   };
 }
 
+/**
+ * Copy the favicon derivation into the report, field by field.
+ *
+ * Spread-free on purpose: `PackGateReport.favicon` carries the live gate
+ * objects, and every value here has to be a plain JSON scalar for rule 2 (the
+ * whole report survives `JSON.parse(JSON.stringify(...))`). `?? null` rather
+ * than passing an optional through, for the same reason `toReportIco` does it.
+ */
+const toReportFavicon = (favicon: FaviconMarkReport): ReportFavicon => ({
+  source: favicon.source,
+  crop: favicon.crop === null ? null : { ...favicon.crop },
+  reason: favicon.reason,
+  textComponents: favicon.textComponents,
+  markComponents: favicon.markComponents,
+  coverage: favicon.coverage,
+  inkOpaquePixels: favicon.ink.opaquePixels,
+  inkPass: favicon.ink.pass,
+  letteringReadback: {
+    status: favicon.text.status,
+    transcription: favicon.text.transcription,
+    letteringChars: favicon.text.letteringChars,
+    brandSimilarity: favicon.text.brandSimilarity,
+    pass: favicon.text.pass,
+  },
+  pass: favicon.pass,
+});
+
 const toReportIco = (ico: IcoGateResult): ReportIco => ({
   pass: ico.pass,
   sizes: [...ico.sizes],
@@ -441,6 +521,7 @@ export function buildValidationReport(input: ReportInput): ValidationReport {
     })),
     ico: toReportIco(input.gates.ico),
     zip: toReportZip(input.gates.zip),
+    favicon: toReportFavicon(input.gates.favicon),
     moderation: {
       input: summarizeInputScreening(input.moderationAudits),
       images: input.visionChecks === null ? null : input.visionChecks.map((c) => ({ ...c })),

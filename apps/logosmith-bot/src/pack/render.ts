@@ -1,6 +1,11 @@
 // resvg rendering (FR-11). Every favicon and master PNG is rendered from the
-// vector at its exact target size — never produced by resizing a larger raster,
-// which is what makes the 16px favicon legible instead of mush.
+// vector at its exact target size — never produced by resizing a larger raster.
+//
+// THAT IS NECESSARY AND NOT SUFFICIENT, and this comment used to claim
+// otherwise ("which is what makes the 16px favicon legible instead of mush").
+// It is what makes the 16 px icon SHARP; it says nothing about what is IN it,
+// and a whole wide lockup drawn crisply at 16 px is still mush. Choosing the
+// image the favicons are drawn from is `pack/mark.ts`'s job.
 
 import { Resvg } from '@resvg/resvg-wasm';
 import type { Pixmap } from '../types.js';

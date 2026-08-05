@@ -1756,6 +1756,15 @@ describe('runVectorStage — a Recraft-native winner never touches Vectorizer.ai
     assert.ok(report.dimensions.every((entry) => entry.pass));
     assert.deepEqual(report.ico.sizes, [16, 32, 48]);
     assert.ok(report.zip.manifest.includes('logo.svg'));
+    // WHERE THE FAVICONS CAME FROM reaches the buyer's evidence pack. This
+    // fixture takes the fallback — the suite's fake readback transcribes the
+    // brand name off everything it is shown, which is exactly the refutation
+    // the gate is for — so the report must SAY so rather than imply a mark.
+    assert.equal(report.favicon.source, 'whole-logo');
+    assert.match(report.favicon.reason!, /read back as lettering/);
+    assert.equal(report.favicon.letteringReadback.status, 'ok');
+    assert.equal(report.favicon.letteringReadback.pass, false);
+    assert.equal(report.favicon.inkPass, true, 'the delivered icon still has ink');
     assert.equal(report.moderation.images!.length, 3, 'one unsafe-flag snapshot per concept');
     assert.ok(report.moderation.images!.every((image) => image.unsafe === false));
     assert.deepEqual(report.evidenceGaps, [], 'every record was sourced');
@@ -1987,6 +1996,10 @@ describe('runVectorStage — vendor and gate failures never deliver', () => {
     assert.equal((await h.jobs.get(h.vectorJobKey))?.outcome, 'aborted');
     assert.match(h.messages[0]!, /did not clear its own delivery gates/);
     assert.match(h.messages[0]!, /logo-color-1024\.png is 1024x512, expected 1024x1024/);
+    // The buyer is told what their favicons were made from, on every note that
+    // lists gate results. Silent degradation is the failure mode this closes.
+    assert.match(h.messages[0]!, /Favicon source:/);
+    assert.match(h.messages[0]!, /Favicon ink:/);
 
     const { results } = await h.db
       .prepare("SELECT result FROM gate_audit WHERE gate = 'pack' AND job_key = ?")
@@ -2072,11 +2085,13 @@ describe('runVectorStage — vendor and gate failures never deliver', () => {
   });
 });
 
-// The stage-1 guard's twin (see above). buildPack drives ten resvg renders —
-// two masters, six favicons, the mono pixmap, and the mono master — inside one
-// stage invocation, which is precisely the kind of loop that put Task 10 at
-// 129.5 MB against the 128 MB isolate ceiling. This fails if anyone adds a bare
-// `new Resvg` to the vector stage rather than going through pack/render.ts.
+// The stage-1 guard's twin (see above). buildPack drives twelve resvg renders
+// inside one stage invocation, which is precisely the kind of loop that put
+// Task 10 at 129.5 MB against the 128 MB isolate ceiling. This fails if anyone
+// adds a bare `new Resvg` to the vector stage rather than going through
+// pack/render.ts — and it is also the tripwire on the favicon derivation's
+// render budget, which is why the count is broken out below rather than
+// asserted as a bare number.
 describe('runVectorStage — wasm buffers are released', () => {
   it('frees one Resvg and one RenderedImage for every render the pack triggers', async () => {
     const sources = nodeWasmSources();
@@ -2097,8 +2112,15 @@ describe('runVectorStage — wasm buffers are released', () => {
     const imageFree = mock.method(renderedImageProto, 'free');
     try {
       assert.deepEqual(await runVectorStage(h.config, h.vectorMessage), { outcome: 'delivered' });
-      // 2 masters + 6 favicons + the mono pixmap + the mono master.
-      assert.equal(render.mock.callCount(), 10);
+      // 2 masters + the mark-derivation probe + the crop's 512px verification
+      // render + 6 favicons + the mono pixmap + the mono master.
+      //
+      // SIX FAVICONS, NOT FIVE, because this fixture takes the FALLBACK: the
+      // suite's fake readback transcribes the brand name off every image it is
+      // shown, so the derived crop is refuted and the whole logo is used. That
+      // is the expensive branch — the mark branch reuses its verification
+      // render as `icon-512.png` and costs 11.
+      assert.equal(render.mock.callCount(), 2 + 1 + 1 + 6 + 1 + 1);
       assert.equal(resvgFree.mock.callCount(), render.mock.callCount());
       assert.equal(imageFree.mock.callCount(), render.mock.callCount());
     } finally {

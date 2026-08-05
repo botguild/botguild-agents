@@ -4,7 +4,7 @@ import { MAX_REGENS_PER_SLOT, MAX_SPEND_USD } from './config.js';
 import { checkTrueVector, hammingDistance, fromHex } from './gates/index.js';
 import type { ConceptRow, GateAuditRow } from './jobs.js';
 import { MODERATION_MODEL, MODERATION_VENDOR, type ModerationVerdict } from './moderation.js';
-import type { PackGateReport } from './pack/index.js';
+import type { FaviconMarkReport, PackGateReport } from './pack/index.js';
 import {
   buildLicenseManifest,
   buildValidationReport,
@@ -130,9 +130,29 @@ const gates = (over: Partial<PackGateReport> = {}): PackGateReport => ({
   ],
   ico: { pass: true, sizes: [16, 32, 48] },
   zip: { pass: true, present: ['logo.svg', 'brand.json'], missing: [], reasons: [] },
+  favicon: FAVICON_MARK,
   pass: true,
   ...over,
 });
+
+/** A pack whose favicons were cropped to the logo's mark and verified. */
+const FAVICON_MARK: FaviconMarkReport = {
+  source: 'mark-crop',
+  crop: { x: 119, y: 198, size: 35, probeWidth: 512, probeHeight: 512 },
+  reason: null,
+  textComponents: 8,
+  markComponents: 11,
+  coverage: 0.32,
+  ink: { file: 'icon-512.png', opaquePixels: 262144, pass: true },
+  text: {
+    status: 'ok',
+    transcription: '',
+    letteringChars: 0,
+    brandSimilarity: 0,
+    pass: true,
+  },
+  pass: true,
+};
 
 const reportInput = (over: Partial<ReportInput> = {}): ReportInput => ({
   contractId: 'contract-1',
@@ -317,6 +337,58 @@ describe('buildValidationReport — pack gate evidence', () => {
       reasons: [],
     });
     assert.equal(report.gatesPass, true);
+  });
+
+  it('names what the favicons were derived from, and what was measured on them', () => {
+    const report = buildValidationReport(reportInput());
+    assert.equal(report.favicon.source, 'mark-crop');
+    assert.deepEqual(report.favicon.crop, {
+      x: 119,
+      y: 198,
+      size: 35,
+      probeWidth: 512,
+      probeHeight: 512,
+    });
+    assert.equal(report.favicon.reason, null);
+    assert.equal(report.favicon.coverage, 0.32);
+    assert.equal(report.favicon.inkOpaquePixels, 262144);
+    assert.equal(report.favicon.inkPass, true);
+    assert.deepEqual(report.favicon.letteringReadback, {
+      status: 'ok',
+      transcription: '',
+      letteringChars: 0,
+      brandSimilarity: 0,
+      pass: true,
+    });
+  });
+
+  it('states the whole-logo fallback and its reason rather than degrading silently', () => {
+    const report = buildValidationReport(
+      reportInput({
+        gates: gates({
+          favicon: {
+            ...FAVICON_MARK,
+            source: 'whole-logo',
+            crop: null,
+            coverage: 0,
+            reason: 'every element of this logo is lettering',
+            text: {
+              status: 'ok',
+              transcription: 'Harbor & Vine',
+              letteringChars: 12,
+              brandSimilarity: 1,
+              pass: false,
+            },
+          },
+        }),
+      }),
+    );
+    assert.equal(report.favicon.source, 'whole-logo');
+    assert.equal(report.favicon.crop, null);
+    assert.match(report.favicon.reason!, /lettering/);
+    assert.equal(report.favicon.letteringReadback.pass, false);
+    // A refuted crop is not a failed delivery: the pack still ships.
+    assert.equal(report.favicon.pass, true);
   });
 
   it('quotes a failing ICO reason instead of dropping it', () => {
@@ -607,6 +679,23 @@ describe('buildValidationReport — serialization', () => {
             missing: ['logo.svg'],
             reasons: ['buffer did not unzip'],
           },
+          favicon: {
+            source: 'whole-logo',
+            crop: null,
+            reason: 'the logo rendered no artwork to analyse',
+            textComponents: 0,
+            markComponents: 0,
+            coverage: 0,
+            ink: { file: 'icon-512.png', opaquePixels: null, pass: false },
+            text: {
+              status: 'unavailable',
+              transcription: null,
+              letteringChars: null,
+              brandSimilarity: null,
+              pass: true,
+            },
+            pass: false,
+          },
           pass: false,
         }),
       }),
@@ -616,6 +705,9 @@ describe('buildValidationReport — serialization', () => {
     // A round-trip that silently dropped an `undefined` key would still
     // deep-equal, so pin the fields that would carry one.
     assert.equal(roundTripped.ico.reason, 'buffer did not parse as an ICO');
+    assert.equal(roundTripped.favicon.crop, null);
+    assert.equal(roundTripped.favicon.inkOpaquePixels, null);
+    assert.equal(roundTripped.favicon.letteringReadback.transcription, null);
     assert.equal(roundTripped.concepts[0]!.ocr, null);
     assert.equal(roundTripped.moderation.input.verdict, null);
     assert.equal(roundTripped.winner.axisId, null, 'the winning slot is not in this fixture');
