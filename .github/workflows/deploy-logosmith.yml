@@ -13,9 +13,10 @@ on:
       - packages/agent-core/**
       - packages/agent-core-workers/**
       - .github/workflows/deploy-logosmith.yml
-  # Manual fallback: dependency-bump-only redeploys (pnpm-lock.yaml is
-  # deliberately not a trigger path) and the pre-merge bring-up run
-  # dispatched from the logosmith branch.
+  # Manual fallback for redeploys no trigger path covers (e.g. a dependency
+  # bump that only changes pnpm-lock.yaml). Note: GitHub offers
+  # workflow_dispatch only once this file is on the default branch — the
+  # bring-up deploy is the merge-to-develop push itself (provision first).
   workflow_dispatch:
 
 # Queue deploys rather than overlap; never cancel a run mid-migration.
@@ -38,6 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup
+
+      # The shared packages resolve through their package exports -> dist/, and
+      # the direct pnpm --filter commands below bypass turbo's ^build dependency
+      # (which is what builds dist/ in root CI). Build them explicitly first —
+      # "^..." selects the app's workspace dependencies, not the app itself.
+      - name: Build workspace deps
+        run: pnpm --filter "@botguild/logosmith-bot^..." build
 
       # Self-contained gate — logosmith plus the workspace packages compiled
       # into its bundle ("..." = the package and its workspace deps). Full
@@ -78,5 +86,9 @@ jobs:
           echo "$body"
           echo "$body" | grep -q '"botId": *"bot-logosmith"' || {
             echo "/health body did not contain botId bot-logosmith" >&2
+            exit 1
+          }
+          echo "$body" | grep -q '"status": *"ok"' || {
+            echo "/health body did not contain status ok" >&2
             exit 1
           }

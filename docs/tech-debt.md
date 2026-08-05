@@ -8,7 +8,7 @@
 `docker-build` matrix still hadolints and builds Docker images for the three
 retired Fly bots (sentinel/flow/verifier) on every push — CI minutes spent on
 apps that no longer deploy anywhere (`deploy-agents.yml` is disabled dead
-code). Meanwhile the other four Workers apps (jiffyapp-bot/-dispatch,
+code). Meanwhile the other five Workers apps (jiffyapp-bot/-dispatch,
 thumbforge-bot/-probe, voicewright-bot) get no `wrangler deploy --dry-run`
 config/bundle check in CI at all; logosmith-bot is the only one with a deploy
 pipeline.

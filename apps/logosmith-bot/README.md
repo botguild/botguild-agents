@@ -359,14 +359,20 @@ applies migrations and deploys on every push to `develop` that touches
 or the workflow file itself — gated on a logosmith-scoped typecheck + test
 run, and finished with the same `GET /health` sanity check. It needs two
 GitHub repo secrets: `CLOUDFLARE_API_TOKEN` (the "Edit Cloudflare Workers"
-token template, plus D1 Edit) and `CLOUDFLARE_ACCOUNT_ID`. The workflow can
-also be dispatched manually (Actions → Deploy LogoSmith) for redeploys no
-trigger path covers — e.g. a dependency bump that only changes
-`pnpm-lock.yaml` — and for the pre-merge bring-up run from the `logosmith`
-branch.
+token template, plus D1 Edit) and `CLOUDFLARE_ACCOUNT_ID`. The CI smoke
+check expects `BOTGUILD_BOT_ID` to be exactly `bot-logosmith`. The workflow
+can also be dispatched manually (Actions → Deploy LogoSmith) for redeploys
+no trigger path covers — e.g. a dependency bump that only changes
+`pnpm-lock.yaml`. GitHub offers manual dispatch only once the workflow file
+is on `develop` (the default branch), so the bring-up deploy is the merge
+itself: provision and set every secret first, then merge — that push runs
+the first gated deploy.
 
 If the smoke check fails, the newly deployed version **stays live** — roll
 back by hand with `wrangler rollback` (run in `apps/logosmith-bot/`).
+Because migrations apply before deploy, a failed deploy leaves the prior
+Worker version running against the already-migrated schema — migrations
+must stay backward-compatible with the previous deploy (expand/contract).
 
 ## DLQ replay runbook
 
