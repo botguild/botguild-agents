@@ -34,7 +34,7 @@ jobs:
     env:
       # The gate runs node-only tests; skip Playwright's ~150MB Chromium
       # download that the workspace install would otherwise trigger.
-      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup
