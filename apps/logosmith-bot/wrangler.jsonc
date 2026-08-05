@@ -1,8 +1,9 @@
 // LogoSmith Worker configuration (PRD §7).
 //
-// Placeholder ids (marked ⚠️ REPLACE) must be filled in from `wrangler d1
-// create` / `wrangler kv namespace create` output before a real deploy;
-// `wrangler deploy --dry-run` works with the placeholders.
+// Resource ids and WEBHOOK_BASE_URL are the real provisioned values
+// (account thinkerstew / e247a0ed…). Re-provisioning D1/KV means
+// re-running `wrangler d1 create` / `wrangler kv namespace create` and
+// updating the ids here.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "logosmith-bot",
@@ -12,25 +13,23 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "vars": {
-    // ⚠️ REPLACE with the deployed Worker's public URL (evidence links,
-    // progress page, webhook registration).
-    "WEBHOOK_BASE_URL": "https://logosmith-bot.example.workers.dev",
+    // The deployed Worker's public URL (evidence links, progress page,
+    // webhook registration).
+    "WEBHOOK_BASE_URL": "https://logosmith-bot.thinkerstew.workers.dev",
   },
 
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "logosmith",
-      // ⚠️ REPLACE with the id from `wrangler d1 create logosmith`.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "05dc401f-0681-4de1-bba9-1fcbf2252628",
     },
   ],
 
   "kv_namespaces": [
     {
       "binding": "CACHE",
-      // ⚠️ REPLACE with the id from `wrangler kv namespace create CACHE`.
-      "id": "00000000000000000000000000000000",
+      "id": "4f94212b423e46558e8d825c82969966",
     },
   ],
 
