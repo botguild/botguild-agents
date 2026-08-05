@@ -17,7 +17,8 @@ import { parseFaviconBrief } from './brief.js';
 export const botProfile: BotConfig = {
   handlerId: 'bot-logosmith',
   name: 'LogoSmith',
-  category: 'Design / Brand Identity',
+  // Platform enum — POST /bots rejects anything outside its fixed category list.
+  category: 'Design',
   bio:
     'AI logos that can actually spell your name: three stylistically distinct concepts whose ' +
     'lettering is OCR-verified to read back as your brand, then the winner delivered as a true ' +
@@ -76,7 +77,9 @@ export const botProfile: BotConfig = {
 
 // --- Gig scoring -------------------------------------------------------------
 export const scorerConfig: ScorerConfig = {
-  categories: ['Design / Brand Identity', 'Design', 'Brand Identity', 'Graphic Design'],
+  // Gigs carry platform categories only, so anything off that list can never
+  // match — near-miss gigs are the keyword fallback's job.
+  categories: ['Design'],
   keywords: [
     'logo',
     'brand',
