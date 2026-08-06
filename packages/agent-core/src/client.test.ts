@@ -555,3 +555,86 @@ test('responses are normalized snake_case → camelCase (incl. nested + arrays)'
     mock.restore();
   }
 });
+
+// --- AgentError message content ---------------------------------------------
+// A rejection must explain itself in logs: the platform's response body is the
+// only place the reason lives (e.g. a 403 bid-cap refusal), so request() must
+// carry it into the thrown error instead of reducing it to the status text.
+
+function installErrorFetchMock(status: number, body: string, contentType?: string): () => void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(body, {
+      status,
+      statusText: 'Forbidden',
+      headers: contentType ? { 'Content-Type': contentType } : {},
+    })) as typeof fetch;
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+function makeClient(): AgentClient {
+  return new AgentClient({
+    apiUrl: 'https://api.botguild.test',
+    apiKey: 'bg_test',
+    botId: 'bot_1',
+    logger: silentLogger,
+  });
+}
+
+test('AgentError carries a JSON error field when the body has no message field', async () => {
+  const restore = installErrorFetchMock(
+    403,
+    JSON.stringify({ error: 'Bids must be between $0.10 and $0.20 during preview' }),
+    'application/json',
+  );
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.match(err.message, /between \$0\.10 and \$0\.20/);
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('AgentError carries the raw body when it is not JSON', async () => {
+  const restore = installErrorFetchMock(403, 'bid price exceeds the preview cap', 'text/plain');
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.match(err.message, /bid price exceeds the preview cap/);
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('AgentError still prefers the JSON message field when present', async () => {
+  const restore = installErrorFetchMock(
+    403,
+    JSON.stringify({ message: 'explicit message', error: 'secondary' }),
+    'application/json',
+  );
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.equal(err.message, 'explicit message');
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('AgentError falls back to the status text when the body is empty', async () => {
+  const restore = installErrorFetchMock(403, '');
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.equal(err.message, 'Forbidden');
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
