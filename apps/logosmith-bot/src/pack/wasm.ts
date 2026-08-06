@@ -64,28 +64,39 @@ let potraceReady: Promise<void> | undefined;
  */
 export function ensurePotraceReady(source?: PotraceWasmSource): Promise<void> {
   void source;
-  potraceReady ??= importPotraceWithLocationShim().then((mod) => mod.init());
+  potraceReady ??= importPotraceWithHostShims().then((mod) => mod.init());
   return potraceReady;
 }
 
 /**
- * potrace's Emscripten glue probes its host at import time: seeing a
- * WorkerGlobalScope and no `__filename`, it reads `self.location.href` for
- * its own script URL — a value it only ever uses to locate a separate
- * `.wasm` file this build doesn't have (the wasm is inlined). Cloudflare
- * Workers expose WorkerGlobalScope but no `location`, so the module body
- * throws before `init()` exists — this dead-lettered a live vector stage
- * (contract 01KZBQE99RPWQ33Q9KK6JK2XHM, 2026-08-06). Lend the glue a
- * throwaway URL for the one import, and remove it after: `location` must not
- * leak into the isolate, where other libraries feature-detect browsers on it.
+ * potrace's Emscripten glue probes its host at import time, and Cloudflare
+ * Workers (nodejs_compat) satisfy each probe just far enough to crash — this
+ * dead-lettered a live vector stage twice (contract
+ * 01KZBQE99RPWQ33Q9KK6JK2XHM, 2026-08-06):
+ *
+ *   1. No `__filename` + a WorkerGlobalScope → it reads `self.location.href`
+ *      for its own script URL. Workers have no `location` → TypeError.
+ *   2. `process.versions.node` present and `process.type != "renderer"` → it
+ *      takes its Node branch, where `require("node:fs")` succeeds
+ *      (nodejs_compat provides it) but bare `__dirname` doesn't exist in the
+ *      bundle → ReferenceError.
+ *
+ * Both values are only ever used to locate a separate `.wasm` file this build
+ * doesn't have (the wasm is inlined), so lend the glue throwaway stand-ins
+ * for the one import and remove them after — neither `location` nor
+ * `__dirname` may leak into the isolate, where other libraries feature-detect
+ * their host on them.
  */
-async function importPotraceWithLocationShim(): Promise<typeof import('esm-potrace-wasm')> {
-  const globals = globalThis as { location?: unknown };
-  const needsShim = typeof globals.location === 'undefined';
-  if (needsShim) globals.location = new URL('https://potrace-wasm.invalid/');
+async function importPotraceWithHostShims(): Promise<typeof import('esm-potrace-wasm')> {
+  const globals = globalThis as { location?: unknown; __dirname?: unknown };
+  const needsLocation = typeof globals.location === 'undefined';
+  const needsDirname = typeof globals.__dirname === 'undefined';
+  if (needsLocation) globals.location = new URL('https://potrace-wasm.invalid/');
+  if (needsDirname) globals.__dirname = '/';
   try {
     return await import('esm-potrace-wasm');
   } finally {
-    if (needsShim) delete globals.location;
+    if (needsLocation) delete globals.location;
+    if (needsDirname) delete globals.__dirname;
   }
 }
