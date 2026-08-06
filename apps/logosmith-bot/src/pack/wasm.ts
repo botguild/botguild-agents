@@ -64,6 +64,28 @@ let potraceReady: Promise<void> | undefined;
  */
 export function ensurePotraceReady(source?: PotraceWasmSource): Promise<void> {
   void source;
-  potraceReady ??= import('esm-potrace-wasm').then((mod) => mod.init());
+  potraceReady ??= importPotraceWithLocationShim().then((mod) => mod.init());
   return potraceReady;
+}
+
+/**
+ * potrace's Emscripten glue probes its host at import time: seeing a
+ * WorkerGlobalScope and no `__filename`, it reads `self.location.href` for
+ * its own script URL — a value it only ever uses to locate a separate
+ * `.wasm` file this build doesn't have (the wasm is inlined). Cloudflare
+ * Workers expose WorkerGlobalScope but no `location`, so the module body
+ * throws before `init()` exists — this dead-lettered a live vector stage
+ * (contract 01KZBQE99RPWQ33Q9KK6JK2XHM, 2026-08-06). Lend the glue a
+ * throwaway URL for the one import, and remove it after: `location` must not
+ * leak into the isolate, where other libraries feature-detect browsers on it.
+ */
+async function importPotraceWithLocationShim(): Promise<typeof import('esm-potrace-wasm')> {
+  const globals = globalThis as { location?: unknown };
+  const needsShim = typeof globals.location === 'undefined';
+  if (needsShim) globals.location = new URL('https://potrace-wasm.invalid/');
+  try {
+    return await import('esm-potrace-wasm');
+  } finally {
+    if (needsShim) delete globals.location;
+  }
 }
