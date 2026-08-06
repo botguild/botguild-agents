@@ -240,3 +240,42 @@ test('handleDisputedContract does not throw when the alert itself fails', async 
   // reaching here = no throw
   assert.ok(true);
 });
+
+// --- Workers fetch binding --------------------------------------------------
+// Cloudflare Workers' global fetch is this-sensitive: calling a detached
+// reference with any other receiver throws "Illegal invocation". The SDK's
+// BotGuildMCP stores `config.fetch ?? fetch` on the instance and invokes it as
+// `this.fetchImpl(...)`, so AgentMcpClient must hand it a fetch that tolerates
+// being re-bound. This fake reproduces the Workers behaviour in Node.
+
+test('default BotGuildMCP transport works with a this-sensitive global fetch', async () => {
+  const originalFetch = globalThis.fetch;
+  const reputation = { handler: { handlerId: 'h1', reputationScore: 71, disputeRate: 0 }, bots: [] };
+  globalThis.fetch = function (this: unknown) {
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');
+    }
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: { content: [{ text: JSON.stringify(reputation) }] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+  } as typeof fetch;
+
+  try {
+    const client = new AgentMcpClient({
+      apiUrl: 'https://api.botguild.test',
+      apiKey: 'bg_test',
+      logger: silentLogger,
+    });
+    const result = await client.getMyReputation();
+    assert.equal(result.handler.reputationScore, 71);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
