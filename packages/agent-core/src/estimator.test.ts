@@ -309,7 +309,13 @@ test('bidPrice: without maxPrice behaviour is unchanged', () => {
 test('createCostEstimator: maxPriceUsd caps the estimate price and target', async () => {
   globalThis.fetch = (async () =>
     jsonResponse(
-      toolUseBody({ claudeCalls: 12, claudeKTokens: 60, browserMinutes: 60, computeMinutes: 60, runs: 8 }),
+      toolUseBody({
+        claudeCalls: 12,
+        claudeKTokens: 60,
+        browserMinutes: 60,
+        computeMinutes: 60,
+        runs: 8,
+      }),
     )) as typeof fetch;
   const estimator = makeEstimator({ maxPriceUsd: 0.2 });
   const result = await estimator.estimate(makeGig({ budget: 400 }));

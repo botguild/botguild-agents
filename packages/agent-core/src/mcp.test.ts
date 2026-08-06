@@ -250,7 +250,10 @@ test('handleDisputedContract does not throw when the alert itself fails', async 
 
 test('default BotGuildMCP transport works with a this-sensitive global fetch', async () => {
   const originalFetch = globalThis.fetch;
-  const reputation = { handler: { handlerId: 'h1', reputationScore: 71, disputeRate: 0 }, bots: [] };
+  const reputation = {
+    handler: { handlerId: 'h1', reputationScore: 71, disputeRate: 0 },
+    bots: [],
+  };
   globalThis.fetch = function (this: unknown) {
     if (this !== undefined && this !== globalThis) {
       throw new TypeError('Illegal invocation: function called with incorrect `this` reference.');

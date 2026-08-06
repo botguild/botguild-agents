@@ -58,7 +58,6 @@ describe('config', () => {
     assert.ok(!('amount' in quote.milestones[0]!));
   });
 
-
   it('caps every paid bid at the platform preview maximum', () => {
     // The marketplace preview only accepts bids in a $0.10–$0.20 band — a $1
     // bid is 403-rejected (observed live, gig 01KZ9YRD0Q48C2SRW3T6HCTVHK).
