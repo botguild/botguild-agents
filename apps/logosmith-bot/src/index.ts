@@ -23,11 +23,14 @@ import type { CostEstimator, Gig, Proposer } from '@botguild/agent-core';
 import {
   createConsoleLogger,
   createD1NegotiationStore,
+  createD1RegisteredBotStore,
   createD1WebhookSecretStore,
   createKVSeenStore,
   createWorkersWebhookApp,
   ensureRegisteredWorkers,
+  resolveRegisteredBotId,
   withOwnershipFilter,
+  type D1RegisteredBotStore,
   type D1WebhookSecretStore,
   type WebhookHandler,
 } from '@botguild/agent-core-workers';
@@ -297,6 +300,9 @@ export function createMilestoneFundedHandler(deps: MilestoneFundedDeps): Webhook
 interface Services {
   logger: Logger;
   client: AgentClient;
+  /** The id the client acts as: D1-stored platform id, else BOTGUILD_BOT_ID. */
+  botId: string;
+  botIdStore: D1RegisteredBotStore;
   secretStore: D1WebhookSecretStore;
   jobs: JobStore;
   concepts: ConceptStore;
@@ -311,12 +317,27 @@ interface Services {
 }
 
 // One service graph per isolate — env bindings are stable for its lifetime.
-let services: Services | undefined;
+// Built asynchronously because the ACTIVE bot id is read from D1: the
+// platform-assigned id captured at registration is the only id proposals may
+// be submitted under, and BOTGUILD_BOT_ID is just the pre-registration
+// bootstrap fallback (a stale one 403'd every bid — 2026-08-06).
+let services: Promise<Services> | undefined;
 
-function getServices(env: Env): Services {
-  if (services) return services;
+function getServices(env: Env): Promise<Services> {
+  return (services ??= buildServices(env).catch((err: unknown) => {
+    services = undefined;
+    throw err;
+  }));
+}
 
-  const botId = env.BOTGUILD_BOT_ID;
+/** Drop the memoized graph — call after registration changes the bot id. */
+function resetServices(): void {
+  services = undefined;
+}
+
+async function buildServices(env: Env): Promise<Services> {
+  const botIdStore = createD1RegisteredBotStore(env.DB);
+  const botId = await resolveRegisteredBotId(botIdStore, env.BOTGUILD_BOT_ID);
   const logger = createConsoleLogger({ service: SERVICE, botId });
   const client = new AgentClient({
     apiUrl: env.BOTGUILD_API_URL,
@@ -490,6 +511,7 @@ function getServices(env: Env): Services {
     logger,
     client,
     mcpClient,
+    botIdStore,
     secretStore,
     jobs,
     concepts,
@@ -498,9 +520,11 @@ function getServices(env: Env): Services {
     publicBaseUrl,
     botId,
   });
-  services = {
+  return {
     logger,
     client,
+    botId,
+    botIdStore,
     secretStore,
     jobs,
     concepts,
@@ -513,7 +537,6 @@ function getServices(env: Env): Services {
     sweeps,
     app,
   };
-  return services;
 }
 
 function buildApp(
@@ -522,6 +545,7 @@ function buildApp(
     logger: Logger;
     client: AgentClient;
     mcpClient: AgentMcpClient;
+    botIdStore: D1RegisteredBotStore;
     secretStore: D1WebhookSecretStore;
     jobs: JobStore;
     concepts: ConceptStore;
@@ -690,8 +714,18 @@ function buildApp(
       },
       webhookBaseUrl: env.WEBHOOK_BASE_URL,
       secretStore,
+      botIdStore: deps.botIdStore,
       logger,
     });
+    // Registration may have (re)captured the platform-assigned bot id; drop
+    // the memoized graph so the next invocation acts under it.
+    if (result.botId !== botId) {
+      logger.warn(
+        { registeredBotId: result.botId, activeBotId: botId },
+        'platform bot id differs from the active client — services rebuild on next invocation',
+      );
+      resetServices();
+    }
     return c.json(result);
   });
 
@@ -703,7 +737,7 @@ async function scheduled(
   env: Env,
   _ctx: ExecutionContext,
 ): Promise<void> {
-  const s = getServices(env);
+  let s = await getServices(env);
   s.logger.info({ cron: controller.cron }, 'cron sweep starting');
 
   if (controller.cron === DAILY_CRON) {
@@ -716,7 +750,7 @@ async function scheduled(
   // cannot verify webhooks must not look healthy.
   if ((await s.secretStore.loadWebhookSecret()) === null) {
     s.logger.warn('no stored webhook secret — running first-run registration from cron backstop');
-    await ensureRegisteredWorkers({
+    const result = await ensureRegisteredWorkers({
       client: s.client,
       registration: {
         apiUrl: env.BOTGUILD_API_URL,
@@ -726,8 +760,20 @@ async function scheduled(
       },
       webhookBaseUrl: env.WEBHOOK_BASE_URL,
       secretStore: s.secretStore,
+      botIdStore: s.botIdStore,
       logger: s.logger,
     });
+    // Rebuild BEFORE sweeping when registration assigned a different id —
+    // otherwise this very sweep bids under the stale one and 403s (the
+    // original BOTGUILD_BOT_ID drift bug, just time-shifted to first run).
+    if (result.botId !== s.botId) {
+      s.logger.warn(
+        { registeredBotId: result.botId, activeBotId: s.botId },
+        'platform bot id differs from the active client — rebuilding services before the sweep',
+      );
+      resetServices();
+      s = await getServices(env);
+    }
   }
   await runFifteenMinuteSweep(s.sweeps);
 }
@@ -737,7 +783,7 @@ async function queue(
   env: Env,
   _ctx: ExecutionContext,
 ): Promise<void> {
-  const s = getServices(env);
+  const s = await getServices(env);
 
   // DLQ consumer: these exhausted their retries. They do NOT auto-replay — the
   // operator re-enqueues to logosmith-jobs, where the stage claims and
@@ -779,8 +825,8 @@ async function queue(
 }
 
 export default {
-  fetch: (request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> =>
-    getServices(env).app.fetch(request, env, ctx),
+  fetch: async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> =>
+    (await getServices(env)).app.fetch(request, env, ctx),
   scheduled,
   queue,
 };

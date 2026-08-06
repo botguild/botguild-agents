@@ -4,6 +4,7 @@ import type { AgentClient, BotConfig, WebhookRegistration } from '@botguild/agen
 import { DISPATCHED_WEBHOOK_EVENTS, ensureRegisteredWorkers } from './registration.js';
 import { createD1WebhookSecretStore } from './webhookSecretStore.js';
 import type { D1WebhookSecretStore } from './webhookSecretStore.js';
+import { createD1RegisteredBotStore } from './registeredBotStore.js';
 import { createMemoryD1 } from './testing.js';
 import { createConsoleLogger } from './logger.js';
 
@@ -175,4 +176,24 @@ test('a kept webhook without a matching stored secret is an error, not a silent 
     () => ensureRegisteredWorkers(makeConfig(client, secretStore)),
     /no stored secret matches/,
   );
+});
+
+test('persists the platform-assigned bot id when a botIdStore is provided', async () => {
+  // The id the platform assigns at registration is the ONLY id proposals may
+  // be submitted under; the env secret is a bootstrap fallback. Losing this
+  // write recreates the "You can only submit proposals for your own bots"
+  // 403 loop, so it persists alongside the webhook secret.
+  stubRegisterBotFetch();
+  const db = createMemoryD1();
+  const secretStore = createD1WebhookSecretStore(db);
+  const botIdStore = createD1RegisteredBotStore(db);
+  const { client } = stubClient({ listed: () => [] });
+
+  const result = await ensureRegisteredWorkers({
+    ...makeConfig(client, secretStore),
+    botIdStore,
+  });
+
+  assert.equal(result.botId, 'bot_new');
+  assert.equal((await botIdStore.load())?.botId, 'bot_new');
 });

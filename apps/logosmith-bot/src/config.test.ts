@@ -285,6 +285,7 @@ describe('migrations', () => {
       'gate_audit',
       'reputation_snapshot',
       'webhook_secret',
+      'registered_bot',
       'negotiation_countered',
     ]) {
       const row = await db
