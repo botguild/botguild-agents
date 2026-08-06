@@ -638,3 +638,39 @@ test('AgentError falls back to the status text when the body is empty', async ()
     restore();
   }
 });
+
+test('AgentError digs a string message out of a nested error object', async () => {
+  // Observed live: the platform 403s with {"error": {"code": ..., "message":
+  // ...}} — an object `error` field coerced to "[object Object]" and the
+  // refusal reason vanished again.
+  const restore = installErrorFetchMock(
+    403,
+    JSON.stringify({ error: { code: 'FORBIDDEN', message: 'bid exceeds the gig budget' } }),
+    'application/json',
+  );
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.match(err.message, /bid exceeds the gig budget/);
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('AgentError falls back to the raw JSON when no string message exists anywhere', async () => {
+  const restore = installErrorFetchMock(
+    403,
+    JSON.stringify({ error: { code: 'FORBIDDEN', details: { max: 0.2 } } }),
+    'application/json',
+  );
+  try {
+    await assert.rejects(makeClient().getGig('gig_1'), (err: Error) => {
+      assert.match(err.message, /FORBIDDEN/);
+      assert.doesNotMatch(err.message, /\[object Object\]/);
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
