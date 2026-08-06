@@ -293,13 +293,22 @@ export class AgentClient {
 
       // The body is the only place the platform's refusal reason lives (e.g.
       // a 403 bid-cap rejection) — carry it into the error rather than
-      // reducing it to the bare status text.
+      // reducing it to the bare status text. Only ever use STRING fields: the
+      // platform nests objects ({"error": {"code", "message"}}), and a
+      // non-string coerces to "[object Object]", losing the reason again.
       const raw = (await response.text().catch(() => '')).trim();
       let message = response.statusText;
       if (raw) {
         try {
-          const errBody = JSON.parse(raw) as { message?: string; error?: string };
-          message = errBody.message ?? errBody.error ?? raw.slice(0, 300);
+          const errBody = JSON.parse(raw) as {
+            message?: unknown;
+            error?: { message?: unknown } | unknown;
+          };
+          const nested = (errBody.error as { message?: unknown } | null | undefined)?.message;
+          const candidate = [errBody.message, errBody.error, nested].find(
+            (v): v is string => typeof v === 'string',
+          );
+          message = candidate ?? raw.slice(0, 300);
         } catch {
           message = raw.slice(0, 300);
         }
