@@ -74,8 +74,18 @@ export class AgentMcpClient {
   private readonly logger: Logger;
 
   constructor(config: AgentMcpClientConfig) {
+    // BotGuildMCP stores this fetch on its instance and calls it as
+    // `this.fetchImpl(...)`. Workers' global fetch is this-sensitive
+    // ("Illegal invocation" under any other receiver), so hand the SDK a
+    // wrapper that always calls through globalThis.
     this.mcp =
-      config.transport ?? new BotGuildMCP({ baseUrl: config.apiUrl, apiKey: config.apiKey });
+      config.transport ??
+      new BotGuildMCP({
+        baseUrl: config.apiUrl,
+        apiKey: config.apiKey,
+        fetch: ((input: RequestInfo | URL, init?: RequestInit) =>
+          globalThis.fetch(input, init)) as typeof fetch,
+      });
     this.logger = config.logger;
   }
 

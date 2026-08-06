@@ -11,7 +11,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
+import { createMemoryD1, createMemoryKV } from '@botguild/agent-core-workers/testing';
 import { createConsoleLogger } from '@botguild/agent-core-workers';
 import type { D1Like } from '@botguild/agent-core-workers';
 import type { AgentClient, Gig, ProposalDraft } from '@botguild/agent-core';
@@ -51,8 +51,10 @@ import {
   resolveRevisionForContract,
   resolveSelectionForContract,
   runDailySweep,
+  createKVSweepStatusStore,
   runFifteenMinuteSweep,
   type SweepServices,
+  type SweepStatus,
 } from './sweeps.js';
 import type {
   ConceptState,
@@ -2204,3 +2206,59 @@ async function rebuildRequest(h: Harness, contractId: string): Promise<void> {
   ]);
   await h.at(REBUILD_AT, () => resolveRevisionForContract(h.services, contractId));
 }
+
+// ===============================================================================
+
+describe('sweep status for /health', () => {
+  // A bid loop that 403s every sweep ran invisible for hours because /health
+  // says "ok" whenever the Worker boots. The sweep now records its outcome so
+  // the health endpoint can surface persistent failures.
+
+  it('records a healthy sweep outcome after the fifteen-minute sweep', async () => {
+    const h = await makeHarness();
+    const saved: SweepStatus[] = [];
+    h.services.sweepStatus = {
+      save: async (s) => {
+        saved.push(s);
+      },
+      load: async () => saved.at(-1) ?? null,
+    };
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.equal(saved.length, 1);
+    const status = saved[0]!;
+    assert.equal(status.at, BASE.toISOString());
+    assert.equal(status.poll?.failed, 0);
+    assert.deepEqual(status.stepFailures, []);
+  });
+
+  it('records step failures without aborting the sweep', async () => {
+    const h = await makeHarness();
+    const saved: SweepStatus[] = [];
+    h.services.sweepStatus = {
+      save: async (s) => {
+        saved.push(s);
+      },
+      load: async () => null,
+    };
+    h.breakNegotiation.value = true;
+
+    await runFifteenMinuteSweep(h.services);
+
+    assert.deepEqual(saved[0]!.stepFailures, ['negotiation']);
+    assert.equal(saved[0]!.poll?.failed, 0);
+  });
+
+  it('createKVSweepStatusStore round-trips the summary through KV', async () => {
+    const store = createKVSweepStatusStore(createMemoryKV());
+    assert.equal(await store.load(), null);
+    const status: SweepStatus = {
+      at: '2026-08-05T23:15:00.000Z',
+      poll: { listed: 2, processed: 1, skipped: 0, failed: 1 },
+      stepFailures: ['negotiation'],
+    };
+    await store.save(status);
+    assert.deepEqual(await store.load(), status);
+  });
+});

@@ -132,6 +132,16 @@ export const scorerConfig: ScorerConfig = {
 // REVERT TARGET: SEED_PRICE_USD 25 (PRD §11).
 export const SEED_PRICE_USD = 1;
 
+// The marketplace preview only accepts bids inside a platform band (observed
+// $0.10–$0.20; POST /proposals 403s a $1 bid — seen live on gig
+// 01KZ9YRD0Q48C2SRW3T6HCTVHK, 2026-08-05). Cap every paid bid at the band's
+// top: below cost-to-serve, so paid work runs at a small loss during preview
+// — accepted deliberately as reputation spend (PRD's 70+ target). The cap
+// bounds the estimator's bid AND its negotiation-floor target, plus the
+// deterministic pricingCalc fallback below.
+// REVERT TARGET: delete this cap when preview pricing lifts.
+export const PLATFORM_MAX_BID_USD = 0.2;
+
 // REVERT TARGET (PRD-era rate card): perClaudeCall 0.05, perKToken 0.01,
 // perComputeMinute 0.05, perRun 0.5, fixedOverhead 5 — against
 // `fallbackEstimate` below, applyRateCard gives 5 + 8×0.05 + 15×0.01 + 6×0.05
@@ -195,7 +205,7 @@ export function pricingCalc(gig: Gig): {
   }
 
   return {
-    price: SEED_PRICE_USD,
+    price: Math.min(SEED_PRICE_USD, PLATFORM_MAX_BID_USD),
     timeline: '2 business days',
     milestones: [
       {

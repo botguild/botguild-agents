@@ -291,12 +291,18 @@ export class AgentClient {
         }
       }
 
-      let message: string;
-      try {
-        const errBody = (await response.json()) as { message?: string };
-        message = errBody.message ?? response.statusText;
-      } catch {
-        message = response.statusText;
+      // The body is the only place the platform's refusal reason lives (e.g.
+      // a 403 bid-cap rejection) — carry it into the error rather than
+      // reducing it to the bare status text.
+      const raw = (await response.text().catch(() => '')).trim();
+      let message = response.statusText;
+      if (raw) {
+        try {
+          const errBody = JSON.parse(raw) as { message?: string; error?: string };
+          message = errBody.message ?? errBody.error ?? raw.slice(0, 300);
+        } catch {
+          message = raw.slice(0, 300);
+        }
       }
 
       throw new AgentError(response.status, message, path);

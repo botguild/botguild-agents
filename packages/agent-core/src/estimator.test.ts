@@ -281,3 +281,44 @@ test('createCostEstimator: coerces missing/invalid quantities to the fallback va
   // valid fields are kept as reported
   assert.equal(result.resources.claudeCalls, 4);
 });
+
+// --- maxPriceUsd (platform bid cap) -----------------------------------------
+// Marketplace preview only accepts bids inside a platform band (observed
+// $0.10–$0.20; a $1 bid is 403-rejected). The cap bounds BOTH the bid price
+// and the negotiation-floor target, so proposer and negotiation inherit one
+// consistent ceiling.
+
+test('bidPrice: maxPrice caps both target and price', () => {
+  // cost 0.528 → raw target round(0.792) = 1, capped to the 0.20 band
+  assert.deepEqual(bidPrice(0.528, 0.1, 1.5, 0.2), { target: 0.2, price: 0.2 });
+});
+
+test('bidPrice: a budget above the cap cannot push the price past it', () => {
+  assert.deepEqual(bidPrice(100, 400, 1.5, 0.2), { target: 0.2, price: 0.2 });
+});
+
+test('bidPrice: bids already inside the cap are untouched', () => {
+  // cost 0.1 → target round(0.15) = 0; budget 0.15 wins, still under the cap
+  assert.deepEqual(bidPrice(0.1, 0.15, 1.5, 0.2), { target: 0, price: 0.15 });
+});
+
+test('bidPrice: without maxPrice behaviour is unchanged', () => {
+  assert.deepEqual(bidPrice(100, 400), { target: 150, price: 400 });
+});
+
+test('createCostEstimator: maxPriceUsd caps the estimate price and target', async () => {
+  globalThis.fetch = (async () =>
+    jsonResponse(
+      toolUseBody({
+        claudeCalls: 12,
+        claudeKTokens: 60,
+        browserMinutes: 60,
+        computeMinutes: 60,
+        runs: 8,
+      }),
+    )) as typeof fetch;
+  const estimator = makeEstimator({ maxPriceUsd: 0.2 });
+  const result = await estimator.estimate(makeGig({ budget: 400 }));
+  assert.equal(result.price, 0.2);
+  assert.equal(result.target, 0.2);
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { AgentClient, Gig, WebhookEvent } from '@botguild/agent-core';
 import { createConsoleLogger } from '@botguild/agent-core-workers';
 import { createMemoryD1 } from '@botguild/agent-core-workers/testing';
-import { SEED_PRICE_USD, pricingCalc } from './config.js';
+import { PLATFORM_MAX_BID_USD, SEED_PRICE_USD, pricingCalc } from './config.js';
 import { buildJobKey, createJobStore } from './jobs.js';
 import { applyMigrations } from './testSupport.js';
 import { createMilestoneFundedHandler, resolveDeliverable, stageForFundedGig } from './index.js';
@@ -161,7 +161,9 @@ describe('stageForFundedGig', () => {
   });
 
   it('routes the paid gig to the concepts stage', () => {
-    assert.equal(pricingCalc(PAID_GIG).price, SEED_PRICE_USD);
+    // The paid baseline is the seed anchor bounded by the preview bid cap —
+    // nonzero either way, which is all the stage routing keys on.
+    assert.equal(pricingCalc(PAID_GIG).price, Math.min(SEED_PRICE_USD, PLATFORM_MAX_BID_USD));
     assert.equal(stageForFundedGig(PAID_GIG), 'concepts');
   });
 });
