@@ -86,8 +86,13 @@ jobs:
           fi
           body="$(curl -sfS --retry 5 --retry-delay 5 --retry-all-errors "$url/health")"
           echo "$body"
-          echo "$body" | grep -q '"botId": *"bot-logosmith"' || {
-            echo "/health body did not contain botId bot-logosmith" >&2
+          # The active bot id is the PLATFORM-assigned ULID resolved from D1
+          # at boot (BOTGUILD_BOT_ID is a bootstrap-only fallback), so it is
+          # deliberately not a committed constant — assert the shape, not a
+          # hardcoded name. "bot-logosmith" here broke the first post-fix
+          # deploy's smoke while the deploy itself had succeeded.
+          echo "$body" | grep -Eq '"botId": *"[A-Za-z0-9_-]+"' || {
+            echo "/health body did not contain a non-empty botId" >&2
             exit 1
           }
           echo "$body" | grep -q '"status": *"ok"' || {
