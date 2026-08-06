@@ -16,6 +16,7 @@ import {
   OCR_SIMILARITY_THRESHOLD,
   RECRAFT_CREDITS_PER_USD,
   REVISION_POLL_MAX_DAYS,
+  PLATFORM_MAX_BID_USD,
   SEED_PRICE_USD,
   VECTORIZER_CREDITS_PER_USD,
   botProfile,
@@ -50,10 +51,28 @@ describe('config', () => {
     // revert-to-$25 regression fails here rather than passing silently.
     assert.equal(SEED_PRICE_USD, 1);
     const quote = pricingCalc({ id: 'g1', description: '', budget: 1 } as never);
-    assert.equal(quote.price, SEED_PRICE_USD);
+    // The paid baseline is the seed anchor bounded by the preview bid cap.
+    assert.equal(quote.price, Math.min(SEED_PRICE_USD, PLATFORM_MAX_BID_USD));
     assert.equal(quote.milestones.length, 2);
     // Milestones are checkpoints, not payment slices — no per-milestone amount.
     assert.ok(!('amount' in quote.milestones[0]!));
+  });
+
+
+  it('caps every paid bid at the platform preview maximum', () => {
+    // The marketplace preview only accepts bids in a $0.10–$0.20 band — a $1
+    // bid is 403-rejected (observed live, gig 01KZ9YRD0Q48C2SRW3T6HCTVHK).
+    assert.equal(PLATFORM_MAX_BID_USD, 0.2);
+    const quote = pricingCalc({ id: 'g1', description: '', budget: 0.1 } as never);
+    assert.ok(
+      quote.price <= PLATFORM_MAX_BID_USD,
+      `paid baseline ${quote.price} exceeds the platform cap`,
+    );
+  });
+
+  it('the free shapes still price at exactly zero under the cap', () => {
+    const taster = pricingCalc({ id: 'g2', description: 'logo please', budget: 0 } as never);
+    assert.equal(taster.price, 0);
   });
 
   it('recalibrates the budget-score window to the live market', () => {

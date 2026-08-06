@@ -71,13 +71,20 @@ export function applyRateCard(est: ResourceEstimate, card: RateCard): number {
 //   target = round(markup × cost)   — our firm minimum, no floor/clamp
 //   price  = max(target, gigBudget) — bid the target, or align up to the gig's
 //                                     budget when it already pays more
+// An optional maxPrice bounds BOTH numbers: some marketplaces reject bids
+// above a platform ceiling (BotGuild preview 403s anything over its band), so
+// the bid must land inside it and the negotiation floor must follow — holding
+// a floor above the cap would reject every counter the platform allows.
 export function bidPrice(
   cost: number,
   gigBudget: number,
   markup = 1.5,
+  maxPrice?: number,
 ): { target: number; price: number } {
-  const target = Math.round(markup * cost);
-  return { target, price: Math.max(target, gigBudget) };
+  const rawTarget = Math.round(markup * cost);
+  const target = maxPrice === undefined ? rawTarget : Math.min(rawTarget, maxPrice);
+  const price = Math.max(target, gigBudget);
+  return { target, price: maxPrice === undefined ? price : Math.min(price, maxPrice) };
 }
 
 export interface CostEstimatorConfig {
@@ -90,6 +97,11 @@ export interface CostEstimatorConfig {
   fallbackEstimate: ResourceEstimate;
   /** Bid multiplier over estimated cost. Defaults to 1.5. */
   markup?: number;
+  /**
+   * Platform ceiling on bids (e.g. the marketplace preview band's top).
+   * Caps both the bid price and the negotiation-floor target.
+   */
+  maxPriceUsd?: number;
   logger: Logger;
 }
 
@@ -198,7 +210,7 @@ export function createCostEstimator(config: CostEstimatorConfig): CostEstimator 
     gigBudget: number,
   ): CostResult {
     const cost = applyRateCard(resources, config.rateCard);
-    const { target, price } = bidPrice(cost, gigBudget, markup);
+    const { target, price } = bidPrice(cost, gigBudget, markup, config.maxPriceUsd);
     return { resources, cost, target, price, markup, source };
   }
 

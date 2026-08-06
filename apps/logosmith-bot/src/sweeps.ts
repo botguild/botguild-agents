@@ -32,6 +32,8 @@ import {
   runNegotiationSweep,
   type D1Like,
   type D1NegotiationStore,
+  type GigPollSweepResult,
+  type KVLike,
   type SeenStore,
 } from '@botguild/agent-core-workers';
 import { parseFaviconBrief, resolveBrief } from './brief.js';
@@ -133,6 +135,51 @@ export interface SweepServices extends SelectionResolutionDeps {
    * one decision this seam exists to make.
    */
   briefExtractor: ProseBriefExtractor;
+  /**
+   * Where the 15-minute sweep records its outcome for /health. Optional so
+   * the sweep still runs without one wired; index.ts always provides it.
+   */
+  sweepStatus?: SweepStatusStore;
+}
+
+// --- Sweep status (for /health) ----------------------------------------------
+// A bid loop that 403'd every sweep ran invisible for hours because /health
+// only proves the Worker boots. The sweep writes its outcome here; healthExtra
+// reads it back, so persistent sweep failures show up where humans look.
+
+export interface SweepStatus {
+  /** ISO timestamp of the sweep that wrote this. */
+  at: string;
+  /** Poll counts (failed > 0 means a gig errored and will retry) — null if the poll step itself threw. */
+  poll: GigPollSweepResult | null;
+  /** Names of sweep steps whose top-level try/catch fired. */
+  stepFailures: string[];
+}
+
+export interface SweepStatusStore {
+  save(status: SweepStatus): Promise<void>;
+  load(): Promise<SweepStatus | null>;
+}
+
+const SWEEP_STATUS_KEY = 'health:last-sweep';
+
+// KV, not D1: this is observability, not correctness — best-effort by design,
+// same rationale as the KV seen-store.
+export function createKVSweepStatusStore(kv: KVLike): SweepStatusStore {
+  return {
+    async save(status: SweepStatus): Promise<void> {
+      await kv.put(SWEEP_STATUS_KEY, JSON.stringify(status));
+    },
+    async load(): Promise<SweepStatus | null> {
+      const raw = await kv.get(SWEEP_STATUS_KEY);
+      if (raw === null) return null;
+      try {
+        return JSON.parse(raw) as SweepStatus;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 const clockOf = (deps: { now?: () => Date }): (() => Date) => deps.now ?? ((): Date => new Date());
@@ -1334,14 +1381,18 @@ async function sweepParkedJobs(s: SweepServices): Promise<void> {
  * snapshot.
  */
 export async function runFifteenMinuteSweep(s: SweepServices): Promise<void> {
+  let poll: GigPollSweepResult | null = null;
+  const stepFailures: string[] = [];
+
   try {
-    await runGigPollSweep({
+    poll = await runGigPollSweep({
       client: s.client,
       seen: s.seen,
       onGig: (gig) => maybePropose(s, gig),
       logger: s.logger,
     });
   } catch (err) {
+    stepFailures.push('gig-poll');
     s.logger.error({ err }, 'sweep: gig poll/propose step failed; continuing');
   }
 
@@ -1357,18 +1408,21 @@ export async function runFifteenMinuteSweep(s: SweepServices): Promise<void> {
       logger: s.logger,
     });
   } catch (err) {
+    stepFailures.push('negotiation');
     s.logger.error({ err }, 'sweep: negotiation step failed; continuing');
   }
 
   try {
     await pollSelections(s);
   } catch (err) {
+    stepFailures.push('selection-poll');
     s.logger.error({ err }, 'sweep: selection poll step failed; continuing');
   }
 
   try {
     await sweepParkedJobs(s);
   } catch (err) {
+    stepFailures.push('parked-jobs');
     s.logger.error({ err }, 'sweep: parked-job step failed; continuing');
   }
 
@@ -1376,7 +1430,15 @@ export async function runFifteenMinuteSweep(s: SweepServices): Promise<void> {
     const snapshot = await refreshReputationOnce({ source: s.reputationSource, logger: s.logger });
     if (snapshot) await saveReputationSnapshot(s.db, snapshot, clockOf(s)());
   } catch (err) {
+    stepFailures.push('reputation-refresh');
     s.logger.error({ err }, 'sweep: reputation-refresh step failed; continuing');
+  }
+
+  // Status write is best-effort: observability must never fail the sweep.
+  try {
+    await s.sweepStatus?.save({ at: clockOf(s)().toISOString(), poll, stepFailures });
+  } catch (err) {
+    s.logger.warn({ err }, 'sweep: could not record sweep status for /health');
   }
 }
 

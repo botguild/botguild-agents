@@ -73,7 +73,14 @@ import type { Hono } from 'hono';
 //    experiment — dynamic imports get inlined into the single-file Workers
 //    bundle) — reverified here by `wrangler deploy --dry-run` (see the task
 //    report for the resulting bundle numbers).
-import { HAIKU_MODEL_ID, botProfile, fallbackEstimate, pricingCalc, rateCard } from './config.js';
+import {
+  HAIKU_MODEL_ID,
+  PLATFORM_MAX_BID_USD,
+  botProfile,
+  fallbackEstimate,
+  pricingCalc,
+  rateCard,
+} from './config.js';
 import { createDisputeResponder, type DisputeResponder } from './disputes.js';
 import {
   buildJobKey,
@@ -92,6 +99,7 @@ import { processJobMessage, type PipelineConfig } from './pipeline.js';
 import { createSelectionInferrer, type SelectionInferrer } from './inferSelection.js';
 import { createProseBriefExtractor } from './proseBrief.js';
 import {
+  createKVSweepStatusStore,
   resolveSelectionForContract,
   runDailySweep,
   runFifteenMinuteSweep,
@@ -362,6 +370,7 @@ function getServices(env: Env): Services {
     botDescription: botProfile.bio,
     rateCard,
     fallbackEstimate,
+    maxPriceUsd: PLATFORM_MAX_BID_USD,
     logger,
   });
   const proposerProfile = {
@@ -449,6 +458,7 @@ function getServices(env: Env): Services {
     concepts,
     selection,
     seen: createKVSeenStore(env.CACHE),
+    sweepStatus: createKVSweepStatusStore(env.CACHE),
     negotiationStore: createD1NegotiationStore(env.DB),
     reputationSource: mcpClient,
     proposer,
@@ -612,7 +622,16 @@ function buildApp(
     },
     healthExtra: async () => {
       const reputation = await loadReputationSnapshot(env.DB).catch(() => null);
-      return reputation ? { reputation } : {};
+      // Last cron sweep's outcome: failed > 0 or a non-empty stepFailures
+      // means something is erroring and retrying — the signal /health existed
+      // to carry but didn't when the 403 bid loop ran invisible for hours.
+      const lastSweep = await createKVSweepStatusStore(env.CACHE)
+        .load()
+        .catch(() => null);
+      return {
+        ...(reputation ? { reputation } : {}),
+        ...(lastSweep ? { lastSweep } : {}),
+      };
     },
   });
 
