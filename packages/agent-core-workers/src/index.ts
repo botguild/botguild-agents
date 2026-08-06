@@ -7,6 +7,7 @@ export * from './webhookApp.js';
 export * from './ownership.js';
 export * from './pollSweep.js';
 export * from './webhookSecretStore.js';
+export * from './registeredBotStore.js';
 export * from './registration.js';
 export * from './negotiationStore.js';
 export * from './reputation.js';

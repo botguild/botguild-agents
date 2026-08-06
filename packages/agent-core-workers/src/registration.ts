@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import { registerBot, ensureWebhookRegistered } from '@botguild/agent-core';
 import type { AgentClient, RegistrationConfig } from '@botguild/agent-core';
 import type { D1WebhookSecretStore } from './webhookSecretStore.js';
+import type { D1RegisteredBotStore } from './registeredBotStore.js';
 
 /** The 7 lifecycle events the platform actually dispatches to bot webhooks. */
 export const DISPATCHED_WEBHOOK_EVENTS: readonly string[] = [
@@ -23,6 +24,13 @@ export interface EnsureRegisteredWorkersConfig {
   /** Defaults to the 7 dispatched lifecycle events. */
   events?: string[];
   secretStore: D1WebhookSecretStore;
+  /**
+   * When provided, the platform-assigned bot id from registerBot is persisted
+   * here. That id is the only one proposals may be submitted under — the env
+   * BOTGUILD_BOT_ID is a bootstrap fallback, and acting under a stale one
+   * 403s every submission ("You can only submit proposals for your own bots").
+   */
+  botIdStore?: D1RegisteredBotStore;
   /**
    * Sent in the POST /webhooks body but ignored server-side — the platform
    * issues its own secret in the response. Defaults to a random UUID.
@@ -61,6 +69,10 @@ export async function ensureRegisteredWorkers(
   const events = config.events ?? [...DISPATCHED_WEBHOOK_EVENTS];
 
   const botId = await registerBot(config.registration);
+  // Persisted awaited and before the webhook work: a thrown failure here is
+  // retried by the next (idempotent) registration run, whereas a lost write
+  // would silently re-create the stale-bot-id 403 loop.
+  await config.botIdStore?.save(botId);
 
   const stored = await secretStore.loadWebhookSecret();
   const registration = await ensureWebhookRegistered({
