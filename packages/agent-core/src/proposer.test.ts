@@ -100,7 +100,9 @@ test('uses the Claude cover note when generation succeeds', async () => {
     pricingCalc,
     logger: silentLogger,
   });
-  const draft = await proposer.generateProposal(makeGig());
+  // warrantyRequired: the profile-sourced offer below only applies to gigs
+  // that ask for a warranty.
+  const draft = await proposer.generateProposal(makeGig({ warrantyRequired: true }));
 
   assert.deepEqual(draft.assumptions, [
     'I will poll your status page every minute and alert on downtime.',
@@ -155,7 +157,7 @@ test('falls back when the Claude request errors', async () => {
     pricingCalc,
     logger: silentLogger,
   });
-  const draft = await proposer.generateProposal(makeGig());
+  const draft = await proposer.generateProposal(makeGig({ warrantyRequired: true }));
 
   assert.equal(draft.assumptions?.length, 1);
   assert.match(draft.assumptions![0], /Ops & Automation/);
@@ -238,4 +240,55 @@ test('omits warrantyOffer when the profile has no warranty terms', async () => {
   const draft = await proposer.generateProposal(makeGig());
 
   assert.equal(draft.warrantyOffer, undefined);
+});
+
+// --- warranty gating on the gig's own requirement ----------------------------
+// A warranty offer on a proposal makes the platform attach its standard
+// (4-week) warrantyExpires window to the resulting contract — even when the
+// gig said "warranty: not required" (observed live on contract
+// 01KZBQE99RPWQ33Q9KK6JK2XHM). Offer the profile's terms only when the gig
+// asks for a warranty; the cover-note prompt must not advertise one otherwise
+// (the CACHED system prompt still contains the profile's warranty pitch, so
+// the per-gig user message carries the suppression).
+
+test('offers no warranty when the gig does not require one', async () => {
+  const captured: string[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    captured.push(typeof init?.body === 'string' ? init.body : '');
+    return jsonResponse(messageBody('A concrete note.'));
+  }) as typeof globalThis.fetch;
+
+  const proposer = createProposer({
+    apiKey: 'test-key',
+    botProfile,
+    pricingCalc,
+    logger: silentLogger,
+  });
+  const draft = await proposer.generateProposal(makeGig({ warrantyRequired: false }));
+
+  assert.equal(draft.warrantyOffer, undefined);
+  const userContent = (JSON.parse(captured[0]!) as { messages: { content: string }[] }).messages[0]!
+    .content;
+  assert.match(userContent, /does not require a warranty/i);
+});
+
+test('offers the profile warranty when the gig requires one', async () => {
+  const captured: string[] = [];
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    captured.push(typeof init?.body === 'string' ? init.body : '');
+    return jsonResponse(messageBody('A concrete note.'));
+  }) as typeof globalThis.fetch;
+
+  const proposer = createProposer({
+    apiKey: 'test-key',
+    botProfile,
+    pricingCalc,
+    logger: silentLogger,
+  });
+  const draft = await proposer.generateProposal(makeGig({ warrantyRequired: true }));
+
+  assert.equal(draft.warrantyOffer, '14-day selector-fix window.');
+  const userContent = (JSON.parse(captured[0]!) as { messages: { content: string }[] }).messages[0]!
+    .content;
+  assert.doesNotMatch(userContent, /does not require a warranty/i);
 });
