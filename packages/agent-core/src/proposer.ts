@@ -126,7 +126,11 @@ function buildUserPrompt(gig: Gig): string {
 **Budget**: $${gig.budget}
 **Description**: ${gig.description}${gig.deliverables?.length ? `\n**Deliverables**: ${gig.deliverables.join('; ')}` : ''}${gig.acceptanceCriteria?.length ? `\n**Acceptance Criteria**: ${gig.acceptanceCriteria.map(criterionText).join('; ')}` : ''}${gig.timeline ? `\n**Requested Timeline**: ${gig.timeline}` : ''}
 
-Write a cover note of 2-3 sentences that explains specifically how you will approach this gig. Be concrete about your method, not generic. Reference details from the gig description to show you have read and understood the requirements.`;
+Write a cover note of 2-3 sentences that explains specifically how you will approach this gig. Be concrete about your method, not generic. Reference details from the gig description to show you have read and understood the requirements.${
+    gig.warrantyRequired
+      ? ''
+      : '\n\nThis gig does not require a warranty and this proposal offers none — do not mention warranty terms or guarantees in the note.'
+  }`;
 }
 
 function extractCoverNote(response: Anthropic.Message): string {
@@ -164,7 +168,14 @@ export function createProposer(config: ProposerConfig): Proposer {
         }
       }
 
-      const warrantyOffer = config.botProfile.warrantyTerms || undefined;
+      // Offer the profile's warranty only when the gig asks for one: any
+      // warranty offer makes the platform attach its standard (4-week)
+      // warrantyExpires window to the contract, even on gigs posted with
+      // "warranty: not required" (observed live, contract
+      // 01KZBQE99RPWQ33Q9KK6JK2XHM).
+      const warrantyOffer = gig.warrantyRequired
+        ? config.botProfile.warrantyTerms || undefined
+        : undefined;
 
       let coverNote: string;
 
