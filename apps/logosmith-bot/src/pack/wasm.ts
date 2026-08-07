@@ -9,14 +9,14 @@
 // (./wasm.node.ts), the Worker passes its bundled `.wasm` imports — so this
 // module never references a runtime-specific API (no `node:*` imports here).
 //
-// Deviation from the plan (verified, not guessed): esm-potrace-wasm@0.5.0
-// embeds its compiled wasm inside dist/index.js instead of shipping a separate
-// `.wasm` file — `node_modules/esm-potrace-wasm/dist/` contains only
-// `index.js` + `index.d.ts`, and the published `.d.ts` types `init` as
-// `(): Promise<void>`, matching the README's `await init();` with no argument.
-// There is nothing to compile or inject, so `ensurePotraceReady`'s `source`
-// parameter is optional and unused — kept only so callers see the same shape
-// as `ensureResvgReady` and `WasmSources` stays uniform between the two.
+// esm-potrace-wasm@0.5.0 embeds its compiled wasm inside dist/index.js as an
+// inline byte string instead of shipping a separate `.wasm` file. Deployed
+// Workers ban compiling wasm from bytes, so `src/pack/potrace.wasm` holds the
+// extracted module (captured via an instantiate intercept in Node) and
+// `ensurePotraceReady`'s `source` parameter — once a never-called
+// shape-symmetry stub — now injects it through the hook added by
+// patches/esm-potrace-wasm.patch. Node callers may still omit the source and
+// use the package's inline bytes.
 //
 // The import below is dynamic, not static, and deliberately so: dist/index.js
 // is Emscripten "MODULARIZE" glue mislabelled as an ESM build — its Node-
@@ -54,18 +54,73 @@ export function ensureResvgReady(source: ResvgWasmSource): Promise<void> {
 let potraceReady: Promise<void> | undefined;
 
 /**
- * Initialize the potrace tracer wasm once per isolate.
- *
- * esm-potrace-wasm has no separate `.wasm` file to inject (see module header),
- * so `source` is accepted only for interface symmetry with `ensureResvgReady`
- * and is never called. The package itself is imported dynamically and lazily
- * — see module header — so this only touches potrace's module-scope code
- * when a caller actually asks for it.
+ * Initialize the potrace tracer wasm once per isolate. When a `source` is
+ * provided (the Worker's bundled module; Node's compiled potrace.wasm), it is
+ * injected through the patched glue's instantiation hook — required in
+ * production, where compiling the package's inline bytes is banned. The
+ * package is imported dynamically and lazily — see module header — so this
+ * only touches potrace's module-scope code when a caller actually asks.
  */
 export function ensurePotraceReady(source?: PotraceWasmSource): Promise<void> {
-  void source;
-  potraceReady ??= importPotraceWithHostShims().then((mod) => mod.init());
+  potraceReady ??= initPotrace(source).catch((err: unknown) => {
+    // A failed init must not poison the isolate forever — clear the memo so
+    // the queue's retry (a later invocation, possibly after a deploy) can
+    // try again instead of replaying a cached rejection.
+    potraceReady = undefined;
+    throw err;
+  });
   return potraceReady;
+}
+
+/**
+ * Initialize potrace, preferring a pre-compiled wasm module when a source is
+ * provided. Deployed Workers PROHIBIT compiling wasm from bytes ("code
+ * generation disallowed"), and the glue's inline-bytes compile is exactly
+ * that — worse, its unpatched `init()` had no rejection path, so the failed
+ * compile HUNG the vector stage until the 15-minute wall-time kill (observed
+ * live, contract 01KZBQE99RPWQ33Q9KK6JK2XHM). patches/esm-potrace-wasm.patch
+ * adds a `globalThis.__POTRACE_INSTANTIATE_WASM__` hook (honored before the
+ * inline path) and an `onAbort` rejection; the Worker passes the bundled
+ * `src/pack/potrace.wasm` module through `source`, while Node callers may
+ * omit it and use the inline bytes as before.
+ */
+async function initPotrace(source?: PotraceWasmSource): Promise<void> {
+  const globals = globalThis as { __POTRACE_INSTANTIATE_WASM__?: unknown };
+  if (source) {
+    const module = await source();
+    globals.__POTRACE_INSTANTIATE_WASM__ = (
+      imports: WebAssembly.Imports,
+      done: (instance: WebAssembly.Instance) => void,
+    ): void => {
+      // Instantiating a compiled module is the one wasm path Workers allow.
+      // A rejection here surfaces via the init timeout below — the glue's
+      // hook contract has no error callback.
+      void WebAssembly.instantiate(module, imports).then(done);
+    };
+  }
+  try {
+    const mod = await importPotraceWithHostShims();
+    // Belt and braces: the patched glue rejects on abort, but ANY future
+    // silent-hang mode must still fail loudly rather than burn a 15-minute
+    // wall-time kill with no log line.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        mod.init(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new Error('potrace init did not complete within 30s — treating as failed')),
+            30_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    delete globals.__POTRACE_INSTANTIATE_WASM__;
+  }
 }
 
 /**

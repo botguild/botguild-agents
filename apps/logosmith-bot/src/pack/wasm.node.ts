@@ -2,12 +2,12 @@
 // from node_modules and compile them. NEVER import this from Worker code —
 // the Worker passes its own bundled `.wasm` imports as sources.
 //
-// esm-potrace-wasm has no separate `.wasm` file to resolve (verified: its
-// `dist/` directory ships only `index.js` + `index.d.ts` — the wasm is
-// embedded in the JS bundle, and `init()` takes no argument). The `potrace`
-// source below is therefore a documented stub: `ensurePotraceReady` (in
-// ./wasm.ts) never calls it, so it exists only to satisfy the `WasmSources`
-// shape and fails loudly if that ever changes.
+// esm-potrace-wasm ships no separate `.wasm` file (its wasm is embedded in
+// dist/index.js as inline bytes) — but deployed Workers ban compiling wasm
+// from bytes, so `src/pack/potrace.wasm` holds the extracted module and
+// `ensurePotraceReady(source)` injects it via the patched glue's hook (see
+// ./wasm.ts and patches/esm-potrace-wasm.patch). The `potrace` source below
+// compiles that same file so Node runs the identical injected-module path.
 
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -60,11 +60,11 @@ export function nodeWasmSources(): WasmSources {
   shimPotraceCommonJsGlobals();
   return {
     resvg: () => compile('@resvg/resvg-wasm/index_bg.wasm'),
-    potrace: () => {
-      throw new Error(
-        'esm-potrace-wasm embeds its wasm bytes — there is no potrace.wasm file to ' +
-          'compile, and ensurePotraceReady() never calls this source.',
-      );
-    },
+    // The wasm extracted from the package's inline bytes (deployed Workers
+    // ban compile-from-bytes, so production injects this file as a bundled
+    // module — see ensurePotraceReady). Compiling the same file here means
+    // Node tests exercise the identical injected-module path.
+    potrace: async () =>
+      WebAssembly.compile(await readFile(new URL('./potrace.wasm', import.meta.url))),
   };
 }

@@ -49,5 +49,10 @@
   "workspaces": [
     "packages/*",
     "apps/*"
-  ]
+  ],
+  "pnpm": {
+    "patchedDependencies": {
+      "esm-potrace-wasm": "patches/esm-potrace-wasm.patch"
+    }
+  }
 }

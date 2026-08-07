@@ -447,17 +447,14 @@ async function buildServices(env: Env): Promise<Services> {
     // the specifier is a literal string.
     sources: {
       resvg: () => import('@resvg/resvg-wasm/index_bg.wasm').then((mod) => mod.default),
-      // esm-potrace-wasm has no separate `.wasm` file to import (see the
-      // header comment above) — ensurePotraceReady() never calls this
-      // source, so it exists only to satisfy the WasmSources shape and fails
-      // loudly if that assumption ever changes. Mirrors nodeWasmSources()'s
-      // identical stub in pack/wasm.node.ts.
-      potrace: () => {
-        throw new Error(
-          'esm-potrace-wasm embeds its wasm bytes — there is no potrace.wasm file to import, ' +
-            'and ensurePotraceReady() never calls this source.',
-        );
-      },
+      // The wasm extracted from esm-potrace-wasm's inline bytes, bundled by
+      // wrangler as a static CompiledWasm module. Deployed Workers ban
+      // compiling wasm from bytes, and the package's own inline-bytes path
+      // therefore HUNG init() until the 15-minute wall-time kill (observed
+      // live, 2026-08-07) — ensurePotraceReady injects this module through
+      // the patched glue's hook instead. See pack/wasm.ts and
+      // patches/esm-potrace-wasm.patch.
+      potrace: () => import('./pack/potrace.wasm').then((mod) => mod.default),
     },
     secrets: {
       moderationApiKey: env.MODERATION_API_KEY,
