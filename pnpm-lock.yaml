@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  esm-potrace-wasm:
+    hash: sm6mgtsyfebtsywon6di6sbl24
+    path: patches/esm-potrace-wasm.patch
+
 importers:
 
   .:
@@ -175,7 +180,7 @@ importers:
         version: 2.6.2
       esm-potrace-wasm:
         specifier: ^0.5.0
-        version: 0.5.0
+        version: 0.5.0(patch_hash=sm6mgtsyfebtsywon6di6sbl24)
       fflate:
         specifier: ^0.8.2
         version: 0.8.3
@@ -3004,7 +3009,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  esm-potrace-wasm@0.5.0: {}
+  esm-potrace-wasm@0.5.0(patch_hash=sm6mgtsyfebtsywon6di6sbl24): {}
 
   espree@11.2.0:
     dependencies:

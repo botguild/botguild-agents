@@ -9,6 +9,8 @@ FROM node:22-slim AS deps
 WORKDIR /app
 RUN npm install -g pnpm@9.15.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml* ./
+# pnpm-lock.yaml registers patchedDependencies; install fails without the patch files.
+COPY patches ./patches/
 COPY packages/agent-core/package.json ./packages/agent-core/
 COPY apps/sentinel-bot/package.json ./apps/sentinel-bot/
 RUN pnpm install --frozen-lockfile --filter @botguild/sentinel-bot...
